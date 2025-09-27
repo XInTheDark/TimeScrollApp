@@ -11,6 +11,7 @@ struct TimelineUnifiedView: View {
     @State private var startDate: Date? = nil
     @State private var endDate: Date? = nil
     @State private var keyMonitor: Any? = nil
+    @State private var showingResults: Bool = false
 
     private let minMsPerPt: Double = 1_000
     private let maxMsPerPt: Double = 3_600_000
@@ -28,6 +29,8 @@ struct TimelineUnifiedView: View {
             appState.enforceRetention()
             model.load()
             installKeyMonitor()
+            // Keep the text field in sync with the applied model query
+            query = model.query
         }
         .onDisappear { removeKeyMonitor() }
         .onChange(of: appState.lastSnapshotURL) { _ in
@@ -41,6 +44,20 @@ struct TimelineUnifiedView: View {
                     model.selectedIndex = idx
                 }
             }
+        }
+        // If the user clears the search field, automatically return to timeline
+        .onChange(of: query) { newVal in
+            let trimmed = newVal.trimmingCharacters(in: .whitespacesAndNewlines)
+            if trimmed.isEmpty && showingResults {
+                // Clear applied query on the model and reload latest
+                model.query = ""
+                model.load()
+                showingResults = false
+            }
+        }
+        // Keep text field reflecting the currently applied model query (e.g. after programmatic changes)
+        .onChange(of: model.query) { newVal in
+            if query != newVal { query = newVal }
         }
         .frame(minWidth: 1000, minHeight: 700)
     }
@@ -69,10 +86,12 @@ struct TimelineUnifiedView: View {
 
             Divider().frame(height: 18)
 
+            // Keep search field a sensible size; don't let it expand endlessly
             TextField("Search snapshots", text: $query)
                 .textFieldStyle(.roundedBorder)
+                .frame(minWidth: 220, maxWidth: 340)
                 .submitLabel(.search)
-                .onSubmit { applyFiltersAndLoad() }
+                .onSubmit { showResults() }
 
             Button(showFilters ? "Hide Filters" : "Filters") {
                 showFilters.toggle()
@@ -80,14 +99,28 @@ struct TimelineUnifiedView: View {
 
             if showFilters { filtersPanel }
 
-            Button("Go") { applyFiltersAndLoad() }
-                .keyboardShortcut(.return)
+            Menu("Search") {
+                Button("Show Results") { showResults() }
+                    // Explicitly no modifiers so menu shows plain Return (↩)
+                    .keyboardShortcut(.return, modifiers: [])
+                Button("Search & Jump") { searchAndJump() }
+                    .keyboardShortcut(.return, modifiers: [.command])
+            } primaryAction: {
+                showResults()
+            }
+            .menuStyle(.borderedButton)
+            // Make the pull‑down size to its label only
+            .fixedSize()
+            .controlSize(.regular)
 
             Spacer()
 
             // Zoom controls
             HStack(spacing: 6) {
-                Button("−") { model.msPerPoint = max(minMsPerPt, model.msPerPoint / 2) }
+                Button(action: { model.msPerPoint = max(minMsPerPt, model.msPerPoint / 2) }) {
+                    Image(systemName: "minus")
+                }
+                .buttonStyle(.bordered)
                 Slider(value: Binding(get: {
                     // Map msPerPoint to 0...1 for slider
                     let clamped = min(max(model.msPerPoint, minMsPerPt), maxMsPerPt)
@@ -96,7 +129,10 @@ struct TimelineUnifiedView: View {
                     model.msPerPoint = minMsPerPt + v * (maxMsPerPt - minMsPerPt)
                 }))
                 .frame(width: 140)
-                Button("+") { model.msPerPoint = min(maxMsPerPt, model.msPerPoint * 2) }
+                Button(action: { model.msPerPoint = min(maxMsPerPt, model.msPerPoint * 2) }) {
+                    Image(systemName: "plus")
+                }
+                .buttonStyle(.bordered)
             }
 
             Toggle("Live", isOn: $model.followLatest)
@@ -123,8 +159,37 @@ struct TimelineUnifiedView: View {
     private var centerStage: some View {
         ZStack {
             // Use the applied model.query (not the in-flight text field value)
-            SnapshotStageView(model: model, globalQuery: model.query)
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            Group {
+                if showingResults {
+                    SearchResultsView(query: model.query,
+                                      appBundleId: model.selectedAppBundleId,
+                                      startMs: model.startMs,
+                                      endMs: model.endMs,
+                                      onOpen: { row, absIndex in
+                                          // Ensure timeline has enough items to include selection
+                                          let limitNeeded = max(absIndex + 1, 50)
+                                          model.load(limit: limitNeeded)
+                                          if let idx = model.metas.firstIndex(where: { $0.id == row.id }) {
+                                              model.selectedIndex = idx
+                                          } else {
+                                              model.selectedIndex = model.metas.isEmpty ? -1 : 0
+                                          }
+                                          showingResults = false
+                                      },
+                                      onClose: {
+                                          // Closing search should restore the timeline view
+                                          // Keep the applied query so timeline can remain filtered if desired
+                                          model.load()
+                                          showingResults = false
+                                      })
+                        // Remount the results view when filters change to avoid stale local state
+                        .id("\(model.query)|\(model.selectedAppBundleId ?? "_")|\(model.startMs ?? -1)|\(model.endMs ?? -1)")
+                        .environmentObject(settings)
+                } else {
+                    SnapshotStageView(model: model, globalQuery: model.query)
+                }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         .frame(minHeight: 480)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -146,19 +211,38 @@ struct TimelineUnifiedView: View {
         }
     }
 
-    private func applyFiltersAndLoad() {
+    private func applyFilters() {
         model.query = query
         model.startMs = startDate.map { Int64($0.timeIntervalSince1970 * 1000) }
         model.endMs = endDate.map { Int64($0.timeIntervalSince1970 * 1000) }
+    }
+
+    private func showResults() {
+        applyFilters()
+        // Keep model.metas in sync so navigation uses the same result set
         model.load()
+        showingResults = true
+    }
+
+    private func searchAndJump() {
+        applyFilters()
+        model.load()
+        showingResults = false
     }
 
     private func installKeyMonitor() {
         keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
-            if event.modifierFlags.contains(.command) || event.modifierFlags.contains(.option) || event.modifierFlags.contains(.control) {
+            // If typing in the search field (NSTextView), intercept Cmd+Return to run Search & Jump
+            if let first = NSApp.keyWindow?.firstResponder, first is NSTextView {
+                // keyCode 36 = Return, 76 = keypad Enter
+                if (event.keyCode == 36 || event.keyCode == 76) && event.modifierFlags.contains(.command) {
+                    searchAndJump()
+                    return nil
+                }
                 return event
             }
-            if let first = NSApp.keyWindow?.firstResponder, first is NSTextView {
+            // Ignore other modified keypresses
+            if event.modifierFlags.contains(.command) || event.modifierFlags.contains(.option) || event.modifierFlags.contains(.control) {
                 return event
             }
             switch event.keyCode {

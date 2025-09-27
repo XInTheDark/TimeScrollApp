@@ -101,8 +101,7 @@ struct TimelineUnifiedView: View {
 
             Menu("Search") {
                 Button("Show Results") { showResults() }
-                    // Explicitly no modifiers so menu shows plain Return (↩)
-                    .keyboardShortcut(.return, modifiers: [])
+                // Keep Cmd+Return for power users; plain Return should not be global
                 Button("Search & Jump") { searchAndJump() }
                     .keyboardShortcut(.return, modifiers: [.command])
             } primaryAction: {

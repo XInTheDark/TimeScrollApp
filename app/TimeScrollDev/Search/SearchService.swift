@@ -4,12 +4,12 @@ import Foundation
 final class SearchService {
     func latestMetas(limit: Int = 1000,
                      offset: Int = 0,
-                     appBundleId: String? = nil,
+                     appBundleIds: [String]? = nil,
                      startMs: Int64? = nil,
                      endMs: Int64? = nil) -> [SnapshotMeta] {
         return (try? DB.shared.latestMetas(limit: limit,
                                            offset: offset,
-                                           appBundleId: appBundleId,
+                                           appBundleIds: appBundleIds,
                                            startMs: startMs,
                                            endMs: endMs)) ?? []
     }
@@ -50,14 +50,14 @@ final class SearchService {
 
     func searchMetas(_ query: String,
                      fuzziness: SettingsStore.Fuzziness,
-                     appBundleId: String? = nil,
+                     appBundleIds: [String]? = nil,
                      startMs: Int64? = nil,
                      endMs: Int64? = nil,
                      limit: Int = 1000,
                      offset: Int = 0) -> [SnapshotMeta] {
         let fts = ftsQuery(for: query, fuzziness: fuzziness)
         return (try? DB.shared.searchMetas(fts,
-                                           appBundleId: appBundleId,
+                                           appBundleIds: appBundleIds,
                                            startMs: startMs,
                                            endMs: endMs,
                                            limit: limit,
@@ -67,26 +67,26 @@ final class SearchService {
     // Paged results including raw content for snippet building
     func latestWithContent(limit: Int,
                            offset: Int,
-                           appBundleId: String?,
+                           appBundleIds: [String]?,
                            startMs: Int64?,
                            endMs: Int64?) -> [SearchResult] {
         return (try? DB.shared.latestWithContent(limit: limit,
                                                  offset: offset,
-                                                 appBundleId: appBundleId,
+                                                 appBundleIds: appBundleIds,
                                                  startMs: startMs,
                                                  endMs: endMs)) ?? []
     }
 
     func searchWithContent(_ query: String,
                            fuzziness: SettingsStore.Fuzziness,
-                           appBundleId: String?,
+                           appBundleIds: [String]?,
                            startMs: Int64?,
                            endMs: Int64?,
                            limit: Int,
                            offset: Int) -> [SearchResult] {
         let fts = ftsQuery(for: query, fuzziness: fuzziness)
         return (try? DB.shared.searchWithContent(fts,
-                                                 appBundleId: appBundleId,
+                                                 appBundleIds: appBundleIds,
                                                  startMs: startMs,
                                                  endMs: endMs,
                                                  limit: limit,

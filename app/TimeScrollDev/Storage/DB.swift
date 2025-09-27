@@ -345,10 +345,10 @@ final class DB {
 
     // latestPaths removed in favor of latestMetas
 
-    // Batched meta fetch for timeline/search views.
+    // Batched meta fetch for timeline/search views (multi-app)
     func latestMetas(limit: Int = 1000,
                      offset: Int = 0,
-                     appBundleId: String? = nil,
+                     appBundleIds: [String]? = nil,
                      startMs: Int64? = nil,
                      endMs: Int64? = nil) throws -> [SnapshotMeta] {
         try onQueueSync {
@@ -361,13 +361,18 @@ final class DB {
             """
             if let s = startMs { sql += " AND started_at_ms >= \(s)" }
             if let e = endMs { sql += " AND started_at_ms <= \(e)" }
-            if appBundleId != nil { sql += " AND app_bundle_id = ?" }
+            if let ids = appBundleIds, !ids.isEmpty {
+                let placeholders = Array(repeating: "?", count: ids.count).joined(separator: ",")
+                sql += " AND app_bundle_id IN (\(placeholders))"
+            }
             sql += " ORDER BY started_at_ms DESC LIMIT ? OFFSET ?;"
             var stmt: OpaquePointer?
             defer { sqlite3_finalize(stmt) }
             guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return [] }
             var idx: Int32 = 1
-            if let bid = appBundleId { sqlite3_bind_text(stmt, idx, bid, -1, SQLITE_TRANSIENT); idx += 1 }
+            if let ids = appBundleIds, !ids.isEmpty {
+                for bid in ids { sqlite3_bind_text(stmt, idx, bid, -1, SQLITE_TRANSIENT); idx += 1 }
+            }
             sqlite3_bind_int(stmt, idx, Int32(limit)); idx += 1
             sqlite3_bind_int(stmt, idx, Int32(offset))
             var rows: [SnapshotMeta] = []
@@ -383,8 +388,9 @@ final class DB {
         }
     }
 
+    // FTS search (multi-app)
     func searchMetas(_ ftsQuery: String,
-                     appBundleId: String? = nil,
+                     appBundleIds: [String]? = nil,
                      startMs: Int64? = nil,
                      endMs: Int64? = nil,
                      limit: Int = 1000,
@@ -400,14 +406,19 @@ final class DB {
             """
             if let s = startMs { sql += " AND s.started_at_ms >= \(s)" }
             if let e = endMs { sql += " AND s.started_at_ms <= \(e)" }
-            if appBundleId != nil { sql += " AND s.app_bundle_id = ?" }
+            if let ids = appBundleIds, !ids.isEmpty {
+                let placeholders = Array(repeating: "?", count: ids.count).joined(separator: ",")
+                sql += " AND s.app_bundle_id IN (\(placeholders))"
+            }
             sql += " ORDER BY s.started_at_ms DESC LIMIT ? OFFSET ?;"
             var stmt: OpaquePointer?
             defer { sqlite3_finalize(stmt) }
             guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return [] }
             var idx: Int32 = 1
             sqlite3_bind_text(stmt, idx, ftsQuery, -1, SQLITE_TRANSIENT); idx += 1
-            if let bid = appBundleId { sqlite3_bind_text(stmt, idx, bid, -1, SQLITE_TRANSIENT); idx += 1 }
+            if let ids = appBundleIds, !ids.isEmpty {
+                for bid in ids { sqlite3_bind_text(stmt, idx, bid, -1, SQLITE_TRANSIENT); idx += 1 }
+            }
             sqlite3_bind_int(stmt, idx, Int32(limit)); idx += 1
             sqlite3_bind_int(stmt, idx, Int32(offset))
             var rows: [SnapshotMeta] = []
@@ -423,9 +434,9 @@ final class DB {
         }
     }
 
-    // Paged search with raw text content for snippet UI
+    // Paged search with raw text content for snippet UI (multi-app)
     func searchWithContent(_ ftsQuery: String,
-                           appBundleId: String? = nil,
+                           appBundleIds: [String]? = nil,
                            startMs: Int64? = nil,
                            endMs: Int64? = nil,
                            limit: Int = 50,
@@ -441,14 +452,19 @@ final class DB {
             """
             if let s = startMs { sql += " AND s.started_at_ms >= \(s)" }
             if let e = endMs { sql += " AND s.started_at_ms <= \(e)" }
-            if appBundleId != nil { sql += " AND s.app_bundle_id = ?" }
+            if let ids = appBundleIds, !ids.isEmpty {
+                let placeholders = Array(repeating: "?", count: ids.count).joined(separator: ",")
+                sql += " AND s.app_bundle_id IN (\(placeholders))"
+            }
             sql += " ORDER BY s.started_at_ms DESC LIMIT ? OFFSET ?;"
             var stmt: OpaquePointer?
             defer { sqlite3_finalize(stmt) }
             guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return [] }
             var idx: Int32 = 1
             sqlite3_bind_text(stmt, idx, ftsQuery, -1, SQLITE_TRANSIENT); idx += 1
-            if let bid = appBundleId { sqlite3_bind_text(stmt, idx, bid, -1, SQLITE_TRANSIENT); idx += 1 }
+            if let ids = appBundleIds, !ids.isEmpty {
+                for bid in ids { sqlite3_bind_text(stmt, idx, bid, -1, SQLITE_TRANSIENT); idx += 1 }
+            }
             sqlite3_bind_int(stmt, idx, Int32(limit)); idx += 1
             sqlite3_bind_int(stmt, idx, Int32(offset))
             var rows: [SearchResult] = []
@@ -465,10 +481,10 @@ final class DB {
         }
     }
 
-    // Latest with content (for empty query) to show snippet-like previews consistently
+    // Latest with content (for empty query) to show snippet-like previews consistently (multi-app)
     func latestWithContent(limit: Int = 50,
                            offset: Int = 0,
-                           appBundleId: String? = nil,
+                           appBundleIds: [String]? = nil,
                            startMs: Int64? = nil,
                            endMs: Int64? = nil) throws -> [SearchResult] {
         try onQueueSync {
@@ -482,13 +498,18 @@ final class DB {
             """
             if let s = startMs { sql += " AND s.started_at_ms >= \(s)" }
             if let e = endMs { sql += " AND s.started_at_ms <= \(e)" }
-            if appBundleId != nil { sql += " AND s.app_bundle_id = ?" }
+            if let ids = appBundleIds, !ids.isEmpty {
+                let placeholders = Array(repeating: "?", count: ids.count).joined(separator: ",")
+                sql += " AND s.app_bundle_id IN (\(placeholders))"
+            }
             sql += " ORDER BY s.started_at_ms DESC LIMIT ? OFFSET ?;"
             var stmt: OpaquePointer?
             defer { sqlite3_finalize(stmt) }
             guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return [] }
             var idx: Int32 = 1
-            if let bid = appBundleId { sqlite3_bind_text(stmt, idx, bid, -1, SQLITE_TRANSIENT); idx += 1 }
+            if let ids = appBundleIds, !ids.isEmpty {
+                for bid in ids { sqlite3_bind_text(stmt, idx, bid, -1, SQLITE_TRANSIENT); idx += 1 }
+            }
             sqlite3_bind_int(stmt, idx, Int32(limit)); idx += 1
             sqlite3_bind_int(stmt, idx, Int32(offset))
             var rows: [SearchResult] = []

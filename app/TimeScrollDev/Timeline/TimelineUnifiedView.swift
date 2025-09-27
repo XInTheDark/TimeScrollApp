@@ -96,8 +96,12 @@ struct TimelineUnifiedView: View {
             Button(showFilters ? "Hide Filters" : "Filters") {
                 showFilters.toggle()
             }
-
-            if showFilters { filtersPanel }
+            // Present filters in a popover to avoid overflowing the top bar
+            .popover(isPresented: $showFilters, arrowEdge: .bottom) {
+                filtersPopover
+                    .padding(12)
+                    .frame(minWidth: 380)
+            }
 
             Menu("Search") {
                 Button("Show Results") { showResults() }
@@ -145,13 +149,23 @@ struct TimelineUnifiedView: View {
         .sheet(isPresented: $debugOpen) { DebugView() }
     }
 
-    private var filtersPanel: some View {
-        HStack(spacing: 8) {
-            DatePicker("From", selection: Binding(get: { startDate ?? Date() }, set: { startDate = $0 }), displayedComponents: [.date, .hourAndMinute])
-                .labelsHidden()
-            DatePicker("To", selection: Binding(get: { endDate ?? Date() }, set: { endDate = $0 }), displayedComponents: [.date, .hourAndMinute])
-                .labelsHidden()
-            TimelineAppFilterMenu(selected: Binding(get: { model.selectedAppBundleId }, set: { model.selectedAppBundleId = $0 }))
+    private var filtersPopover: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(spacing: 8) {
+                Text("From:")
+                DatePicker("From", selection: Binding(get: { startDate ?? Date() }, set: { startDate = $0 }), displayedComponents: [.date, .hourAndMinute])
+                    .labelsHidden()
+            }
+            HStack(spacing: 8) {
+                Text("To:")
+                DatePicker("To", selection: Binding(get: { endDate ?? Date() }, set: { endDate = $0 }), displayedComponents: [.date, .hourAndMinute])
+                    .labelsHidden()
+            }
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Apps:")
+                TimelineAppMultiFilter(selected: $model.selectedAppBundleIds)
+                    .frame(minHeight: 140, maxHeight: 220)
+            }
         }
     }
 
@@ -161,7 +175,7 @@ struct TimelineUnifiedView: View {
             Group {
                 if showingResults {
                     SearchResultsView(query: model.query,
-                                      appBundleId: model.selectedAppBundleId,
+                                      appBundleIds: (model.selectedAppBundleIds.isEmpty ? nil : Array(model.selectedAppBundleIds).sorted()),
                                       startMs: model.startMs,
                                       endMs: model.endMs,
                                       onOpen: { row, absIndex in
@@ -182,7 +196,7 @@ struct TimelineUnifiedView: View {
                                           showingResults = false
                                       })
                         // Remount the results view when filters change to avoid stale local state
-                        .id("\(model.query)|\(model.selectedAppBundleId ?? "_")|\(model.startMs ?? -1)|\(model.endMs ?? -1)")
+                        .id("\(model.query)|\(((model.selectedAppBundleIds.isEmpty ? ["_"] : Array(model.selectedAppBundleIds)).sorted().joined(separator: ",")))|\(model.startMs ?? -1)|\(model.endMs ?? -1)")
                         .environmentObject(settings)
                 } else {
                     SnapshotStageView(model: model, globalQuery: model.query)
@@ -221,12 +235,14 @@ struct TimelineUnifiedView: View {
         // Keep model.metas in sync so navigation uses the same result set
         model.load()
         showingResults = true
+        showFilters = false
     }
 
     private func searchAndJump() {
         applyFilters()
         model.load()
         showingResults = false
+        showFilters = false
     }
 
     private func installKeyMonitor() {
@@ -280,23 +296,44 @@ struct TimelineUnifiedView: View {
     }
 }
 
-private struct TimelineAppFilterMenu: View {
-    @Binding var selected: String?
+// Single-select app filter removed; replaced by TimelineAppMultiFilter
+
+private struct TimelineAppMultiFilter: View {
+    @Binding var selected: Set<String>
     @State private var apps: [(bundleId: String, name: String)] = []
-    @State private var token: String = ""
+    @State private var filter: String = ""
+
     var body: some View {
-        Picker("App", selection: $token) {
-            Text("All Apps").tag("")
-            ForEach(apps, id: \.bundleId) { entry in
-                Text(entry.name).tag(entry.bundleId)
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 8) {
+                TextField("Filter apps", text: $filter)
+                    .textFieldStyle(.roundedBorder)
+                Button("Clear") { selected.removeAll() }
             }
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 6) {
+                    ForEach(filteredApps(), id: \.bundleId) { entry in
+                        Toggle(isOn: Binding(get: {
+                            selected.contains(entry.bundleId)
+                        }, set: { val in
+                            if val { selected.insert(entry.bundleId) } else { selected.remove(entry.bundleId) }
+                        })) {
+                            Text(entry.name)
+                        }
+                        .toggleStyle(.checkbox)
+                    }
+                }
+                .padding(.vertical, 4)
+            }
+            .frame(minHeight: 120)
         }
-        .pickerStyle(.menu)
-        .onAppear {
-            load(); token = selected ?? ""
-        }
-        .onChange(of: selected) { sel in token = sel ?? "" }
-        .onChange(of: token) { val in selected = val.isEmpty ? nil : val }
+        .onAppear { load() }
+    }
+
+    private func filteredApps() -> [(bundleId: String, name: String)] {
+        let f = filter.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !f.isEmpty else { return apps }
+        return apps.filter { $0.name.lowercased().contains(f) || $0.bundleId.lowercased().contains(f) }
     }
 
     private func load() {

@@ -3,7 +3,7 @@ import AppKit
 
 struct SearchResultsView: View {
     let query: String
-    let appBundleId: String?
+    let appBundleIds: [String]?
     let startMs: Int64?
     let endMs: Int64?
     let onOpen: (SearchResult, Int) -> Void
@@ -28,7 +28,7 @@ struct SearchResultsView: View {
         }
         .onAppear { loadPage(0) }
         .onChange(of: query) { _ in resetAndReload() }
-        .onChange(of: appBundleId) { _ in resetAndReload() }
+        .onChange(of: appBundleIds) { _ in resetAndReload() }
         .onChange(of: startMs) { _ in resetAndReload() }
         .onChange(of: endMs) { _ in resetAndReload() }
     }
@@ -103,13 +103,13 @@ struct SearchResultsView: View {
         if trimmed.isEmpty {
             fetched = search.latestWithContent(limit: limit,
                                                offset: offset,
-                                               appBundleId: appBundleId,
+                                               appBundleIds: appBundleIds,
                                                startMs: startMs,
                                                endMs: endMs)
         } else {
             fetched = search.searchWithContent(trimmed,
                                                fuzziness: fuzz,
-                                               appBundleId: appBundleId,
+                                               appBundleIds: appBundleIds,
                                                startMs: startMs,
                                                endMs: endMs,
                                                limit: limit,

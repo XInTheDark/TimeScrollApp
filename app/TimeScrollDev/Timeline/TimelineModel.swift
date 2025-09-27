@@ -6,7 +6,7 @@ import AppKit
 final class TimelineModel: ObservableObject {
     // Filters
     @Published var query: String = ""
-    @Published var selectedAppBundleId: String? = nil
+    @Published var selectedAppBundleIds: Set<String> = []
     @Published var startMs: Int64? = nil
     @Published var endMs: Int64? = nil
 
@@ -37,15 +37,16 @@ final class TimelineModel: ObservableObject {
         let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
         let fuzz = SettingsStore.shared.fuzziness
         let list: [SnapshotMeta]
+        let appIds = selectedAppBundleIds.isEmpty ? nil : Array(selectedAppBundleIds)
         if trimmed.isEmpty {
             list = search.latestMetas(limit: limit,
-                                      appBundleId: selectedAppBundleId,
+                                      appBundleIds: appIds,
                                       startMs: startMs,
                                       endMs: endMs)
         } else {
             list = search.searchMetas(trimmed,
                                       fuzziness: fuzz,
-                                      appBundleId: selectedAppBundleId,
+                                      appBundleIds: appIds,
                                       startMs: startMs,
                                       endMs: endMs,
                                       limit: limit)

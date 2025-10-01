@@ -6,52 +6,74 @@ import CoreMedia
 import AppKit
 
 final class CaptureManager: NSObject {
-    private var stream: SCStream?
-    private let output: FrameOutput
+    private var streams: [SCStream] = []
+    private var outputs: [FrameOutput] = []
     private let outputQueue = DispatchQueue(label: "TimeScroll.Capture.Output")
     private let streamDelegate = StreamDelegate()
+    private let onSnapshot: (URL) -> Void
 
     init(onSnapshot: @escaping (URL) -> Void) {
-        self.output = FrameOutput(onSnapshot: onSnapshot)
+        self.onSnapshot = onSnapshot
         super.init()
     }
 
     func start() async throws {
         let content = try await SCShareableContent.current
-        guard let display = content.displays.first else { throw NSError(domain: "TS", code: -2) }
 
-        // Capture scale is user-configurable; default 0.5 (added in SettingsStore)
+        // Determine which displays to capture based on settings (background-safe via UserDefaults)
         let d = UserDefaults.standard
+        let modeRaw = d.string(forKey: "settings.captureDisplayMode") ?? "first"
+        let captureAll = (modeRaw == "all")
+        let displays: [SCDisplay] = captureAll ? content.displays : (content.displays.first.map { [$0] } ?? [])
+        guard !displays.isEmpty else { throw NSError(domain: "TS", code: -2) }
+
+        // Capture scale is user-configurable; default 0.8
         let capScale = (d.object(forKey: "settings.captureScale") != nil) ? d.double(forKey: "settings.captureScale") : 0.8
         let scale = max(0.5, min(capScale, 1.0))
 
-        let cfg = SCStreamConfiguration()
-        cfg.queueDepth = 8
-        // NV12 saves bandwidth; if you see issues in your stack, switch back to BGRA.
-        cfg.pixelFormat = kCVPixelFormatType_420YpCbCr8BiPlanarFullRange
-        cfg.showsCursor = false
-        cfg.colorSpaceName = CGColorSpace.sRGB
-        cfg.minimumFrameInterval = CMTime(value: 1, timescale: 10) // 10 fps cap
+        // Configure and start a stream per display
+        var newStreams: [SCStream] = []
+        var newOutputs: [FrameOutput] = []
+        for display in displays {
+            let cfg = SCStreamConfiguration()
+            cfg.queueDepth = 8
+            // NV12 saves bandwidth; if you see issues in your stack, switch back to BGRA.
+            cfg.pixelFormat = kCVPixelFormatType_420YpCbCr8BiPlanarFullRange
+            cfg.showsCursor = false
+            cfg.colorSpaceName = CGColorSpace.sRGB
+            cfg.minimumFrameInterval = CMTime(value: 1, timescale: 10) // 10 fps cap
 
-        // Downscale at the source to cut energy cost
-        if #available(macOS 13.0, *) {
-            let w = Int(Double(display.width) * scale)
-            let h = Int(Double(display.height) * scale)
-            cfg.width = max(640, w)
-            cfg.height = max(360, h)
-            cfg.scalesToFit = true
+            // Downscale at the source to cut energy cost
+            if #available(macOS 13.0, *) {
+                let w = Int(Double(display.width) * scale)
+                let h = Int(Double(display.height) * scale)
+                cfg.width = max(640, w)
+                cfg.height = max(360, h)
+                cfg.scalesToFit = true
+            }
+
+            let filter = SCContentFilter(display: display, excludingWindows: [])
+            let stream = SCStream(filter: filter, configuration: cfg, delegate: streamDelegate)
+            let output = FrameOutput(onSnapshot: onSnapshot)
+            try stream.addStreamOutput(output, type: .screen, sampleHandlerQueue: outputQueue)
+            newStreams.append(stream)
+            newOutputs.append(output)
         }
 
-        let filter = SCContentFilter(display: display, excludingWindows: [])
-        let stream = SCStream(filter: filter, configuration: cfg, delegate: streamDelegate)
-        try stream.addStreamOutput(output, type: .screen, sampleHandlerQueue: outputQueue)
-        self.stream = stream
-        try await stream.startCapture()
+        // Assign to properties so they are retained during start
+        self.streams = newStreams
+        self.outputs = newOutputs
+        for s in self.streams {
+            try await s.startCapture()
+        }
     }
 
     func stop() async {
-        try? await stream?.stopCapture()
-        stream = nil
+        for s in streams {
+            try? await s.stopCapture()
+        }
+        streams.removeAll()
+        outputs.removeAll()
     }
 }
 

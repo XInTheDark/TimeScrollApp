@@ -11,6 +11,7 @@ final class SettingsStore: ObservableObject {
     enum OCRMode: String, CaseIterable, Identifiable { case fast, accurate; var id: String { rawValue } }
     enum Fuzziness: String, CaseIterable, Identifiable { case off, low, medium, high; var id: String { rawValue } }
     enum StorageFormat: String, CaseIterable, Identifiable { case heic, jpeg, png; var id: String { rawValue } }
+    enum DisplayCaptureMode: String, CaseIterable, Identifiable { case first, all; var id: String { rawValue } }
 
     @Published var ocrMode: OCRMode = .accurate { didSet { if !isLoading { save() } } }
     @Published var captureMinInterval: Double = 5.0 { didSet { if !isLoading { save() } } }
@@ -33,6 +34,8 @@ final class SettingsStore: ObservableObject {
     @Published var degradeQuality: Double = 0.5 { didSet { if !isLoading { save() } } }
     // Energy: keep captureScale
     @Published var captureScale: Double = 0.8 { didSet { if !isLoading { save() } } }  // 0.5...1.0
+    // Displays: capture first or all
+    @Published var captureDisplayMode: DisplayCaptureMode = .first { didSet { if !isLoading { save() } } }
 
     // App behavior
     @Published var startMinimized: Bool = false { didSet { if !isLoading { save() } } }
@@ -85,6 +88,7 @@ final class SettingsStore: ObservableObject {
 
         // Load capture scale if present
         let capScale = defaults.double(forKey: "settings.captureScale"); if capScale > 0 { captureScale = capScale }
+        if let raw = defaults.string(forKey: "settings.captureDisplayMode"), let v = DisplayCaptureMode(rawValue: raw) { captureDisplayMode = v }
 
         // App behavior
         if defaults.object(forKey: "settings.startMinimized") != nil { startMinimized = defaults.bool(forKey: "settings.startMinimized") }
@@ -135,6 +139,7 @@ final class SettingsStore: ObservableObject {
 
         // Save capture scale
         defaults.set(captureScale, forKey: "settings.captureScale")
+        defaults.set(captureDisplayMode.rawValue, forKey: "settings.captureDisplayMode")
 
         // App behavior
         defaults.set(startMinimized, forKey: "settings.startMinimized")

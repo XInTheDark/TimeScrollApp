@@ -22,7 +22,16 @@ final class SnapshotStore {
         if !fm.fileExists(atPath: subdir.path) {
             try? fm.createDirectory(at: subdir, withIntermediateDirectories: true)
         }
-        let url = subdir.appendingPathComponent("snap-\(timestampMs).\(formatExt)")
+        // Ensure unique filename even when multiple monitors save at the same ms
+        var candidate = subdir.appendingPathComponent("snap-\(timestampMs).\(formatExt)")
+        if fm.fileExists(atPath: candidate.path) {
+            var idx = 2
+            while fm.fileExists(atPath: candidate.path) {
+                candidate = subdir.appendingPathComponent("snap-\(timestampMs)-\(idx).\(formatExt)")
+                idx += 1
+            }
+        }
+        let url = candidate
         let tmp = url.appendingPathExtension("tmp")
         try encoded.data.write(to: tmp, options: .atomic)
         let _ = try fm.replaceItemAt(url, withItemAt: tmp)

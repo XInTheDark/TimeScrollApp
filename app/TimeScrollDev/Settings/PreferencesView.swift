@@ -90,6 +90,20 @@ private struct GeneralPane: View {
                         await AppState.shared.restartCaptureIfRunning()
                     }
                 }
+                LabeledContent("Displays") {
+                    Picker("", selection: $settings.captureDisplayMode) {
+                        ForEach(SettingsStore.DisplayCaptureMode.allCases) { m in
+                            Text(m == .first ? "First display" : "All displays").tag(m)
+                        }
+                    }
+                    .labelsHidden()
+                    .frame(maxWidth: 200)
+                }
+                .onChange(of: settings.captureDisplayMode) { _ in
+                    Task { @MainActor in
+                        await AppState.shared.restartCaptureIfRunning()
+                    }
+                }
                 .onChange(of: settings.captureMinInterval) { newVal in
                     if settings.adaptiveMaxInterval < newVal { settings.adaptiveMaxInterval = newVal }
                 }

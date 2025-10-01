@@ -72,6 +72,18 @@ struct TimelineBarContainer: NSViewRepresentable {
             context.coordinator.lastSelectedId = nil
         }
 
+        // If zoom level changed, re-center around the current snapshot
+        if context.coordinator.lastMsPerPoint != model.msPerPoint {
+            context.coordinator.lastMsPerPoint = model.msPerPoint
+            if let sel = model.selected {
+                let xSel = CGFloat(Double(sel.startedAtMs - (model.minTimeMs)) / max(1.0, model.msPerPoint))
+                let vis = scroll.contentView.bounds
+                let targetX = max(0, min(doc.bounds.width - vis.width, xSel - vis.width/2))
+                scroll.contentView.scroll(to: NSPoint(x: targetX, y: 0))
+                scroll.reflectScrolledClipView(scroll.contentView)
+            }
+        }
+
         // Handle explicit jump-to-end requests
         if context.coordinator.lastJumpToken != model.jumpToEndToken {
             context.coordinator.lastJumpToken = model.jumpToEndToken
@@ -91,6 +103,7 @@ struct TimelineBarContainer: NSViewRepresentable {
         var shouldScrollToEndIfNeeded = true
         var lastSelectedId: Int64? = nil
         var lastJumpToken: Int = 0
+        var lastMsPerPoint: Double = .nan
     }
 }
 

@@ -15,6 +15,7 @@ struct TimelineUnifiedView: View {
 
     private let minMsPerPt: Double = 1_000
     private let maxMsPerPt: Double = 3_600_000
+    private let zoomStep: Double = 1.25
 
     var body: some View {
         VStack(spacing: 0) {
@@ -120,19 +121,22 @@ struct TimelineUnifiedView: View {
 
             // Zoom controls
             HStack(spacing: 6) {
-                Button(action: { model.msPerPoint = max(minMsPerPt, model.msPerPoint / 2) }) {
+                // '-' should zoom OUT (increase ms/pt)
+                Button(action: { model.msPerPoint = min(maxMsPerPt, model.msPerPoint * zoomStep) }) {
                     Image(systemName: "minus")
                 }
                 .buttonStyle(.bordered)
                 Slider(value: Binding(get: {
-                    // Map msPerPoint to 0...1 for slider
+                    // Map msPerPoint to 0...1 for slider, where 1 = zoomed in (smaller ms/pt)
                     let clamped = min(max(model.msPerPoint, minMsPerPt), maxMsPerPt)
-                    return (clamped - minMsPerPt) / (maxMsPerPt - minMsPerPt)
+                    return (maxMsPerPt - clamped) / (maxMsPerPt - minMsPerPt)
                 }, set: { v in
-                    model.msPerPoint = minMsPerPt + v * (maxMsPerPt - minMsPerPt)
+                    // Inverse mapping: slider right -> smaller ms/pt (zoom in)
+                    model.msPerPoint = maxMsPerPt - v * (maxMsPerPt - minMsPerPt)
                 }))
                 .frame(width: 140)
-                Button(action: { model.msPerPoint = min(maxMsPerPt, model.msPerPoint * 2) }) {
+                // '+' should zoom IN (decrease ms/pt)
+                Button(action: { model.msPerPoint = max(minMsPerPt, model.msPerPoint / zoomStep) }) {
                     Image(systemName: "plus")
                 }
                 .buttonStyle(.bordered)

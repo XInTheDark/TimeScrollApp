@@ -54,6 +54,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         // Apply start-minimized and dock visibility policy
         DispatchQueue.main.async { [weak self] in
+            // Load vault prefs
+            VaultManager.shared.loadPrefs()
             self?.applyStartMinimizedIfNeeded()
             self?.updateActivationPolicy()
             self?.installSettingsObservers()
@@ -61,6 +63,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self?.installUpdateNotificationObservers()
             self?.installSleepWakeObservers()
             self?.applyAutoStartCaptureIfNeeded()
+            // Prompt unlock if vault is enabled
+            if SettingsStore.shared.vaultEnabled {
+                Task { await VaultManager.shared.unlock(presentingWindow: NSApp.keyWindow) }
+            }
         }
     }
 
@@ -72,6 +78,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        if SettingsStore.shared.vaultEnabled {
+            VaultManager.shared.lock()
+        }
         SettingsStore.shared.flush()
         UserDefaults.standard.synchronize()
     }
@@ -129,6 +138,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         updates.target = self
         menu.addItem(updates)
 
+        if SettingsStore.shared.vaultEnabled {
+            menu.addItem(.separator())
+            let queued = VaultManager.shared.queuedCount
+            if queued > 0 {
+                let q = NSMenuItem(title: "Queued: \(queued)", action: nil, keyEquivalent: "")
+                q.isEnabled = false
+                menu.addItem(q)
+            }
+            if VaultManager.shared.isUnlocked {
+                let lock = NSMenuItem(title: "Lock", action: #selector(onMenuLockNow), keyEquivalent: "")
+                lock.target = self
+                menu.addItem(lock)
+            } else {
+                let unlock = NSMenuItem(title: "Unlock…", action: #selector(onMenuUnlock), keyEquivalent: "")
+                unlock.target = self
+                menu.addItem(unlock)
+            }
+        }
+
         menu.addItem(.separator())
 
         // Quit
@@ -139,6 +167,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.delegate = self
         return menu
     }
+
+    @objc private func onMenuUnlock() { Task { await VaultManager.shared.unlock(presentingWindow: NSApp.keyWindow) } }
+    @objc private func onMenuLockNow() { VaultManager.shared.lock() }
 
     @objc private func toggleCapture() {
         Task { @MainActor in
@@ -322,6 +353,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 try? await Task.sleep(nanoseconds: 800_000_000)
                 await AppState.shared.restartCaptureIfRunning()
                 self.refreshMenu()
+                if SettingsStore.shared.autoLockOnSleep { VaultManager.shared.lock() }
             }
         }
         let t1 = nc.addObserver(forName: NSWorkspace.didWakeNotification, object: nil, queue: .main, using: handler)

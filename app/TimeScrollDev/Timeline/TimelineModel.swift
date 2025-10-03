@@ -25,19 +25,33 @@ final class TimelineModel: ObservableObject {
 
     // Hover state (for preview)
     @Published var hoverTimeMs: Int64? = nil
+    // Loading state for timeline fetch
+    @Published var isLoading: Bool = false
 
     private let search = SearchService()
     private var timesAsc: [Int64] = []
 
     var minTimeMs: Int64 { metas.last?.startedAtMs ?? 0 }
     var maxTimeMs: Int64 { metas.first?.startedAtMs ?? 0 }
+
+    init() {
+        // Always start the session with the overlay in the default position.
+        // Users can drag it during a session, but on new window/app launch it resets.
+        overlayOffsetX = 0
+        overlayOffsetY = 220
+    }
     var selected: SnapshotMeta? { metas.indices.contains(selectedIndex) ? metas[selectedIndex] : nil }
 
     func load(limit: Int = 1000) {
+        isLoading = true
+        // Allow UI to update and show the spinner
+        Task { @MainActor in await Task.yield() }
+
         let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
         let fuzz = SettingsStore.shared.fuzziness
-        let list: [SnapshotMeta]
         let appIds = selectedAppBundleIds.isEmpty ? nil : Array(selectedAppBundleIds)
+
+        let list: [SnapshotMeta]
         if trimmed.isEmpty {
             list = search.latestMetas(limit: limit,
                                       appBundleIds: appIds,
@@ -51,6 +65,7 @@ final class TimelineModel: ObservableObject {
                                       endMs: endMs,
                                       limit: limit)
         }
+
         metas = list.sorted { $0.startedAtMs > $1.startedAtMs }
         selectedIndex = metas.isEmpty ? -1 : 0
         rebuildAscCache()
@@ -58,6 +73,7 @@ final class TimelineModel: ObservableObject {
         if !msPerPoint.isFinite || msPerPoint <= 0 {
             msPerPoint = defaultMsPerPoint()
         }
+        isLoading = false
     }
 
     func refreshSegments() {

@@ -9,12 +9,24 @@ final class ThumbnailCache {
         cache.countLimit = 500
     }
 
+    func clear() { cache.removeAllObjects() }
+
     func thumbnail(for url: URL, maxPixel: CGFloat = 320) -> NSImage? {
         let key = url.path as NSString
         if let img = cache.object(forKey: key) {
             return img
         }
-        guard let src = CGImageSourceCreateWithURL(url as CFURL, [kCGImageSourceShouldCache: false] as CFDictionary) else { return nil }
+        var src: CGImageSource?
+        if url.pathExtension.lowercased() == "tse" {
+            // Only attempt decrypt if vault is unlocked
+            let unlocked = UserDefaults.standard.bool(forKey: "vault.isUnlocked")
+            if unlocked, let data = try? FileCrypter.shared.decryptImage(at: url) {
+                src = CGImageSourceCreateWithData(data as CFData, [kCGImageSourceShouldCache: false] as CFDictionary)
+            }
+        } else {
+            src = CGImageSourceCreateWithURL(url as CFURL, [kCGImageSourceShouldCache: false] as CFDictionary)
+        }
+        guard let src = src else { return nil }
         let options: CFDictionary = [
             kCGImageSourceCreateThumbnailFromImageAlways: true,
             kCGImageSourceCreateThumbnailWithTransform: true,

@@ -207,13 +207,49 @@ final class FrameOutput: NSObject, SCStreamOutput {
                 }
                 if let e = encError { throw e }
                 guard let encoded = encodedOpt else { throw ImageEncoderError.destinationFailed }
-                let (url, bytes) = try SnapshotStore.shared.saveEncoded(encoded, timestampMs: tsMs, formatExt: encoded.format)
-
                 // App metadata from tracker (no main-thread hop)
                 let info = AppActivityTracker.shared.current()
                 let bid = info.bundleId
                 let name = info.name
 
+                let d = UserDefaults.standard
+                let vaultOn = (d.object(forKey: "settings.vaultEnabled") != nil) ? d.bool(forKey: "settings.vaultEnabled") : false
+                let allowWhileLocked = (d.object(forKey: "settings.captureWhileLocked") != nil) ? d.bool(forKey: "settings.captureWhileLocked") : true
+                if vaultOn && !VaultManager.shared.isUnlocked {
+                    // Locked path: encrypt snapshot to .tse and enqueue ingest record
+                    if allowWhileLocked {
+                        let encURL = try FileCrypter.shared.encryptSnapshot(encoded: encoded, timestampMs: tsMs)
+                        // OCR on the retained pixel buffer to keep queue rich with text
+                        let ocrResult = try self.runOCR(retainedPB.takeUnretainedValue())
+                        try IngestQueue.shared.enqueue(
+                            path: encURL,
+                            startedAtMs: tsMs,
+                            appBundleId: bid,
+                            appName: name,
+                            bytes: Int64(encoded.data.count),
+                            width: encoded.width,
+                            height: encoded.height,
+                            format: encoded.format,
+                            hash64: Int64(bitPattern: hashVal),
+                            ocrText: ocrResult.text,
+                            ocrBoxes: ocrResult.lines
+                        )
+                    }
+                    // Do not update lastSnapshotURL to avoid revealing disk paths while locked
+                    retainedPB.release()
+                    return
+                }
+
+                // Normal path: if vault enabled (unlocked), write encrypted file; else plaintext
+                let url: URL
+                let bytes: Int64
+                if vaultOn {
+                    url = try FileCrypter.shared.encryptSnapshot(encoded: encoded, timestampMs: tsMs)
+                    bytes = Int64(encoded.data.count)
+                } else {
+                    let ret = try SnapshotStore.shared.saveEncoded(encoded, timestampMs: tsMs, formatExt: encoded.format)
+                    url = ret.url; bytes = ret.bytes
+                }
                 let rowId = Indexer.shared.insertStub(
                     startedAtMs: tsMs,
                     savedURL: url,
@@ -229,9 +265,7 @@ final class FrameOutput: NSObject, SCStreamOutput {
                 )
 
                 // Notify UI before OCR to avoid races
-                DispatchQueue.main.async {
-                    self.onSnapshot(url)
-                }
+                DispatchQueue.main.async { self.onSnapshot(url) }
 
                 // Reset adaptive state after a real persist
                 self.lastHash = hashVal
@@ -250,6 +284,17 @@ final class FrameOutput: NSObject, SCStreamOutput {
                 // swallow for now
             }
         }
+    }
+
+    private func runOCR(_ pixelBuffer: CVPixelBuffer) throws -> OCRResult {
+        // Keep a small OCR service per FrameOutput to avoid contention
+        return try self.ocr().recognize(from: pixelBuffer)
+    }
+
+    private var _ocrService: OCRService?
+    private func ocr() -> OCRService {
+        if let s = _ocrService { return s }
+        let s = OCRService(); _ocrService = s; return s
     }
 
     private func applyThermalGovernorIfNeeded() {

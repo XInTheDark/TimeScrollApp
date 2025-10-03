@@ -5,6 +5,7 @@ struct TimelineUnifiedView: View {
     @ObservedObject var appState = AppState.shared
     @StateObject var model = TimelineModel()
     @EnvironmentObject var settings: SettingsStore
+    @ObservedObject var vault = VaultManager.shared
 
     @State private var query: String = ""
     @State private var showFilters: Bool = false
@@ -13,8 +14,8 @@ struct TimelineUnifiedView: View {
     @State private var keyMonitor: Any? = nil
     @State private var showingResults: Bool = false
 
-    private let minMsPerPt: Double = 1_000
-    private let maxMsPerPt: Double = 3_600_000
+    private let minMsPerPt: Double = 100             // 100ms per pt at max zoom-in
+    private let maxMsPerPt: Double = 300_000         // 5m per pt at max zoom-out (keeps things "pretty small")
     private let zoomStep: Double = 1.25
 
     var body: some View {
@@ -32,8 +33,14 @@ struct TimelineUnifiedView: View {
             installKeyMonitor()
             // Keep the text field in sync with the applied model query
             query = model.query
+            // Clamp any previously persisted msPerPoint into the new, saner range
+            model.msPerPoint = min(max(model.msPerPoint, minMsPerPt), maxMsPerPt)
         }
         .onDisappear { removeKeyMonitor() }
+        .onChange(of: vault.isUnlocked) { unlocked in
+            // When the vault gets unlocked, reload timeline and show a loading state
+            if unlocked { model.load() }
+        }
         .onChange(of: appState.lastSnapshotURL) { _ in
             if SettingsStore.shared.refreshOnNewSnapshot {
                 let selId = model.selected?.id
@@ -119,6 +126,22 @@ struct TimelineUnifiedView: View {
 
             Spacer()
 
+            if settings.vaultEnabled {
+                if vault.queuedCount > 0 {
+                    Text("Queued: \(vault.queuedCount)")
+                        .font(.caption)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 4)
+                        .background(Color.gray.opacity(0.2))
+                        .cornerRadius(10)
+                }
+                if vault.isUnlocked {
+                    Button("Lock") { vault.lock() }
+                } else {
+                    Button("Unlock…") { Task { await vault.unlock(presentingWindow: NSApp.keyWindow) } }
+                }
+            }
+
             // Zoom controls
             HStack(spacing: 6) {
                 // '-' should zoom OUT (increase ms/pt)
@@ -127,12 +150,21 @@ struct TimelineUnifiedView: View {
                 }
                 .buttonStyle(.bordered)
                 Slider(value: Binding(get: {
-                    // Map msPerPoint to 0...1 for slider, where 1 = zoomed in (smaller ms/pt)
+                    // Log-scale mapping so the slider feels linear across a wide zoom range.
+                    // 1.0 (right) = zoomed in (smaller ms/pt), 0.0 (left) = zoomed out (larger ms/pt)
                     let clamped = min(max(model.msPerPoint, minMsPerPt), maxMsPerPt)
-                    return (maxMsPerPt - clamped) / (maxMsPerPt - minMsPerPt)
+                    let logMin = log(minMsPerPt)
+                    let logMax = log(maxMsPerPt)
+                    let logVal = log(clamped)
+                    // invert so right is zoom in
+                    return (logMax - logVal) / (logMax - logMin)
                 }, set: { v in
-                    // Inverse mapping: slider right -> smaller ms/pt (zoom in)
-                    model.msPerPoint = maxMsPerPt - v * (maxMsPerPt - minMsPerPt)
+                    // Inverse mapping (log-scale): slider right -> smaller ms/pt (zoom in)
+                    let logMin = log(minMsPerPt)
+                    let logMax = log(maxMsPerPt)
+                    let logVal = logMax - v * (logMax - logMin)
+                    let val = exp(logVal)
+                    model.msPerPoint = min(max(val, minMsPerPt), maxMsPerPt)
                 }))
                 .frame(width: 140)
                 // '+' should zoom IN (decrease ms/pt)
@@ -175,6 +207,9 @@ struct TimelineUnifiedView: View {
 
     private var centerStage: some View {
         ZStack {
+            if settings.vaultEnabled && !vault.isUnlocked {
+                LockedView()
+            } else {
             // Use the applied model.query (not the in-flight text field value)
             Group {
                 if showingResults {
@@ -207,6 +242,21 @@ struct TimelineUnifiedView: View {
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
+            // Loading overlay
+            if model.isLoading {
+                VStack(spacing: 8) {
+                    ProgressView()
+                        .progressViewStyle(.circular)
+                    Text("Loading snapshots\nPlease wait…")
+                        .font(.footnote)
+                        .foregroundColor(.secondary)
+                        .multilineTextAlignment(.center)
+                }
+                .padding(16)
+                .background(.ultraThinMaterial)
+                .cornerRadius(10)
+            }
         }
         .frame(minHeight: 480)
         .frame(maxWidth: .infinity, maxHeight: .infinity)

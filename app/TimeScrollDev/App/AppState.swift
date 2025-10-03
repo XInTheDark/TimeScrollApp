@@ -11,7 +11,9 @@ final class AppState: ObservableObject {
     lazy var captureManager: CaptureManager = {
         let manager = CaptureManager { [weak self] url in
             Task { @MainActor in
-                self?.lastSnapshotURL = url
+                if !VaultManager.shared.isVaultEnabled || VaultManager.shared.isUnlocked {
+                    self?.lastSnapshotURL = url
+                }
             }
         }
         return manager

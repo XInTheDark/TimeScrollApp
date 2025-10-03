@@ -54,6 +54,12 @@ final class SettingsStore: ObservableObject {
     @Published var autoCheckIntervalHours: Int = 24 { didSet { if !isLoading { save() } } }
     @Published var autoDownloadInstallUpdates: Bool = true { didSet { if !isLoading { save() } } }
 
+    // Security
+    @Published var vaultEnabled: Bool = false { didSet { if !isLoading { save() } } }
+    @Published var captureWhileLocked: Bool = true { didSet { if !isLoading { save() } } }
+    @Published var autoLockInactivityMinutes: Int = 0 { didSet { if !isLoading { save() } } }
+    @Published var autoLockOnSleep: Bool = false { didSet { if !isLoading { save() } } }
+
     private let defaults = UserDefaults.standard
 
     private func load() {
@@ -112,6 +118,11 @@ final class SettingsStore: ObservableObject {
         if defaults.object(forKey: "settings.autoDownloadInstallUpdates") != nil {
             autoDownloadInstallUpdates = defaults.bool(forKey: "settings.autoDownloadInstallUpdates")
         }
+    // Security
+    if defaults.object(forKey: "settings.vaultEnabled") != nil { vaultEnabled = defaults.bool(forKey: "settings.vaultEnabled") }
+    if defaults.object(forKey: "settings.captureWhileLocked") != nil { captureWhileLocked = defaults.bool(forKey: "settings.captureWhileLocked") }
+    let minutes = defaults.integer(forKey: "settings.autoLockInactivityMinutes"); if minutes >= 0 { autoLockInactivityMinutes = minutes }
+    if defaults.object(forKey: "settings.autoLockOnSleep") != nil { autoLockOnSleep = defaults.bool(forKey: "settings.autoLockOnSleep") }
         isLoading = false
         print("[Prefs] Loaded: ocr=\(ocrMode.rawValue) minInt=\(captureMinInterval) fmt=\(storageFormat.rawValue) maxEdge=\(maxLongEdge) quality=\(lossyQuality) startMin=\(startMinimized) dock=\(showDockIcon) autoRec=\(startRecordingOnStart)")
     }
@@ -154,6 +165,11 @@ final class SettingsStore: ObservableObject {
         defaults.set(enableAutoCheckUpdates, forKey: "settings.enableAutoCheckUpdates")
         defaults.set(autoCheckIntervalHours, forKey: "settings.autoCheckIntervalHours")
         defaults.set(autoDownloadInstallUpdates, forKey: "settings.autoDownloadInstallUpdates")
+    // Security
+    defaults.set(vaultEnabled, forKey: "settings.vaultEnabled")
+    defaults.set(captureWhileLocked, forKey: "settings.captureWhileLocked")
+    defaults.set(autoLockInactivityMinutes, forKey: "settings.autoLockInactivityMinutes")
+    defaults.set(autoLockOnSleep, forKey: "settings.autoLockOnSleep")
         defaults.synchronize()
         if let bundleId = Bundle.main.bundleIdentifier, let dom = defaults.persistentDomain(forName: bundleId) {
             print("[Prefs] Domain(\(bundleId)) keys=\(dom.keys.count)")

@@ -1,4 +1,7 @@
 import Foundation
+import CoreGraphics
+// For OCRLine type
+import Vision
 import SQLite3
 
 private let SQLITE_TRANSIENT = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
@@ -47,6 +50,11 @@ final class DB {
 
     func openIfNeeded() throws {
         if db != nil { return }
+        // If vault is enabled but not unlocked, block DB access to avoid leaking metadata
+        let d = UserDefaults.standard
+        let vaultOn = (d.object(forKey: "settings.vaultEnabled") != nil) ? d.bool(forKey: "settings.vaultEnabled") : false
+        let unlocked = d.bool(forKey: "vault.isUnlocked")
+        if vaultOn && !unlocked { throw NSError(domain: "TS.DB", code: -100, userInfo: [NSLocalizedDescriptionKey: "Vault locked"]) }
         let fm = FileManager.default
         let base = fm.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
         let dir = base.appendingPathComponent("TimeScroll", isDirectory: true)
@@ -64,6 +72,71 @@ final class DB {
         sqlite3_exec(handle, "PRAGMA cache_size=-2000;", nil, nil, nil)
         try createSchema()
         try migrateIfNeeded()
+    }
+
+    // Open using SQLCipher key. If SQLCipher is not linked yet, the PRAGMA statements will be no-ops.
+    func openWithSqlcipher(key: Data) throws {
+        if db != nil { return }
+        let fm = FileManager.default
+        let base = fm.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+        let dir = base.appendingPathComponent("TimeScroll", isDirectory: true)
+        if !fm.fileExists(atPath: dir.path) {
+            try fm.createDirectory(at: dir, withIntermediateDirectories: true)
+        }
+        let url = dir.appendingPathComponent("db.sqlite")
+        dbURL = url
+        var handle: OpaquePointer?
+        if sqlite3_open(url.path, &handle) != SQLITE_OK { throw NSError(domain: "TS.DB", code: 1) }
+        self.db = handle
+        // Provide key in hex for PRAGMA key = "x'..'" form
+    let hex = key.map { String(format: "%02x", $0) }.joined()
+    // Use proper hex key literal form: x'..'
+    let keySQL = "PRAGMA key = \"x'\(hex)'\";"
+    _ = sqlite3_exec(handle, keySQL, nil, nil, nil)
+        _ = sqlite3_exec(handle, "PRAGMA cipher_compatibility = 4;", nil, nil, nil)
+        _ = sqlite3_exec(handle, "PRAGMA kdf_iter = 256000;", nil, nil, nil)
+        _ = sqlite3_exec(handle, "PRAGMA cipher_page_size = 4096;", nil, nil, nil)
+        _ = sqlite3_exec(handle, "PRAGMA cipher_hmac_algorithm = HMAC_SHA256;", nil, nil, nil)
+        _ = sqlite3_exec(handle, "PRAGMA cipher_kdf_algorithm = PBKDF2_HMAC_SHA256;", nil, nil, nil)
+        _ = sqlite3_exec(handle, "PRAGMA foreign_keys = ON;", nil, nil, nil)
+    _ = sqlite3_exec(handle, "PRAGMA journal_mode=WAL;", nil, nil, nil)
+        _ = sqlite3_exec(handle, "PRAGMA synchronous=NORMAL;", nil, nil, nil)
+        _ = sqlite3_exec(handle, "PRAGMA temp_store=MEMORY;", nil, nil, nil)
+        _ = sqlite3_exec(handle, "PRAGMA cache_size=-2000;", nil, nil, nil)
+    // Immediately checkpoint and truncate WAL to avoid stale WAL pages causing HMAC issues
+    _ = sqlite3_exec(handle, "PRAGMA wal_checkpoint(TRUNCATE);", nil, nil, nil)
+        // Verify key by a simple query; if it fails, close and throw
+        var testStmt: OpaquePointer?
+        if sqlite3_prepare_v2(handle, "SELECT count(*) FROM sqlite_master;", -1, &testStmt, nil) != SQLITE_OK {
+            sqlite3_finalize(testStmt)
+            sqlite3_close(handle)
+            self.db = nil
+            throw NSError(domain: "TS.DB", code: -50, userInfo: [NSLocalizedDescriptionKey: "SQLCipher key verification failed"])
+        }
+        sqlite3_finalize(testStmt)
+        try createSchema()
+        try migrateIfNeeded()
+    }
+
+    func close() {
+        if let handle = db { sqlite3_close(handle) }
+        db = nil
+    }
+
+    // Log SQLCipher version if available; useful to verify encryption at runtime
+    func logCipherVersion() {
+        _ = try? onQueueSync {
+            guard let db = db else { return }
+            var stmt: OpaquePointer?
+            defer { sqlite3_finalize(stmt) }
+            if sqlite3_prepare_v2(db, "PRAGMA cipher_version;", -1, &stmt, nil) == SQLITE_OK {
+                if sqlite3_step(stmt) == SQLITE_ROW, let c = sqlite3_column_text(stmt, 0) {
+                    print("[SQLCipher] cipher_version=\(String(cString: c))")
+                } else {
+                    print("[SQLCipher] cipher_version=(unavailable)")
+                }
+            }
+        }
     }
 
     private func createSchema() throws {
@@ -734,6 +807,46 @@ final class DB {
             rows.append(SnapshotRow(id: id, startedAtMs: ts, path: path))
         }
         return rows
+        }
+    }
+
+    func listPlaintextSnapshots(limit: Int = 10_000) throws -> [SnapshotRow] {
+        try onQueueSync {
+            try openIfNeeded()
+            guard let db = db else { return [] }
+            var stmt: OpaquePointer?
+            defer { sqlite3_finalize(stmt) }
+            let sql = "SELECT id, started_at_ms, path FROM ts_snapshot WHERE path NOT LIKE '%.tse' ORDER BY started_at_ms ASC LIMIT ?;"
+            if sqlite3_prepare_v2(db, sql, -1, &stmt, nil) != SQLITE_OK { return [] }
+            sqlite3_bind_int(stmt, 1, Int32(limit))
+            var rows: [SnapshotRow] = []
+            while sqlite3_step(stmt) == SQLITE_ROW {
+                let id = sqlite3_column_int64(stmt, 0)
+                let ts = sqlite3_column_int64(stmt, 1)
+                let path = String(cString: sqlite3_column_text(stmt, 2))
+                rows.append(SnapshotRow(id: id, startedAtMs: ts, path: path))
+            }
+            return rows
+        }
+    }
+
+    func updateSnapshotPath(oldPath: String, newPath: String, bytes: Int64?, format: String?) {
+        _ = try? onQueueSync {
+            try openIfNeeded()
+            guard let db = db else { return }
+            var sets: [String] = ["path=?"]
+            if bytes != nil { sets.append("bytes=?") }
+            if format != nil { sets.append("format=?") }
+            let sql = "UPDATE ts_snapshot SET \(sets.joined(separator: ", ")) WHERE path=?;"
+            var stmt: OpaquePointer?
+            defer { sqlite3_finalize(stmt) }
+            if sqlite3_prepare_v2(db, sql, -1, &stmt, nil) != SQLITE_OK { return }
+            var idx: Int32 = 1
+            sqlite3_bind_text(stmt, idx, newPath, -1, SQLITE_TRANSIENT); idx += 1
+            if let v = bytes { sqlite3_bind_int64(stmt, idx, v); idx += 1 }
+            if let v = format { sqlite3_bind_text(stmt, idx, v, -1, SQLITE_TRANSIENT); idx += 1 }
+            sqlite3_bind_text(stmt, idx, oldPath, -1, SQLITE_TRANSIENT)
+            _ = sqlite3_step(stmt)
         }
     }
 

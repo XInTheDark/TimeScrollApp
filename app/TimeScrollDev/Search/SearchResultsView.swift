@@ -44,33 +44,44 @@ struct SearchResultsView: View {
     }
 
     private var list: some View {
-        ScrollView {
-            LazyVStack(alignment: .leading, spacing: 8) {
-                if rows.isEmpty && !isLoading {
-                    // Friendly placeholder instead of an empty pane
-                    Text("No results")
-                        .foregroundColor(.secondary)
-                        .padding()
-                }
-                ForEach(Array(rows.enumerated()), id: \.0) { (idx, row) in
-                    Button(action: {
-                        let absIndex = page * pageSize + idx
-                        onOpen(row, absIndex)
-                    }) {
-                        SearchRowView(row: row, query: query)
-                            .padding(.horizontal, 8)
-                            .padding(.vertical, 6)
-                            .background(Color(NSColor.textBackgroundColor))
-                            .cornerRadius(8)
+        ZStack {
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 8) {
+                    if rows.isEmpty && !isLoading {
+                        // Friendly placeholder instead of an empty pane
+                        Text("No results")
+                            .foregroundColor(.secondary)
+                            .padding()
                     }
-                    .buttonStyle(.plain)
-                    .padding(.horizontal, 8)
+                    ForEach(Array(rows.enumerated()), id: \.0) { (idx, row) in
+                        Button(action: {
+                            let absIndex = page * pageSize + idx
+                            onOpen(row, absIndex)
+                        }) {
+                            SearchRowView(row: row, query: query)
+                                .padding(.horizontal, 8)
+                                .padding(.vertical, 6)
+                                .background(Color(NSColor.textBackgroundColor))
+                                .cornerRadius(8)
+                        }
+                        .buttonStyle(.plain)
+                        .padding(.horizontal, 8)
+                    }
                 }
-                if isLoading {
-                    ProgressView().padding()
-                }
+                .padding(.vertical, 8)
             }
-            .padding(.vertical, 8)
+            if isLoading {
+                VStack(spacing: 8) {
+                    ProgressView()
+                        .progressViewStyle(.circular)
+                    Text("Loading results…")
+                        .font(.footnote)
+                        .foregroundColor(.secondary)
+                }
+                .padding(16)
+                .background(.ultraThinMaterial)
+                .cornerRadius(10)
+            }
         }
     }
 
@@ -95,6 +106,8 @@ struct SearchResultsView: View {
     private func loadPage(_ p: Int) {
         guard p >= 0 else { return }
         isLoading = true
+        // Let the UI update to show the spinner before the synchronous fetch
+        Task { @MainActor in await Task.yield() }
         let offset = p * pageSize
         let limit = pageSize + 1 // fetch one extra to detect next page
         let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)

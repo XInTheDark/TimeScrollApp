@@ -7,6 +7,7 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		C4B151FF2E8FDB30003BBD66 /* SQLCipher in Frameworks */ = {isa = PBXBuildFile; productRef = C4B151FE2E8FDB30003BBD66 /* SQLCipher */; };
 		C4F1215A2E7EEDDC00AB38FC /* Sparkle in Frameworks */ = {isa = PBXBuildFile; productRef = C4F121592E7EEDDC00AB38FC /* Sparkle */; };
 /* End PBXBuildFile section */
 
@@ -69,6 +70,7 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				C4B151FF2E8FDB30003BBD66 /* SQLCipher in Frameworks */,
 				C4F1215A2E7EEDDC00AB38FC /* Sparkle in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -131,6 +133,7 @@
 			name = TimeScroll;
 			packageProductDependencies = (
 				C4F121592E7EEDDC00AB38FC /* Sparkle */,
+				C4B151FE2E8FDB30003BBD66 /* SQLCipher */,
 			);
 			productName = TimeScroll;
 			productReference = C4681DB32E7C2717004C20D3 /* TimeScroll.app */;
@@ -216,6 +219,7 @@
 			minimizedProjectReferenceProxies = 1;
 			packageReferences = (
 				C4F121582E7EEDDC00AB38FC /* XCRemoteSwiftPackageReference "Sparkle" */,
+				C4B151FD2E8FDB30003BBD66 /* XCRemoteSwiftPackageReference "SQLCipher.swift" */,
 			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = C4681DB42E7C2717004C20D3 /* Products */;
@@ -420,7 +424,7 @@
 				CODE_SIGN_ENTITLEMENTS = TimeScrollDev/TimeScroll.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
-				CURRENT_PROJECT_VERSION = 15;
+				CURRENT_PROJECT_VERSION = 16;
 				DEVELOPMENT_ASSET_PATHS = "";
 				DEVELOPMENT_TEAM = AHMJRF4WSG;
 				ENABLE_HARDENED_RUNTIME = YES;
@@ -442,7 +446,7 @@
 					"@executable_path/../Frameworks",
 				);
 				MACOSX_DEPLOYMENT_TARGET = 13.0;
-				MARKETING_VERSION = alpha.4;
+				MARKETING_VERSION = alpha.5;
 				PRODUCT_BUNDLE_IDENTIFIER = com.muzhen.TimeScroll;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				REGISTER_APP_GROUPS = YES;
@@ -460,7 +464,7 @@
 				CODE_SIGN_ENTITLEMENTS = TimeScrollDev/TimeScroll.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
-				CURRENT_PROJECT_VERSION = 15;
+				CURRENT_PROJECT_VERSION = 16;
 				DEVELOPMENT_ASSET_PATHS = "";
 				DEVELOPMENT_TEAM = AHMJRF4WSG;
 				ENABLE_HARDENED_RUNTIME = YES;
@@ -482,7 +486,7 @@
 					"@executable_path/../Frameworks",
 				);
 				MACOSX_DEPLOYMENT_TARGET = 13.0;
-				MARKETING_VERSION = alpha.4;
+				MARKETING_VERSION = alpha.5;
 				PRODUCT_BUNDLE_IDENTIFIER = com.muzhen.TimeScroll;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				REGISTER_APP_GROUPS = YES;
@@ -601,6 +605,14 @@
 /* End XCConfigurationList section */
 
 /* Begin XCRemoteSwiftPackageReference section */
+		C4B151FD2E8FDB30003BBD66 /* XCRemoteSwiftPackageReference "SQLCipher.swift" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/sqlcipher/SQLCipher.swift.git";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 4.10.0;
+			};
+		};
 		C4F121582E7EEDDC00AB38FC /* XCRemoteSwiftPackageReference "Sparkle" */ = {
 			isa = XCRemoteSwiftPackageReference;
 			repositoryURL = "https://github.com/sparkle-project/Sparkle";
@@ -612,6 +624,11 @@
 /* End XCRemoteSwiftPackageReference section */
 
 /* Begin XCSwiftPackageProductDependency section */
+		C4B151FE2E8FDB30003BBD66 /* SQLCipher */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = C4B151FD2E8FDB30003BBD66 /* XCRemoteSwiftPackageReference "SQLCipher.swift" */;
+			productName = SQLCipher;
+		};
 		C4F121592E7EEDDC00AB38FC /* Sparkle */ = {
 			isa = XCSwiftPackageProductDependency;
 			package = C4F121582E7EEDDC00AB38FC /* XCRemoteSwiftPackageReference "Sparkle" */;

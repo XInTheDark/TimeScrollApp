@@ -1,5 +1,6 @@
 import SwiftUI
 import AppKit
+import UniformTypeIdentifiers
 
 struct SnapshotStageView: View {
     @ObservedObject var model: TimelineModel
@@ -13,7 +14,19 @@ struct SnapshotStageView: View {
         ZStack { // center-aligned content by default
             if let sel = model.selected {
                 let url = URL(fileURLWithPath: sel.path)
-                if let image = nsImage ?? NSImage(contentsOf: url) {
+                let image: NSImage? = {
+                    if url.pathExtension.lowercased() == "tse" {
+                        // Only allow decrypt when vault is unlocked (regardless of vaultEnabled setting)
+                        let unlocked = UserDefaults.standard.bool(forKey: "vault.isUnlocked")
+                        guard unlocked else { return nil }
+                        if let data = try? FileCrypter.shared.decryptImage(at: url) {
+                            return NSImage(data: data)
+                        }
+                        return nil
+                    }
+                    return nsImage ?? NSImage(contentsOf: url)
+                }()
+                if let image = image {
                     ZoomableImageView(image: image, rects: rects)
                         .id(model.selected?.id) // ensure NSViewRepresentable refreshes on selection change
                         .onAppear {
@@ -22,7 +35,17 @@ struct SnapshotStageView: View {
                         }
                         .onChange(of: model.selected?.id) { _ in
                             if let p = model.selected?.path {
-                                nsImage = NSImage(contentsOf: URL(fileURLWithPath: p))
+                                let u = URL(fileURLWithPath: p)
+                                if u.pathExtension.lowercased() == "tse" {
+                                    let unlocked = UserDefaults.standard.bool(forKey: "vault.isUnlocked")
+                                    if unlocked {
+                                        nsImage = (try? FileCrypter.shared.decryptImage(at: u)).flatMap { NSImage(data: $0) }
+                                    } else {
+                                        nsImage = nil
+                                    }
+                                } else {
+                                    nsImage = NSImage(contentsOf: u)
+                                }
                             } else {
                                 nsImage = nil
                             }
@@ -31,7 +54,17 @@ struct SnapshotStageView: View {
                         }
                         .onChange(of: model.selectedIndex) { _ in
                             if let p = model.selected?.path {
-                                nsImage = NSImage(contentsOf: URL(fileURLWithPath: p))
+                                let u = URL(fileURLWithPath: p)
+                                if u.pathExtension.lowercased() == "tse" {
+                                    let unlocked = UserDefaults.standard.bool(forKey: "vault.isUnlocked")
+                                    if unlocked {
+                                        nsImage = (try? FileCrypter.shared.decryptImage(at: u)).flatMap { NSImage(data: $0) }
+                                    } else {
+                                        nsImage = nil
+                                    }
+                                } else {
+                                    nsImage = NSImage(contentsOf: u)
+                                }
                             } else {
                                 nsImage = nil
                             }
@@ -333,7 +366,15 @@ private struct ActionsPanel: View {
 
 enum SnapshotActions {
     static func copyImage(at url: URL) {
-        if let img = NSImage(contentsOf: url) {
+        let img: NSImage? = {
+            if url.pathExtension.lowercased() == "tse" {
+                let unlocked = UserDefaults.standard.bool(forKey: "vault.isUnlocked")
+                if unlocked, let data = try? FileCrypter.shared.decryptImage(at: url) { return NSImage(data: data) }
+                return nil
+            }
+            return NSImage(contentsOf: url)
+        }()
+        if let img = img {
             let pb = NSPasteboard.general
             pb.clearContents()
             pb.writeObjects([img])
@@ -346,14 +387,38 @@ enum SnapshotActions {
         let panel = NSSavePanel()
         panel.canCreateDirectories = true
         panel.title = "Save Image As"
-        panel.nameFieldStringValue = url.lastPathComponent
-        let ext = url.pathExtension.lowercased()
-        if !ext.isEmpty { panel.allowedFileTypes = [ext] }
+        if url.pathExtension.lowercased() == "tse" {
+            // Suggest original extension (unknown here); default to .png
+            panel.nameFieldStringValue = url.deletingPathExtension().lastPathComponent + ".png"
+            if #available(macOS 11.0, *) {
+                panel.allowedContentTypes = [UTType.png, UTType.jpeg, UTType.heic]
+            } else {
+                panel.allowedFileTypes = ["png","jpg","jpeg","heic"]
+            }
+        } else {
+            panel.nameFieldStringValue = url.lastPathComponent
+            let ext = url.pathExtension.lowercased()
+            if !ext.isEmpty {
+                if #available(macOS 11.0, *) {
+                    if let t = UTType(filenameExtension: ext) { panel.allowedContentTypes = [t] }
+                } else {
+                    panel.allowedFileTypes = [ext]
+                }
+            }
+        }
         if panel.runModal() == .OK, let dest = panel.url {
             do {
-                let tmp = dest.deletingLastPathComponent().appendingPathComponent(".timescrolldev-tmp-\(UUID().uuidString)")
-                try FileManager.default.copyItem(at: url, to: tmp)
-                let _ = try FileManager.default.replaceItemAt(dest, withItemAt: tmp)
+                if url.pathExtension.lowercased() == "tse" {
+                    let unlocked = UserDefaults.standard.bool(forKey: "vault.isUnlocked")
+                    guard unlocked, let data = try? FileCrypter.shared.decryptImage(at: url) else {
+                        throw NSError(domain: "TS.Save", code: -1)
+                    }
+                    try data.write(to: dest, options: Data.WritingOptions.atomic)
+                } else {
+                    let tmp = dest.deletingLastPathComponent().appendingPathComponent(".timescrolldev-tmp-\(UUID().uuidString)")
+                    try FileManager.default.copyItem(at: url, to: tmp)
+                    let _ = try FileManager.default.replaceItemAt(dest, withItemAt: tmp)
+                }
             } catch {
                 NSSound.beep()
             }

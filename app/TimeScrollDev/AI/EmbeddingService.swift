@@ -1,12 +1,12 @@
 import Foundation
 import NaturalLanguage
 
-// Lightweight embedding service backed ONLY by Apple's NaturalLanguage word embeddings.
+// Lightweight embedding service
+// currently we use only Apple's NaturalLanguage word embeddings.
 // All vectors are L2-normalized Float32 so dot(query, doc) ~ cosine.
 final class EmbeddingService {
     static let shared = EmbeddingService()
     private init() {
-        // Snapshot settings from UserDefaults; avoid @MainActor SettingsStore per Agents Guide
         let d = UserDefaults.standard
         aiEnabled = (d.object(forKey: "settings.aiEmbeddingsEnabled") != nil) ? d.bool(forKey: "settings.aiEmbeddingsEnabled") : false
         threshold = (d.object(forKey: "settings.aiThreshold") != nil) ? d.double(forKey: "settings.aiThreshold") : 0.5
@@ -17,12 +17,10 @@ final class EmbeddingService {
         provider = NLEmbeddingProvider()
     }
 
-    // Settings snapshot (read-only here)
     private(set) var aiEnabled: Bool
     private(set) var threshold: Double
     private(set) var maxCandidates: Int
 
-    // Provider (NaturalLanguage). Optional: may be unavailable on some systems.
     private let provider: NLEmbeddingProvider?
 
     var dim: Int { provider?.dim ?? 0 }
@@ -31,11 +29,9 @@ final class EmbeddingService {
         return embedWithStats(text).vec
     }
 
-    // Returns normalized vector and simple stats useful for debugging.
     func embedWithStats(_ text: String) -> (vec: [Float], known: Int, total: Int) {
         guard let p = provider else { return ([], 0, 0) }
         let (raw, known, total) = p.embedWithStats(text: text)
-        // Log if debug enabled
         let dbg = UserDefaults.standard.bool(forKey: "settings.debugMode")
         if dbg {
             var sum: Float = 0; for x in raw { sum += x*x }
@@ -70,9 +66,6 @@ final class EmbeddingService {
     }
 }
 
-// (Legacy provider protocol removed; we exclusively use NaturalLanguage now.)
-
-
 // MARK: - NLKit provider (word vectors averaged)
 final class NLEmbeddingProvider {
     let dim: Int
@@ -104,5 +97,3 @@ final class NLEmbeddingProvider {
         return (v, known, comps.count)
     }
 }
-
-// (Removed hash fallback per NL-only requirement.)

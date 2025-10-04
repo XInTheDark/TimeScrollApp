@@ -21,7 +21,6 @@ final class OCRService {
     }
 
     func recognize(from pixelBuffer: CVPixelBuffer) throws -> OCRResult {
-        // Pick up mode changes immediately from UserDefaults (background-safe)
         applyModeFromDefaultsIfNeeded()
         let handler = VNImageRequestHandler(cvPixelBuffer: pixelBuffer, orientation: .up)
         try handler.perform([request])

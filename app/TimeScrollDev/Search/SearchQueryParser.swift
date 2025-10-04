@@ -11,10 +11,8 @@ public struct ParsedSearchQuery {
 
 /// Lightweight parser that understands:
 /// - quoted phrases: "hello world" kept verbatim and matched exactly (no fuzziness applied)
-/// - (removed) previous experimental exact token markers ...token... are no longer supported
 /// - normal tokens: split by whitespace
 /// - sanitization: keep only alphanumerics and spaces inside phrases (to avoid FTS errors)
-/// The parser never drops short tokens; caller can decide how to treat them.
 struct SearchQueryParser {
     static func parse(_ raw: String) -> ParsedSearchQuery {
         var i = raw.startIndex

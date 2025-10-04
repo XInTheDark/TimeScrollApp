@@ -1,7 +1,5 @@
 import Foundation
 
-// Types SnapshotMeta and SearchResult are part of the main target; no extra imports required.
-
 @MainActor
 final class SearchService {
     // Build per-part FTS query fragments from a user query. Each returned string is intended

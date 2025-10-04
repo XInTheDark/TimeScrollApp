@@ -1,9 +1,6 @@
 import Foundation
 import CoreGraphics
-// For OCRLine type
 import Vision
-// IMPORTANT: Prefer SQLCipher build of SQLite so that PRAGMA key activates encryption.
-// If the SQLCipher SwiftPM package is linked, we can import SQLCipher; otherwise we fall back.
 #if canImport(SQLCipher)
 import SQLCipher
 #else
@@ -11,8 +8,6 @@ import SQLite3
 #endif
 
 private let SQLITE_TRANSIENT = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
-
-// Legacy search hit struct removed; timeline uses SnapshotMeta.
 
 // Compact metadata row for timeline/search without N+1 lookups.
 struct SnapshotMeta: Identifiable, Hashable {

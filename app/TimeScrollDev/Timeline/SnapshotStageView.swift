@@ -121,6 +121,7 @@ struct SnapshotStageView: View {
         func normalize(_ s: String) -> String {
             s.folding(options: [.diacriticInsensitive, .caseInsensitive], locale: .current)
         }
+    let intelligent = SettingsStore.shared.intelligentAccuracy
     let tokenNorms = parts.map { normalize($0.text) }.filter { !$0.isEmpty }
 
         func splitWords(_ s: String) -> [String] {
@@ -220,7 +221,13 @@ struct SnapshotStageView: View {
             for row in rows {
                 let textNorm = normalize(row.text)
                 for t in tokenNorms {
-                    if matches(token: t, inText: textNorm) {
+                    // Expand variants when intelligent accuracy is enabled; otherwise test the base token only
+                    let variants = intelligent ? OCRConfusion.expand(t) : [t]
+                    var ok = false
+                    for v in variants {
+                        if matches(token: v, inText: textNorm) { ok = true; break }
+                    }
+                    if ok {
                         all.append(row.rect)
                         break
                     }

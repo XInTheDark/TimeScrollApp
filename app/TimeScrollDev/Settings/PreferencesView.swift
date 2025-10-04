@@ -342,6 +342,7 @@ private struct SearchPane: View {
                     .frame(maxWidth: 280)
                 }
                 Toggle("Show highlight boxes", isOn: $settings.showHighlights)
+                Toggle("Intelligent accuracy improvement", isOn: $settings.intelligentAccuracy)
             }
         }
         .formStyle(.grouped)
@@ -504,5 +505,4 @@ private struct DataResetConfirmSheet: View {
         .frame(minWidth: 520)
     }
 }
-
 

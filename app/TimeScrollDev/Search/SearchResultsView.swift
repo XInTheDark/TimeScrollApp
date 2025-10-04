@@ -222,17 +222,33 @@ private struct SearchRowView: View {
     }
 
     private func makeSnippet(content: String, query: String) -> AttributedString? {
-    let q = query.trimmingCharacters(in: .whitespacesAndNewlines)
-    let parts = SearchQueryParser.parse(q).parts
+        let q = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        let parts = SearchQueryParser.parse(q).parts
         let contentNorm = normalize(content)
         var firstHit: String.Index? = nil
         var firstLen = 0
+        let intelligent = SettingsStore.shared.intelligentAccuracy
+        // Find earliest occurrence of any token variant (phrases remain exact)
         for part in parts {
-            let tn = normalize(part.text)
-            if let r = contentNorm.range(of: tn) {
-                firstHit = r.lowerBound
-                firstLen = tn.count
-                break
+            if part.isPhrase {
+                let tn = normalize(part.text)
+                if let r = contentNorm.range(of: tn) {
+                    firstHit = r.lowerBound
+                    firstLen = tn.count
+                    break
+                }
+            } else {
+                let base = normalize(part.text)
+                let variants: [String] = intelligent ? OCRConfusion.expand(base) : [base]
+                var found: Range<String.Index>? = nil
+                for v in variants {
+                    if let r = contentNorm.range(of: v) { found = r; break }
+                }
+                if let r = found {
+                    firstHit = r.lowerBound
+                    firstLen = contentNorm.distance(from: r.lowerBound, to: r.upperBound)
+                    break
+                }
             }
         }
         // Window
@@ -260,15 +276,25 @@ private struct SearchRowView: View {
         var attr = AttributedString(snippet)
         let snNorm = normalize(snippet)
         for part in parts {
-            let tn = normalize(part.text)
-            var searchStart = snNorm.startIndex
-            while let r = snNorm.range(of: tn, range: searchStart..<snNorm.endIndex) {
-                let hi = r.upperBound
-                // Convert to AttributedString indices
-                if let ra = Range(r, in: attr) {
-                    attr[ra].inlinePresentationIntent = .stronglyEmphasized
+            if part.isPhrase {
+                let tn = normalize(part.text)
+                var searchStart = snNorm.startIndex
+                while let r = snNorm.range(of: tn, range: searchStart..<snNorm.endIndex) {
+                    let hi = r.upperBound
+                    if let ra = Range(r, in: attr) { attr[ra].inlinePresentationIntent = .stronglyEmphasized }
+                    searchStart = hi
                 }
-                searchStart = hi
+            } else {
+                let base = normalize(part.text)
+                let variants: [String] = intelligent ? OCRConfusion.expand(base) : [base]
+                for v in variants {
+                    var searchStart = snNorm.startIndex
+                    while let r = snNorm.range(of: v, range: searchStart..<snNorm.endIndex) {
+                        let hi = r.upperBound
+                        if let ra = Range(r, in: attr) { attr[ra].inlinePresentationIntent = .stronglyEmphasized }
+                        searchStart = hi
+                    }
+                }
             }
         }
         // Ellipsize presentation

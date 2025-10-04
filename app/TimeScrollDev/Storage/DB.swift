@@ -560,6 +560,55 @@ final class DB {
         }
     }
 
+    // FTS search with multiple MATCH parts AND-combined at SQL level
+    func searchMetas(_ ftsParts: [String],
+                     appBundleIds: [String]? = nil,
+                     startMs: Int64? = nil,
+                     endMs: Int64? = nil,
+                     limit: Int = 1000,
+                     offset: Int = 0) throws -> [SnapshotMeta] {
+        try onQueueSync {
+            guard !ftsParts.isEmpty else { return [] }
+            try openIfNeeded()
+            guard let db = db else { return [] }
+            var sql = """
+            SELECT s.id, s.started_at_ms, s.path, s.app_bundle_id, s.app_name
+            FROM ts_text t
+            JOIN ts_snapshot s ON s.id = t.rowid
+            WHERE 1=1
+            """
+            // Add one MATCH per part to preserve per-token OR-group semantics
+            for _ in ftsParts { sql += " AND t.content MATCH ?" }
+            if let s = startMs { sql += " AND s.started_at_ms >= \(s)" }
+            if let e = endMs { sql += " AND s.started_at_ms <= \(e)" }
+            if let ids = appBundleIds, !ids.isEmpty {
+                let placeholders = Array(repeating: "?", count: ids.count).joined(separator: ",")
+                sql += " AND s.app_bundle_id IN (\(placeholders))"
+            }
+            sql += " ORDER BY s.started_at_ms DESC LIMIT ? OFFSET ?;"
+            var stmt: OpaquePointer?
+            defer { sqlite3_finalize(stmt) }
+            guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return [] }
+            var idx: Int32 = 1
+            for p in ftsParts { sqlite3_bind_text(stmt, idx, p, -1, SQLITE_TRANSIENT); idx += 1 }
+            if let ids = appBundleIds, !ids.isEmpty {
+                for bid in ids { sqlite3_bind_text(stmt, idx, bid, -1, SQLITE_TRANSIENT); idx += 1 }
+            }
+            sqlite3_bind_int(stmt, idx, Int32(limit)); idx += 1
+            sqlite3_bind_int(stmt, idx, Int32(offset))
+            var rows: [SnapshotMeta] = []
+            while sqlite3_step(stmt) == SQLITE_ROW {
+                let id = sqlite3_column_int64(stmt, 0)
+                let ts = sqlite3_column_int64(stmt, 1)
+                let path = String(cString: sqlite3_column_text(stmt, 2))
+                let bid = sqlite3_column_text(stmt, 3).map { String(cString: $0) }
+                let name = sqlite3_column_text(stmt, 4).map { String(cString: $0) }
+                rows.append(SnapshotMeta(id: id, startedAtMs: ts, path: path, appBundleId: bid, appName: name))
+            }
+            return rows
+        }
+    }
+
     // Paged search with raw text content for snippet UI (multi-app)
     func searchWithContent(_ ftsQuery: String,
                            appBundleIds: [String]? = nil,
@@ -588,6 +637,55 @@ final class DB {
             guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return [] }
             var idx: Int32 = 1
             sqlite3_bind_text(stmt, idx, ftsQuery, -1, SQLITE_TRANSIENT); idx += 1
+            if let ids = appBundleIds, !ids.isEmpty {
+                for bid in ids { sqlite3_bind_text(stmt, idx, bid, -1, SQLITE_TRANSIENT); idx += 1 }
+            }
+            sqlite3_bind_int(stmt, idx, Int32(limit)); idx += 1
+            sqlite3_bind_int(stmt, idx, Int32(offset))
+            var rows: [SearchResult] = []
+            while sqlite3_step(stmt) == SQLITE_ROW {
+                let id = sqlite3_column_int64(stmt, 0)
+                let ts = sqlite3_column_int64(stmt, 1)
+                let path = String(cString: sqlite3_column_text(stmt, 2))
+                let bid = sqlite3_column_text(stmt, 3).map { String(cString: $0) }
+                let name = sqlite3_column_text(stmt, 4).map { String(cString: $0) }
+                let content = sqlite3_column_text(stmt, 5).map { String(cString: $0) } ?? ""
+                rows.append(SearchResult(id: id, startedAtMs: ts, path: path, appBundleId: bid, appName: name, content: content))
+            }
+            return rows
+        }
+    }
+
+    // FTS search with multiple MATCH parts AND-combined at SQL level (with content)
+    func searchWithContent(_ ftsParts: [String],
+                           appBundleIds: [String]? = nil,
+                           startMs: Int64? = nil,
+                           endMs: Int64? = nil,
+                           limit: Int = 50,
+                           offset: Int = 0) throws -> [SearchResult] {
+        try onQueueSync {
+            guard !ftsParts.isEmpty else { return [] }
+            try openIfNeeded()
+            guard let db = db else { return [] }
+            var sql = """
+            SELECT s.id, s.started_at_ms, s.path, s.app_bundle_id, s.app_name, t.content
+            FROM ts_text t
+            JOIN ts_snapshot s ON s.id = t.rowid
+            WHERE 1=1
+            """
+            for _ in ftsParts { sql += " AND t.content MATCH ?" }
+            if let s = startMs { sql += " AND s.started_at_ms >= \(s)" }
+            if let e = endMs { sql += " AND s.started_at_ms <= \(e)" }
+            if let ids = appBundleIds, !ids.isEmpty {
+                let placeholders = Array(repeating: "?", count: ids.count).joined(separator: ",")
+                sql += " AND s.app_bundle_id IN (\(placeholders))"
+            }
+            sql += " ORDER BY s.started_at_ms DESC LIMIT ? OFFSET ?;"
+            var stmt: OpaquePointer?
+            defer { sqlite3_finalize(stmt) }
+            guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return [] }
+            var idx: Int32 = 1
+            for p in ftsParts { sqlite3_bind_text(stmt, idx, p, -1, SQLITE_TRANSIENT); idx += 1 }
             if let ids = appBundleIds, !ids.isEmpty {
                 for bid in ids { sqlite3_bind_text(stmt, idx, bid, -1, SQLITE_TRANSIENT); idx += 1 }
             }

@@ -44,6 +44,10 @@ final class SettingsStore: ObservableObject {
     // Auto-start capture when app launches
     @Published var startRecordingOnStart: Bool = true { didSet { if !isLoading { save() } } }
 
+    // Search behavior
+    // When enabled, search tolerates common OCR character confusions (e.g., i↔l↔1, o↔0, rn↔m).
+    @Published var intelligentAccuracy: Bool = true { didSet { if !isLoading { save() } } }
+
     // Privacy
     // List of bundle identifiers for which capture should be suppressed when frontmost
     @Published var blacklistBundleIds: [String] = [] { didSet { if !isLoading { save() } } }
@@ -106,6 +110,11 @@ final class SettingsStore: ObservableObject {
             blacklistBundleIds = arr
         }
 
+        // Search behavior
+        if defaults.object(forKey: "settings.intelligentAccuracy") != nil {
+            intelligentAccuracy = defaults.bool(forKey: "settings.intelligentAccuracy")
+        }
+
         // Updates
         if defaults.object(forKey: "settings.updateChannelBeta") != nil {
             updateChannelBeta = defaults.bool(forKey: "settings.updateChannelBeta")
@@ -165,6 +174,8 @@ final class SettingsStore: ObservableObject {
         defaults.set(enableAutoCheckUpdates, forKey: "settings.enableAutoCheckUpdates")
         defaults.set(autoCheckIntervalHours, forKey: "settings.autoCheckIntervalHours")
         defaults.set(autoDownloadInstallUpdates, forKey: "settings.autoDownloadInstallUpdates")
+        // Search behavior
+        defaults.set(intelligentAccuracy, forKey: "settings.intelligentAccuracy")
     // Security
     defaults.set(vaultEnabled, forKey: "settings.vaultEnabled")
     defaults.set(captureWhileLocked, forKey: "settings.captureWhileLocked")

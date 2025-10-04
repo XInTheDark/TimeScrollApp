@@ -110,8 +110,8 @@ struct SnapshotStageView: View {
         let effective = localQuery.isEmpty ? globalQuery : localQuery
         let q = effective.trimmingCharacters(in: .whitespacesAndNewlines)
         if q.isEmpty { rects = []; return }
-        let tokens = q.split(whereSeparator: { $0.isWhitespace }).map(String.init)
-        if tokens.isEmpty {
+        let parts = SearchQueryParser.parse(q).parts
+        if parts.isEmpty {
             rects = []
             return
         }
@@ -121,7 +121,7 @@ struct SnapshotStageView: View {
         func normalize(_ s: String) -> String {
             s.folding(options: [.diacriticInsensitive, .caseInsensitive], locale: .current)
         }
-        let tokenNorms = tokens.map { normalize($0) }.filter { !$0.isEmpty }
+    let tokenNorms = parts.map { normalize($0.text) }.filter { !$0.isEmpty }
 
         func splitWords(_ s: String) -> [String] {
             let scalars = Array(s.unicodeScalars)

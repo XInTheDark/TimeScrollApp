@@ -1,4 +1,5 @@
 import Foundation
+// Types SnapshotMeta and SearchResult are part of the main target; no extra imports required.
 
 @MainActor
 final class SearchService {
@@ -14,38 +15,40 @@ final class SearchService {
                                            endMs: endMs)) ?? []
     }
 
-    // Build an FTS query string honoring fuzziness rules
+    // Build an FTS query string honoring fuzziness rules and quoted phrases (exact phrases).
     func ftsQuery(for query: String, fuzziness: SettingsStore.Fuzziness) -> String {
-        let rawTokens = query.split(whereSeparator: { $0.isWhitespace }).map(String.init)
-        // Sanitize tokens to avoid FTS syntax errors from punctuation
-        func sanitize(_ s: String) -> String {
-            let scalars = s.unicodeScalars.filter { CharacterSet.alphanumerics.contains($0) }
-            return String(String.UnicodeScalarView(scalars))
-        }
-        let tokens = rawTokens.map { sanitize($0) }.filter { !$0.isEmpty }
+        let parsed = SearchQueryParser.parse(query)
+        guard !parsed.parts.isEmpty else { return "" }
         func prefixLen(for n: Int) -> Int {
             guard n > 2 else { return n }
             switch fuzziness {
-            case .off:
-                return n
-            case .low:
-                return n <= 5 ? n : max(3, n - 1)
+            case .off: return n
+            case .low: return n <= 5 ? n : max(3, n - 1)
             case .medium:
-                let calc = Int(ceil(Double(n) * 0.70))
-                return max(3, min(n, calc))
+                return max(3, min(n, Int(ceil(Double(n) * 0.70))))
             case .high:
-                let calc = Int(ceil(Double(n) * 0.60))
-                return max(3, min(n, calc))
+                return max(3, min(n, Int(ceil(Double(n) * 0.60))))
             }
         }
-        let perToken = tokens.map { tok -> String in
-            let n = tok.count
-            if fuzziness == .off || n <= 2 { return tok }
-            if fuzziness == .low && n <= 5 { return tok }
-            let p = String(tok.prefix(prefixLen(for: n)))
-            return "\(p)*"
+        var out: [String] = []
+        for part in parsed.parts {
+            if part.isPhrase { // exact phrase: wrap in quotes, no fuzziness
+                let escaped = part.text.lowercased().replacingOccurrences(of: "\"", with: " ")
+                out.append("\"\(escaped)\"")
+                continue
+            }
+            let token = part.text.lowercased()
+            if token.isEmpty { continue }
+            let n = token.count
+            // Apply fuzziness to tokens of length >= 3 only; always include short tokens verbatim
+            if n <= 2 || fuzziness == .off || (fuzziness == .low && n <= 5) {
+                out.append(token)
+            } else {
+                let p = String(token.prefix(prefixLen(for: n)))
+                out.append("\(p)*")
+            }
         }
-        return perToken.joined(separator: " AND ")
+        return out.joined(separator: " AND ")
     }
 
     func searchMetas(_ query: String,

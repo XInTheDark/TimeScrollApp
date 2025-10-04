@@ -222,13 +222,13 @@ private struct SearchRowView: View {
     }
 
     private func makeSnippet(content: String, query: String) -> AttributedString? {
-        let q = query.trimmingCharacters(in: .whitespacesAndNewlines)
-        let tokens = q.split(whereSeparator: { $0.isWhitespace }).map(String.init)
+    let q = query.trimmingCharacters(in: .whitespacesAndNewlines)
+    let parts = SearchQueryParser.parse(q).parts
         let contentNorm = normalize(content)
         var firstHit: String.Index? = nil
         var firstLen = 0
-        for t in tokens where !t.isEmpty {
-            let tn = normalize(t)
+        for part in parts {
+            let tn = normalize(part.text)
             if let r = contentNorm.range(of: tn) {
                 firstHit = r.lowerBound
                 firstLen = tn.count
@@ -259,11 +259,10 @@ private struct SearchRowView: View {
         }
         var attr = AttributedString(snippet)
         let snNorm = normalize(snippet)
-        for t in tokens where !t.isEmpty {
-            let tn = normalize(t)
+        for part in parts {
+            let tn = normalize(part.text)
             var searchStart = snNorm.startIndex
             while let r = snNorm.range(of: tn, range: searchStart..<snNorm.endIndex) {
-                let lo = r.lowerBound
                 let hi = r.upperBound
                 // Convert to AttributedString indices
                 if let ra = Range(r, in: attr) {

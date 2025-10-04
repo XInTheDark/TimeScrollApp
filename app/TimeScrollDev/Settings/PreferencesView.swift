@@ -392,8 +392,34 @@ private struct StatsPane: View {
 private struct StoragePane: View {
     @ObservedObject var settings: SettingsStore
     @State private var showResetConfirm: Bool = false
+    @State private var showChangeSheet: Bool = false
+    @State private var pendingFolder: URL?
+    @State private var moveExisting: Bool = true
+    @State private var deleteOld: Bool = false
+    @State private var migrating: Bool = false
+    @State private var progress: String = ""
     var body: some View {
         Form {
+            Section(header: Text("Location")) {
+                LabeledContent("Storage folder") {
+                    HStack(spacing: 8) {
+                        Text(settings.storageFolderPath).lineLimit(1).truncationMode(.middle)
+                        Spacer()
+                        Button("Reveal") {
+                            let url = URL(fileURLWithPath: StoragePaths.displayPath())
+                            NSWorkspace.shared.activateFileViewerSelecting([url])
+                        }
+                        Button("Change…") { chooseFolder() }
+                        Button("Reset to Default") { resetToDefault() }
+                    }
+                }
+                if migrating {
+                    HStack(spacing: 8) {
+                        ProgressView()
+                        Text(progress.isEmpty ? "Applying…" : progress)
+                    }
+                }
+            }
             Section(header: Text("Encoding")) {
                 LabeledContent("Format") {
                     Picker("", selection: $settings.storageFormat) {
@@ -485,6 +511,28 @@ private struct StoragePane: View {
             }
         }
         .formStyle(.grouped)
+        .sheet(isPresented: $showChangeSheet) {
+            StorageLocationChangeSheet(
+                folder: pendingFolder,
+                moveExisting: $moveExisting,
+                deleteOld: $deleteOld,
+                onCancel: { showChangeSheet = false },
+                onApply: {
+                    guard let dest = pendingFolder else { showChangeSheet = false; return }
+                    showChangeSheet = false
+                    migrating = true; progress = ""
+                    Task { @MainActor in
+                        await StorageMigrationManager.shared.changeLocation(to: dest, moveExisting: moveExisting, deleteOld: deleteOld) { msg in
+                            Task { @MainActor in progress = msg }
+                        }
+                        // Update display path and UI
+                        settings.storageFolderPath = StoragePaths.displayPath()
+                        migrating = false; progress = ""
+                    }
+                }
+            )
+            .frame(minWidth: 520)
+        }
         .sheet(isPresented: $showResetConfirm) {
             DataResetConfirmSheet(onCancel: {
                 showResetConfirm = false
@@ -537,5 +585,65 @@ private struct DataResetConfirmSheet: View {
         }
         .padding(18)
         .frame(minWidth: 520)
+    }
+}
+
+private extension StoragePane {
+    func chooseFolder() {
+        let p = NSOpenPanel()
+        p.title = "Choose Storage Folder"
+        p.canChooseFiles = false
+        p.canChooseDirectories = true
+        p.canCreateDirectories = true
+        p.allowsMultipleSelection = false
+        p.prompt = "Choose"
+        if p.runModal() == .OK, let url = p.url {
+            pendingFolder = url
+            moveExisting = true
+            deleteOld = false
+            showChangeSheet = true
+        }
+    }
+
+    func resetToDefault() {
+        pendingFolder = StoragePaths.defaultRoot()
+        moveExisting = true
+        deleteOld = false
+        showChangeSheet = true
+    }
+}
+
+private struct StorageLocationChangeSheet: View {
+    let folder: URL?
+    @Binding var moveExisting: Bool
+    @Binding var deleteOld: Bool
+    var onCancel: () -> Void
+    var onApply: () -> Void
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(spacing: 8) {
+                Image(systemName: "externaldrive").font(.system(size: 28))
+                Text("Change Storage Location").font(.title3).bold()
+            }
+            if let u = folder {
+                Text("New folder:")
+                    .font(.headline)
+                Text(u.path).lineLimit(2).truncationMode(.middle)
+                    .font(.footnote)
+                    .foregroundColor(.secondary)
+            }
+            Toggle("Move existing data to the new folder", isOn: $moveExisting)
+                .toggleStyle(.checkbox)
+            Toggle("Delete data from the previous folder after changing", isOn: $deleteOld)
+                .toggleStyle(.checkbox)
+                .help("Data in the old folder will be permanently removed after the change.")
+            HStack {
+                Spacer()
+                Button("Cancel") { onCancel() }
+                Button("Apply Change") { onApply() }
+                    .keyboardShortcut(.defaultAction)
+            }
+        }
+        .padding(18)
     }
 }

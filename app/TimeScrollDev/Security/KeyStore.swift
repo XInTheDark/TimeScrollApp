@@ -8,14 +8,13 @@ final class KeyStore {
     private init() {}
 
     private let kekTag = "com.muzhen.TimeScroll.kek".data(using: .utf8)!
-    private let dbKeyPath: URL = {
-        let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
-        let dir = base.appendingPathComponent("TimeScroll/Vault", isDirectory: true)
+    private var dbKeyPath: URL {
+        let dir = StoragePaths.vaultDir()
         if !FileManager.default.fileExists(atPath: dir.path) {
             try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         }
         return dir.appendingPathComponent("dbkey.sealed")
-    }()
+    }
 
     // MARK: KEK
     func ensureKEK() throws {
@@ -107,13 +106,13 @@ final class KeyStore {
         guard let sealed = SecKeyCreateEncryptedData(pub, .eciesEncryptionCofactorX963SHA256AESGCM, dbKey as CFData, &err) as Data? else {
             throw err!.takeRetainedValue() as Error
         }
-        try sealed.write(to: dbKeyPath, options: .atomic)
+        try StoragePaths.withSecurityScope { try sealed.write(to: dbKeyPath, options: .atomic) }
     }
 
     func unwrapDbKey() throws -> Data {
         try ensureKEK()
         guard let priv = try loadPrivateKey() else { throw NSError(domain: "TS.Key", code: -10) }
-        let sealed = try Data(contentsOf: dbKeyPath)
+        let sealed = try StoragePaths.withSecurityScope { try Data(contentsOf: dbKeyPath) }
         var err: Unmanaged<CFError>?
         guard let clear = SecKeyCreateDecryptedData(priv, .eciesEncryptionCofactorX963SHA256AESGCM, sealed as CFData, &err) as Data? else {
             throw err!.takeRetainedValue() as Error

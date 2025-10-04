@@ -51,6 +51,7 @@ final class DB {
 
     func openIfNeeded() throws {
         if db != nil { return }
+        try StoragePaths.withSecurityScope {
         // If vault is enabled but not unlocked, block DB access to avoid leaking metadata
         let d = UserDefaults.standard
         let vaultOn = (d.object(forKey: "settings.vaultEnabled") != nil) ? d.bool(forKey: "settings.vaultEnabled") : false
@@ -59,13 +60,9 @@ final class DB {
         // We defensively refuse plaintext open in that case to avoid accidental downgrade.
         if vaultOn && unlocked { throw NSError(domain: "TS.DB", code: -101, userInfo: [NSLocalizedDescriptionKey: "Encrypted vault active; use SQLCipherBridge.openWithUnwrappedKeySilently() first"]) }
         if vaultOn && !unlocked { throw NSError(domain: "TS.DB", code: -100, userInfo: [NSLocalizedDescriptionKey: "Vault locked"]) }
-        let fm = FileManager.default
-        let base = fm.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
-        let dir = base.appendingPathComponent("TimeScroll", isDirectory: true)
-        if !fm.fileExists(atPath: dir.path) {
-            try fm.createDirectory(at: dir, withIntermediateDirectories: true)
-        }
-        let url = dir.appendingPathComponent("db.sqlite")
+        // Resolve storage root (user-selected or default) and ensure it exists
+        try StoragePaths.ensureRootExists()
+        let url = StoragePaths.dbURL()
         dbURL = url
         var handle: OpaquePointer?
         if sqlite3_open(url.path, &handle) != SQLITE_OK { throw NSError(domain: "TS.DB", code: 1) }
@@ -76,10 +73,12 @@ final class DB {
         sqlite3_exec(handle, "PRAGMA cache_size=-2000;", nil, nil, nil)
         try createSchema()
         try migrateIfNeeded()
+        }
     }
 
     // Open using SQLCipher key. If SQLCipher is not linked yet, the PRAGMA statements will be no-ops.
     func openWithSqlcipher(key: Data) throws {
+        try StoragePaths.withSecurityScope {
         if db != nil {
             // If already open, verify it's SQLCipher; if not, close and reopen encrypted
             var test: OpaquePointer?
@@ -92,13 +91,8 @@ final class DB {
             sqlite3_finalize(test)
             close()
         }
-        let fm = FileManager.default
-        let base = fm.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
-        let dir = base.appendingPathComponent("TimeScroll", isDirectory: true)
-        if !fm.fileExists(atPath: dir.path) {
-            try fm.createDirectory(at: dir, withIntermediateDirectories: true)
-        }
-        let url = dir.appendingPathComponent("db.sqlite")
+        try StoragePaths.ensureRootExists()
+        let url = StoragePaths.dbURL()
         dbURL = url
         var handle: OpaquePointer?
         if sqlite3_open(url.path, &handle) != SQLITE_OK { throw NSError(domain: "TS.DB", code: 1) }
@@ -144,6 +138,7 @@ final class DB {
         try migrateIfNeeded()
         // After schema ensures at least one write, verify the on-disk header is no longer the plaintext SQLite magic.
         verifyEncryptedHeader()
+        }
     }
 
     func close() {

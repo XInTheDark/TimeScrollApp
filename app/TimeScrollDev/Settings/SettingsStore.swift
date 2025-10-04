@@ -32,6 +32,8 @@ final class SettingsStore: ObservableObject {
     @Published var degradeAfterDays: Int = 7 { didSet { if !isLoading { save() } } }
     @Published var degradeMaxLongEdge: Int = 1200 { didSet { if !isLoading { save() } } }
     @Published var degradeQuality: Double = 0.5 { didSet { if !isLoading { save() } } }
+    // Storage location (display only; bookmark lives in UserDefaults for background use)
+    @Published var storageFolderPath: String = StoragePaths.displayPath() { didSet { if !isLoading { save() } } }
     // Energy: keep captureScale
     @Published var captureScale: Double = 0.8 { didSet { if !isLoading { save() } } }  // 0.5...1.0
     // Displays: capture first or all
@@ -94,6 +96,7 @@ final class SettingsStore: ObservableObject {
         }
 
         if let raw = defaults.string(forKey: "settings.storageFormat"), let f = StorageFormat(rawValue: raw) { storageFormat = f }
+        if let p = defaults.string(forKey: StoragePaths.displayPathKey) { storageFolderPath = p }
         let mle = defaults.integer(forKey: "settings.maxLongEdge"); if mle >= 0 { maxLongEdge = mle }
         let q = defaults.double(forKey: "settings.lossyQuality"); if q > 0 { lossyQuality = q }
         if defaults.object(forKey: "settings.dedupEnabled") != nil { dedupEnabled = defaults.bool(forKey: "settings.dedupEnabled") }
@@ -198,6 +201,8 @@ final class SettingsStore: ObservableObject {
         defaults.set(aiModeOn, forKey: "settings.aiModeOn")
         defaults.set(aiThreshold, forKey: "settings.aiThreshold")
         defaults.set(aiMaxCandidates, forKey: "settings.aiMaxCandidates")
+        // Storage location display path (bookmark handled via StoragePaths.setStorageFolder)
+        defaults.set(storageFolderPath, forKey: StoragePaths.displayPathKey)
     // Security
     defaults.set(vaultEnabled, forKey: "settings.vaultEnabled")
     defaults.set(captureWhileLocked, forKey: "settings.captureWhileLocked")

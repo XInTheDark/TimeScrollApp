@@ -118,24 +118,21 @@ struct StatsView: View {
     }
 
     private func computeDBSize() -> Int64 {
-        let fm = FileManager.default
         // Use existing dbURL if available, else construct expected path
         var urls: [URL] = []
         if let u = DB.shared.dbURL { urls.append(u) }
-        else {
-            if let base = fm.urls(for: .applicationSupportDirectory, in: .userDomainMask).first {
-                urls.append(base.appendingPathComponent("TimeScroll/db.sqlite"))
-            }
-        }
+        else { urls.append(StoragePaths.dbURL()) }
         if let base = urls.first?.deletingPathExtension() {
             // Also include WAL/SHM if present
             urls.append(base.appendingPathExtension("sqlite-wal"))
             urls.append(base.appendingPathExtension("sqlite-shm"))
         }
         var total: Int64 = 0
-        for u in urls {
-            if let vals = try? u.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey]), vals.isRegularFile == true {
-                total += Int64(vals.fileSize ?? 0)
+        StoragePaths.withSecurityScope {
+            for u in urls {
+                if let vals = try? u.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey]), vals.isRegularFile == true {
+                    total += Int64(vals.fileSize ?? 0)
+                }
             }
         }
         return total
@@ -160,4 +157,3 @@ struct StatsView: View {
         return "\(remS)s"
     }
 }
-

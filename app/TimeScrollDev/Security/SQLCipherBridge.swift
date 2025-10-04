@@ -64,11 +64,9 @@ final class SQLCipherBridge {
     }
 
     private func dbURL() -> (URL, Bool) {
-        let fm = FileManager.default
-        let base = fm.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
-        let dir = base.appendingPathComponent("TimeScroll", isDirectory: true)
-        let url = dir.appendingPathComponent("db.sqlite")
-        return (url, fm.fileExists(atPath: url.path))
+        let url = StoragePaths.dbURL()
+        let exists = FileManager.default.fileExists(atPath: url.path)
+        return (url, exists)
     }
 
     private func isLikelyPlaintextSQLite(url: URL) -> Bool {
@@ -82,6 +80,7 @@ final class SQLCipherBridge {
     }
 
     private func migrateFile(at url: URL, key: Data) throws {
+        try StoragePaths.withSecurityScope {
         // Create a new encrypted DB and export from the plaintext DB into it
         let encURL = url.deletingLastPathComponent().appendingPathComponent("db.sqlite.enc.tmp")
         _ = try? FileManager.default.removeItem(at: encURL)
@@ -129,9 +128,11 @@ final class SQLCipherBridge {
         let shm = baseDir.appendingPathComponent(baseName + "-shm")
         _ = try? FileManager.default.removeItem(at: wal)
         _ = try? FileManager.default.removeItem(at: shm)
+        }
     }
 
     private func migrateEncryptedFileToPlaintext(at url: URL, key: Data) throws {
+        try StoragePaths.withSecurityScope {
         // Create a new plaintext DB and export from the encrypted DB into it
         let plainURL = url.deletingLastPathComponent().appendingPathComponent("db.sqlite.plain.tmp")
         _ = try? FileManager.default.removeItem(at: plainURL)
@@ -179,6 +180,7 @@ final class SQLCipherBridge {
         let shm = baseDir.appendingPathComponent(baseName + "-shm")
         _ = try? FileManager.default.removeItem(at: wal)
         _ = try? FileManager.default.removeItem(at: shm)
+        }
     }
 
     // Post-open / post-migration verification helper

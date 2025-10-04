@@ -50,16 +50,18 @@ final class FileCrypter {
     sealedBox.tag.withUnsafeBytes { blob.append(contentsOf: $0) }
 
         // Write atomically to Snapshots dir with .tse
-        let (dir, base) = try outputLocation(timestampMs: timestampMs)
-        let url = dir.appendingPathComponent(base + ".tse")
-        let tmp = url.appendingPathExtension("tmp")
-        try blob.write(to: tmp, options: .atomic)
-        let _ = try FileManager.default.replaceItemAt(url, withItemAt: tmp)
-        return url
+        return try StoragePaths.withSecurityScope {
+            let (dir, base) = try outputLocation(timestampMs: timestampMs)
+            let url = dir.appendingPathComponent(base + ".tse")
+            let tmp = url.appendingPathExtension("tmp")
+            try blob.write(to: tmp, options: .atomic)
+            let _ = try FileManager.default.replaceItemAt(url, withItemAt: tmp)
+            return url
+        }
     }
 
     func decryptImage(at url: URL) throws -> Data {
-        let data = try Data(contentsOf: url)
+        let data = try StoragePaths.withSecurityScope { try Data(contentsOf: url) }
         guard data.count > 8 else { throw NSError(domain: "TS.TSE", code: -1) }
         let magic = String(data: data.prefix(4), encoding: .utf8)
         guard magic == "TSE1" else { throw NSError(domain: "TS.TSE", code: -2) }
@@ -151,8 +153,7 @@ final class FileCrypter {
         let day = Date(timeIntervalSince1970: TimeInterval(timestampMs)/1000)
         let df = DateFormatter(); df.dateFormat = "yyyy-MM-dd"
         let fm = FileManager.default
-        let base = fm.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
-        let dir = base.appendingPathComponent("TimeScroll/Snapshots/" + df.string(from: day), isDirectory: true)
+        let dir = StoragePaths.snapshotsDir().appendingPathComponent(df.string(from: day), isDirectory: true)
         if !fm.fileExists(atPath: dir.path) { try fm.createDirectory(at: dir, withIntermediateDirectories: true) }
         var name = "snap-\(timestampMs)"
         var candidate = dir.appendingPathComponent(name + ".tse")

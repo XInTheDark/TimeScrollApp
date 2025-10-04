@@ -1031,36 +1031,75 @@ final class DB {
         try onQueueSync {
             try openIfNeeded(); guard let db = db else { return 0 }
             var stmt: OpaquePointer?; defer { sqlite3_finalize(stmt) }
-            let sql = "SELECT SUM(CASE WHEN start_s <= ? THEN (COALESCE(end_s, ?) - start_s) ELSE 0 END) FROM ts_usage_session;"
+            // Fetch all sessions up to now and compute the union of intervals to avoid double counting
+            let sql = "SELECT start_s, COALESCE(end_s, ?) AS end_s FROM ts_usage_session WHERE start_s <= ? ORDER BY start_s ASC;"
             if sqlite3_prepare_v2(db, sql, -1, &stmt, nil) != SQLITE_OK { return 0 }
             sqlite3_bind_double(stmt, 1, now)
             sqlite3_bind_double(stmt, 2, now)
-            if sqlite3_step(stmt) == SQLITE_ROW { return sqlite3_column_double(stmt, 0) }
-            return 0
+
+            var mergedStart: Double? = nil
+            var mergedEnd: Double = 0
+            var total: Double = 0
+
+            while sqlite3_step(stmt) == SQLITE_ROW {
+                let s = sqlite3_column_double(stmt, 0)
+                let eRaw = sqlite3_column_double(stmt, 1)
+                // Clamp any inverted rows defensively
+                let e = max(eRaw, s)
+                if mergedStart == nil {
+                    mergedStart = s; mergedEnd = e
+                    continue
+                }
+                if s > mergedEnd { // disjoint
+                    total += max(0, mergedEnd - (mergedStart ?? mergedEnd))
+                    mergedStart = s; mergedEnd = e
+                } else { // overlap or touch
+                    if e > mergedEnd { mergedEnd = e }
+                }
+            }
+            if let ms = mergedStart {
+                total += max(0, mergedEnd - ms)
+            }
+            return total
         }
     }
 
     func usageSecondsSince(cutoff: TimeInterval, now: TimeInterval) throws -> TimeInterval {
         try onQueueSync {
             try openIfNeeded(); guard let db = db else { return 0 }
+            let lo = min(cutoff, now)
+            let hi = max(cutoff, now)
             var stmt: OpaquePointer?; defer { sqlite3_finalize(stmt) }
-            // Fetch overlapping sessions; compute overlap in Swift
-            let sql = "SELECT start_s, end_s FROM ts_usage_session WHERE start_s <= ? AND COALESCE(end_s, ?) >= ?;"
+            // Fetch sessions overlapping [cutoff, now] and compute the union of clamped intervals
+            let sql = "SELECT start_s, end_s FROM ts_usage_session WHERE start_s <= ? AND COALESCE(end_s, ?) >= ? ORDER BY start_s ASC;"
             if sqlite3_prepare_v2(db, sql, -1, &stmt, nil) != SQLITE_OK { return 0 }
-            sqlite3_bind_double(stmt, 1, now)
-            sqlite3_bind_double(stmt, 2, now)
-            sqlite3_bind_double(stmt, 3, cutoff)
-            var total: TimeInterval = 0
+            sqlite3_bind_double(stmt, 1, hi)
+            sqlite3_bind_double(stmt, 2, hi)
+            sqlite3_bind_double(stmt, 3, lo)
+
+            var mergedStart: Double? = nil
+            var mergedEnd: Double = 0
+            var total: Double = 0
+
             while sqlite3_step(stmt) == SQLITE_ROW {
-                let start = sqlite3_column_double(stmt, 0)
-                let endVal = sqlite3_column_double(stmt, 1) // if NULL -> 0; check
-                let hasEnd = sqlite3_column_type(stmt, 1) != SQLITE_NULL
-                let end = hasEnd ? endVal : now
-                if end <= cutoff || start >= now { continue }
-                let overlapStart = max(start, cutoff)
-                let overlapEnd = min(end, now)
-                if overlapEnd > overlapStart { total += (overlapEnd - overlapStart) }
+                let rawS = sqlite3_column_double(stmt, 0)
+                let rawE = (sqlite3_column_type(stmt, 1) != SQLITE_NULL) ? sqlite3_column_double(stmt, 1) : hi
+                // Clamp to [lo, hi] and ensure non-negative interval
+                let s = max(lo, min(rawS, hi))
+                let e = max(s, min(rawE, hi))
+
+                if mergedStart == nil {
+                    mergedStart = s; mergedEnd = e
+                    continue
+                }
+                if s > mergedEnd { // disjoint
+                    total += max(0, mergedEnd - (mergedStart ?? mergedEnd))
+                    mergedStart = s; mergedEnd = e
+                } else { // overlap or touch
+                    if e > mergedEnd { mergedEnd = e }
+                }
             }
+            if let ms = mergedStart { total += max(0, mergedEnd - ms) }
             return total
         }
     }

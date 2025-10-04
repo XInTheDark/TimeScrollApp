@@ -398,6 +398,8 @@ private struct StoragePane: View {
     @State private var deleteOld: Bool = false
     @State private var migrating: Bool = false
     @State private var progress: String = ""
+    // Backup chooser
+    @State private var pendingBackupFolder: URL?
     var body: some View {
         Form {
             Section(header: Text("Location")) {
@@ -417,6 +419,26 @@ private struct StoragePane: View {
                     HStack(spacing: 8) {
                         ProgressView()
                         Text(progress.isEmpty ? "Applying…" : progress)
+                    }
+                }
+
+                Toggle("Backup older snapshots instead of deleting them", isOn: $settings.backupEnabled)
+                    .help("Keeps recent data on this device. During pruning, older snapshots are moved to the backup folder instead of being deleted.")
+                LabeledContent("Backup folder") {
+                    HStack(spacing: 8) {
+                        Text(settings.backupFolderPath).lineLimit(1).truncationMode(.middle)
+                        Spacer()
+                        Button("Reveal") {
+                            let path = StoragePaths.backupDisplayPath()
+                            guard path != "Not set" else { return }
+                            let url = URL(fileURLWithPath: path)
+                            NSWorkspace.shared.activateFileViewerSelecting([url])
+                        }
+                        Button("Choose…") { chooseBackupFolder() }
+                        Button("Clear") {
+                            StoragePaths.clearBackupFolder()
+                            settings.backupFolderPath = StoragePaths.backupDisplayPath()
+                        }
                     }
                 }
             }
@@ -465,7 +487,7 @@ private struct StoragePane: View {
 
                 LabeledContent("Max interval") {
                     HStack {
-                        Slider(value: $settings.adaptiveMaxInterval, in: 2...20, step: 1)
+                        Slider(value: $settings.adaptiveMaxInterval, in: 10.0...120.0, step: 5.0)
                         Text(String(format: "%.0f s", settings.adaptiveMaxInterval))
                             .monospacedDigit()
                             .frame(width: 36, alignment: .trailing)
@@ -610,6 +632,21 @@ private extension StoragePane {
         moveExisting = true
         deleteOld = false
         showChangeSheet = true
+    }
+
+    func chooseBackupFolder() {
+        let p = NSOpenPanel()
+        p.title = "Choose Backup Folder"
+        p.canChooseFiles = false
+        p.canChooseDirectories = true
+        p.canCreateDirectories = true
+        p.allowsMultipleSelection = false
+        p.prompt = "Choose"
+        if p.runModal() == .OK, let url = p.url {
+            pendingBackupFolder = url
+            StoragePaths.setBackupFolder(url)
+            settings.backupFolderPath = StoragePaths.backupDisplayPath()
+        }
     }
 }
 

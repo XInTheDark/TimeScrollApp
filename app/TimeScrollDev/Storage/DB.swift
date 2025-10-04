@@ -1303,21 +1303,22 @@ final class DB {
         let cutoff = Int64(Date().addingTimeInterval(-Double(days) * 86400).timeIntervalSince1970 * 1000)
         // Collect file paths to delete before removing DB rows
         var stmt: OpaquePointer?
-        var pathsToDelete: [String] = []
+        var pathsToHandle: [String] = []
         defer { sqlite3_finalize(stmt) }
         if sqlite3_prepare_v2(db, "SELECT path FROM ts_snapshot WHERE started_at_ms < ?;", -1, &stmt, nil) == SQLITE_OK {
             sqlite3_bind_int64(stmt, 1, cutoff)
             while sqlite3_step(stmt) == SQLITE_ROW {
                 if let cstr = sqlite3_column_text(stmt, 0) {
-                    pathsToDelete.append(String(cString: cstr))
+                    pathsToHandle.append(String(cString: cstr))
                 }
             }
         }
-
-        // Delete files from disk (best-effort)
+        // Move each path to backup if enabled; otherwise delete.
         let fm = FileManager.default
-        for p in pathsToDelete {
-            _ = try? fm.removeItem(atPath: p)
+        for p in pathsToHandle {
+            let srcURL = URL(fileURLWithPath: p)
+            let archived = StoragePaths.archiveSnapshotToBackupIfEnabled(srcURL)
+            if !archived { _ = try? fm.removeItem(at: srcURL) }
         }
 
         // Delete from FTS and primary tables by cutoff

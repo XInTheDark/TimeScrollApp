@@ -99,7 +99,7 @@ final class FrameOutput: NSObject, SCStreamOutput {
     }
     private var maxInterval: CFTimeInterval {
         let v = UserDefaults.standard.double(forKey: "settings.adaptiveMaxInterval")
-        return CFTimeInterval(v > 0 ? v : 8.0)
+        return CFTimeInterval(v > 0 ? v : 30.0)
     }
 
     // Work infra

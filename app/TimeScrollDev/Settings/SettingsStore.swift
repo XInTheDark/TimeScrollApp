@@ -28,12 +28,15 @@ final class SettingsStore: ObservableObject {
     @Published var dedupEnabled: Bool = true { didSet { if !isLoading { save() } } }
     @Published var dedupHammingThreshold: Int = 8 { didSet { if !isLoading { save() } } }     // 0..64
     @Published var adaptiveSampling: Bool = true { didSet { if !isLoading { save() } } }
-    @Published var adaptiveMaxInterval: Double = 8.0 { didSet { if !isLoading { save() } } }  // seconds
+    @Published var adaptiveMaxInterval: Double = 30.0 { didSet { if !isLoading { save() } } }  // seconds
     @Published var degradeAfterDays: Int = 7 { didSet { if !isLoading { save() } } }
     @Published var degradeMaxLongEdge: Int = 1200 { didSet { if !isLoading { save() } } }
     @Published var degradeQuality: Double = 0.5 { didSet { if !isLoading { save() } } }
     // Storage location (display only; bookmark lives in UserDefaults for background use)
     @Published var storageFolderPath: String = StoragePaths.displayPath() { didSet { if !isLoading { save() } } }
+    // Backup (external) storage option and display path
+    @Published var backupEnabled: Bool = false { didSet { if !isLoading { save() } } }
+    @Published var backupFolderPath: String = StoragePaths.backupDisplayPath() { didSet { if !isLoading { save() } } }
     // Energy: keep captureScale
     @Published var captureScale: Double = 0.8 { didSet { if !isLoading { save() } } }  // 0.5...1.0
     // Displays: capture first or all
@@ -97,6 +100,8 @@ final class SettingsStore: ObservableObject {
 
         if let raw = defaults.string(forKey: "settings.storageFormat"), let f = StorageFormat(rawValue: raw) { storageFormat = f }
         if let p = defaults.string(forKey: StoragePaths.displayPathKey) { storageFolderPath = p }
+        if defaults.object(forKey: "settings.backupEnabled") != nil { backupEnabled = defaults.bool(forKey: "settings.backupEnabled") }
+        if let bp = defaults.string(forKey: StoragePaths.backupDisplayPathKey) { backupFolderPath = bp }
         let mle = defaults.integer(forKey: "settings.maxLongEdge"); if mle >= 0 { maxLongEdge = mle }
         let q = defaults.double(forKey: "settings.lossyQuality"); if q > 0 { lossyQuality = q }
         if defaults.object(forKey: "settings.dedupEnabled") != nil { dedupEnabled = defaults.bool(forKey: "settings.dedupEnabled") }
@@ -153,7 +158,7 @@ final class SettingsStore: ObservableObject {
     let minutes = defaults.integer(forKey: "settings.autoLockInactivityMinutes"); if minutes >= 0 { autoLockInactivityMinutes = minutes }
     if defaults.object(forKey: "settings.autoLockOnSleep") != nil { autoLockOnSleep = defaults.bool(forKey: "settings.autoLockOnSleep") }
         isLoading = false
-        print("[Prefs] Loaded: ocr=\(ocrMode.rawValue) minInt=\(captureMinInterval) fmt=\(storageFormat.rawValue) maxEdge=\(maxLongEdge) quality=\(lossyQuality) startMin=\(startMinimized) dock=\(showDockIcon) autoRec=\(startRecordingOnStart)")
+        print("[Prefs] Loaded: ocr=\(ocrMode.rawValue) minInt=\(captureMinInterval) fmt=\(storageFormat.rawValue) maxEdge=\(maxLongEdge) quality=\(lossyQuality) backup=\(backupEnabled) startMin=\(startMinimized) dock=\(showDockIcon) autoRec=\(startRecordingOnStart)")
     }
 
     private func save() {
@@ -203,6 +208,9 @@ final class SettingsStore: ObservableObject {
         defaults.set(aiMaxCandidates, forKey: "settings.aiMaxCandidates")
         // Storage location display path (bookmark handled via StoragePaths.setStorageFolder)
         defaults.set(storageFolderPath, forKey: StoragePaths.displayPathKey)
+        // Backup settings
+        defaults.set(backupEnabled, forKey: "settings.backupEnabled")
+        defaults.set(backupFolderPath, forKey: StoragePaths.backupDisplayPathKey)
     // Security
     defaults.set(vaultEnabled, forKey: "settings.vaultEnabled")
     defaults.set(captureWhileLocked, forKey: "settings.captureWhileLocked")

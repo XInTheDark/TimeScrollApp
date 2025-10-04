@@ -57,7 +57,7 @@ final class SettingsStore: ObservableObject {
     // Remembers the toggle position in the search UI
     @Published var aiModeOn: Bool = true { didSet { if !isLoading { save() } } }
     // Similarity threshold (0..1)
-    @Published var aiThreshold: Double = 0.40 { didSet { if !isLoading { save() } } }
+    @Published var aiThreshold: Double = 0.30 { didSet { if !isLoading { save() } } }
     // Max candidates scored per query (performance knob)
     @Published var aiMaxCandidates: Int = 10000 { didSet { if !isLoading { save() } } }
 

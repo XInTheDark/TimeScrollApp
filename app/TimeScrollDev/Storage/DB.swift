@@ -157,6 +157,11 @@ final class DB {
             w REAL NOT NULL,
             h REAL NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS ts_usage_session (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            start_s REAL NOT NULL,
+            end_s REAL
+        );
         """
         if sqlite3_exec(db, schema, nil, nil, nil) != SQLITE_OK { throw NSError(domain: "TS.DB", code: 2) }
         // Create FTS table if missing
@@ -685,6 +690,143 @@ final class DB {
         defer { sqlite3_finalize(stmt) }
         if sqlite3_prepare_v2(db, "SELECT COUNT(*) FROM ts_snapshot;", -1, &stmt, nil) != SQLITE_OK { return 0 }
         return sqlite3_step(stmt) == SQLITE_ROW ? Int(sqlite3_column_int64(stmt, 0)) : 0
+        }
+    }
+
+    func snapshotCountSince(ms cutoffMs: Int64) throws -> Int {
+        try onQueueSync {
+            try openIfNeeded()
+            guard let db = db else { return 0 }
+            var stmt: OpaquePointer?
+            defer { sqlite3_finalize(stmt) }
+            if sqlite3_prepare_v2(db, "SELECT COUNT(*) FROM ts_snapshot WHERE started_at_ms >= ?;", -1, &stmt, nil) != SQLITE_OK { return 0 }
+            sqlite3_bind_int64(stmt, 1, cutoffMs)
+            return sqlite3_step(stmt) == SQLITE_ROW ? Int(sqlite3_column_int64(stmt, 0)) : 0
+        }
+    }
+
+    func sumSnapshotBytesAll() throws -> Int64 {
+        try onQueueSync {
+            try openIfNeeded(); guard let db = db else { return 0 }
+            var stmt: OpaquePointer?; defer { sqlite3_finalize(stmt) }
+            if sqlite3_prepare_v2(db, "SELECT SUM(bytes) FROM ts_snapshot WHERE bytes IS NOT NULL;", -1, &stmt, nil) != SQLITE_OK { return 0 }
+            if sqlite3_step(stmt) == SQLITE_ROW { return sqlite3_column_int64(stmt, 0) }
+            return 0
+        }
+    }
+
+    func sumSnapshotBytesSince(ms cutoffMs: Int64) throws -> Int64 {
+        try onQueueSync {
+            try openIfNeeded(); guard let db = db else { return 0 }
+            var stmt: OpaquePointer?; defer { sqlite3_finalize(stmt) }
+            if sqlite3_prepare_v2(db, "SELECT SUM(bytes) FROM ts_snapshot WHERE started_at_ms >= ? AND bytes IS NOT NULL;", -1, &stmt, nil) != SQLITE_OK { return 0 }
+            sqlite3_bind_int64(stmt, 1, cutoffMs)
+            if sqlite3_step(stmt) == SQLITE_ROW { return sqlite3_column_int64(stmt, 0) }
+            return 0
+        }
+    }
+
+    func avgSnapshotBytesAll() throws -> Int64 { try avgSnapshotBytes() }
+
+    func avgSnapshotBytesSince(ms cutoffMs: Int64) throws -> Int64 {
+        try onQueueSync {
+            try openIfNeeded(); guard let db = db else { return 0 }
+            var stmt: OpaquePointer?; defer { sqlite3_finalize(stmt) }
+            if sqlite3_prepare_v2(db, "SELECT AVG(bytes) FROM ts_snapshot WHERE started_at_ms >= ? AND bytes IS NOT NULL;", -1, &stmt, nil) != SQLITE_OK { return 0 }
+            sqlite3_bind_int64(stmt, 1, cutoffMs)
+            if sqlite3_step(stmt) == SQLITE_ROW { return sqlite3_column_int64(stmt, 0) }
+            return 0
+        }
+    }
+
+    // MARK: - Usage sessions
+    func beginUsageSession(start: TimeInterval) throws -> Int64 {
+        try onQueueSync {
+            try openIfNeeded()
+            guard let db = db else { throw NSError(domain: "TS.DB", code: 800) }
+            var stmt: OpaquePointer?
+            defer { sqlite3_finalize(stmt) }
+            let sql = "INSERT INTO ts_usage_session(start_s) VALUES(?);"
+            if sqlite3_prepare_v2(db, sql, -1, &stmt, nil) != SQLITE_OK { throw NSError(domain: "TS.DB", code: 801) }
+            sqlite3_bind_double(stmt, 1, start)
+            if sqlite3_step(stmt) != SQLITE_DONE { throw NSError(domain: "TS.DB", code: 802) }
+            return sqlite3_last_insert_rowid(db)
+        }
+    }
+
+    func endUsageSession(id: Int64, end: TimeInterval) throws {
+        try onQueueSync {
+            try openIfNeeded(); guard let db = db else { return }
+            var stmt: OpaquePointer?; defer { sqlite3_finalize(stmt) }
+            if sqlite3_prepare_v2(db, "UPDATE ts_usage_session SET end_s=? WHERE id=? AND end_s IS NULL;", -1, &stmt, nil) != SQLITE_OK { return }
+            sqlite3_bind_double(stmt, 1, end)
+            sqlite3_bind_int64(stmt, 2, id)
+            _ = sqlite3_step(stmt)
+        }
+    }
+
+    func totalUsageSeconds(now: TimeInterval) throws -> TimeInterval {
+        try onQueueSync {
+            try openIfNeeded(); guard let db = db else { return 0 }
+            var stmt: OpaquePointer?; defer { sqlite3_finalize(stmt) }
+            let sql = "SELECT SUM(CASE WHEN start_s <= ? THEN (COALESCE(end_s, ?) - start_s) ELSE 0 END) FROM ts_usage_session;"
+            if sqlite3_prepare_v2(db, sql, -1, &stmt, nil) != SQLITE_OK { return 0 }
+            sqlite3_bind_double(stmt, 1, now)
+            sqlite3_bind_double(stmt, 2, now)
+            if sqlite3_step(stmt) == SQLITE_ROW { return sqlite3_column_double(stmt, 0) }
+            return 0
+        }
+    }
+
+    func usageSecondsSince(cutoff: TimeInterval, now: TimeInterval) throws -> TimeInterval {
+        try onQueueSync {
+            try openIfNeeded(); guard let db = db else { return 0 }
+            var stmt: OpaquePointer?; defer { sqlite3_finalize(stmt) }
+            // Fetch overlapping sessions; compute overlap in Swift
+            let sql = "SELECT start_s, end_s FROM ts_usage_session WHERE start_s <= ? AND COALESCE(end_s, ?) >= ?;"
+            if sqlite3_prepare_v2(db, sql, -1, &stmt, nil) != SQLITE_OK { return 0 }
+            sqlite3_bind_double(stmt, 1, now)
+            sqlite3_bind_double(stmt, 2, now)
+            sqlite3_bind_double(stmt, 3, cutoff)
+            var total: TimeInterval = 0
+            while sqlite3_step(stmt) == SQLITE_ROW {
+                let start = sqlite3_column_double(stmt, 0)
+                let endVal = sqlite3_column_double(stmt, 1) // if NULL -> 0; check
+                let hasEnd = sqlite3_column_type(stmt, 1) != SQLITE_NULL
+                let end = hasEnd ? endVal : now
+                if end <= cutoff || start >= now { continue }
+                let overlapStart = max(start, cutoff)
+                let overlapEnd = min(end, now)
+                if overlapEnd > overlapStart { total += (overlapEnd - overlapStart) }
+            }
+            return total
+        }
+    }
+
+    func finalizeStaleOpenUsageSessions(maxOpenSeconds: TimeInterval, now: TimeInterval) {
+        _ = try? onQueueSync {
+            try openIfNeeded(); guard let db = db else { return }
+            var stmt: OpaquePointer?; defer { sqlite3_finalize(stmt) }
+            if sqlite3_prepare_v2(db, "SELECT id, start_s FROM ts_usage_session WHERE end_s IS NULL;", -1, &stmt, nil) != SQLITE_OK { return }
+            var stale: [(Int64, Double)] = []
+            while sqlite3_step(stmt) == SQLITE_ROW {
+                let id = sqlite3_column_int64(stmt, 0)
+                let start = sqlite3_column_double(stmt, 1)
+                if now - start > maxOpenSeconds {
+                    stale.append((id, start))
+                }
+            }
+            sqlite3_finalize(stmt); stmt = nil
+            if stale.isEmpty { return }
+            for (id, start) in stale {
+                var upd: OpaquePointer?; defer { sqlite3_finalize(upd) }
+                if sqlite3_prepare_v2(db, "UPDATE ts_usage_session SET end_s=? WHERE id=? AND end_s IS NULL;", -1, &upd, nil) == SQLITE_OK {
+                    let clampEnd = start + maxOpenSeconds
+                    sqlite3_bind_double(upd, 1, clampEnd)
+                    sqlite3_bind_int64(upd, 2, id)
+                    _ = sqlite3_step(upd)
+                }
+            }
         }
     }
 

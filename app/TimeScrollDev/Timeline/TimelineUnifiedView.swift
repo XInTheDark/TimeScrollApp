@@ -76,13 +76,11 @@ struct TimelineUnifiedView: View {
         HStack(spacing: 8) {
             Button(appState.isCapturing ? "Stop Capture" : "Start Capture") {
                 Task {
+                    // Use AppState helpers so UsageTracker sessions are opened/closed
                     if appState.isCapturing {
-                        await appState.captureManager.stop()
-                        appState.isCapturing = false
+                        await appState.stopCaptureIfNeeded()
                     } else {
-                        Permissions.requestScreenRecording()
-                        try? await appState.captureManager.start()
-                        appState.isCapturing = true
+                        await appState.startCaptureIfNeeded()
                     }
                 }
             }

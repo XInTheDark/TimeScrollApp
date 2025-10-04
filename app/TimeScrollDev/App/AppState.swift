@@ -31,12 +31,14 @@ final class AppState: ObservableObject {
         Permissions.requestScreenRecording()
         try? await captureManager.start()
         isCapturing = true
+        UsageTracker.shared.captureStarted()
     }
 
     func stopCaptureIfNeeded() async {
         if !isCapturing { return }
         await captureManager.stop()
         isCapturing = false
+        UsageTracker.shared.captureStopped()
     }
 
     func restartCaptureIfRunning() async {

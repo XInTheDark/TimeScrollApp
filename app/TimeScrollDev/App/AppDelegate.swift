@@ -82,6 +82,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             VaultManager.shared.lock()
         }
         SettingsStore.shared.flush()
+        UsageTracker.shared.appWillTerminate()
         UserDefaults.standard.synchronize()
     }
 

@@ -78,6 +78,8 @@ final class VaultManager: ObservableObject {
                 SQLCipherBridge.shared.migratePlaintextIfNeeded(withKey: key)
             }
             SQLCipherBridge.shared.openWithUnwrappedKeySilently()
+            // Notify usage tracker so it can retroactively create a pending session
+            UsageTracker.shared.onVaultUnlocked()
             IngestQueue.shared.startIngestIfNeeded()
             scheduleInactivityTimer()
         } catch {

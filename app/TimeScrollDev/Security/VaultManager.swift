@@ -2,6 +2,7 @@ import Foundation
 import LocalAuthentication
 import AppKit
 
+
 @MainActor
 final class VaultManager: ObservableObject {
     static let shared = VaultManager()
@@ -47,6 +48,8 @@ final class VaultManager: ObservableObject {
         d.set(enabled, forKey: "settings.vaultEnabled")
         d.synchronize()
         if enabled {
+            // Close any existing plaintext DB connection so migration can safely replace the file
+            DB.shared.close()
             // Ensure key material exists
             try? KeyStore.shared.ensureKEK()
             try? KeyStore.shared.createAndWrapDbKeyIfMissing()

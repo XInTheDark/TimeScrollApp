@@ -1,5 +1,9 @@
 import Foundation
+#if canImport(SQLCipher)
+import SQLCipher
+#else
 import SQLite3
+#endif
 
 final class SQLCipherBridge {
     static let shared = SQLCipherBridge()
@@ -13,6 +17,7 @@ final class SQLCipherBridge {
             _ = try? DB.shared.openWithSqlcipher(key: key)
             // Log runtime cipher version for verification
             DB.shared.logCipherVersion()
+            verifyHeader()
             return
         }
         // No key unwrapped
@@ -35,6 +40,7 @@ final class SQLCipherBridge {
             do {
                 try migrateFile(at: url, key: key)
                 print("[SQLCipher] Migration complete: db is now encrypted")
+                verifyHeader()
             } catch {
                 print("[SQLCipher] Migration failed: \(error)")
             }
@@ -173,5 +179,20 @@ final class SQLCipherBridge {
         let shm = baseDir.appendingPathComponent(baseName + "-shm")
         _ = try? FileManager.default.removeItem(at: wal)
         _ = try? FileManager.default.removeItem(at: shm)
+    }
+
+    // Post-open / post-migration verification helper
+    private func verifyHeader() {
+        let (url, exists) = dbURL()
+        guard exists else { return }
+        if let fh = try? FileHandle(forReadingFrom: url) {
+            defer { try? fh.close() }
+            let head = try? fh.read(upToCount: 16) ?? Data()
+            if let head = head, let s = String(data: head, encoding: .utf8), s.hasPrefix("SQLite format 3") {
+                print("[SQLCipher][WARN] Database header still plaintext magic. This implies SQLCipher isn't active (likely linking system libsqlite3). Ensure 'import SQLCipher' is used and the SQLCipher package product is linked.")
+            } else {
+                print("[SQLCipher] Header check passed (no plaintext magic).")
+            }
+        }
     }
 }

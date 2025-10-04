@@ -2,7 +2,13 @@ import Foundation
 import CoreGraphics
 // For OCRLine type
 import Vision
+// IMPORTANT: Prefer SQLCipher build of SQLite so that PRAGMA key activates encryption.
+// If the SQLCipher SwiftPM package is linked, we can import SQLCipher; otherwise we fall back.
+#if canImport(SQLCipher)
+import SQLCipher
+#else
 import SQLite3
+#endif
 
 private let SQLITE_TRANSIENT = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
 
@@ -54,6 +60,9 @@ final class DB {
         let d = UserDefaults.standard
         let vaultOn = (d.object(forKey: "settings.vaultEnabled") != nil) ? d.bool(forKey: "settings.vaultEnabled") : false
         let unlocked = d.bool(forKey: "vault.isUnlocked")
+        // When vault is enabled & unlocked the caller should have already opened via SQLCipherBridge.
+        // We defensively refuse plaintext open in that case to avoid accidental downgrade.
+        if vaultOn && unlocked { throw NSError(domain: "TS.DB", code: -101, userInfo: [NSLocalizedDescriptionKey: "Encrypted vault active; use SQLCipherBridge.openWithUnwrappedKeySilently() first"]) }
         if vaultOn && !unlocked { throw NSError(domain: "TS.DB", code: -100, userInfo: [NSLocalizedDescriptionKey: "Vault locked"]) }
         let fm = FileManager.default
         let base = fm.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
@@ -76,7 +85,18 @@ final class DB {
 
     // Open using SQLCipher key. If SQLCipher is not linked yet, the PRAGMA statements will be no-ops.
     func openWithSqlcipher(key: Data) throws {
-        if db != nil { return }
+        if db != nil {
+            // If already open, verify it's SQLCipher; if not, close and reopen encrypted
+            var test: OpaquePointer?
+            if let existing = db, sqlite3_prepare_v2(existing, "PRAGMA cipher_version;", -1, &test, nil) == SQLITE_OK {
+                if sqlite3_step(test) == SQLITE_ROW {
+                    sqlite3_finalize(test)
+                    return // already encrypted
+                }
+            }
+            sqlite3_finalize(test)
+            close()
+        }
         let fm = FileManager.default
         let base = fm.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
         let dir = base.appendingPathComponent("TimeScroll", isDirectory: true)
@@ -93,6 +113,17 @@ final class DB {
     // Use proper hex key literal form: x'..'
     let keySQL = "PRAGMA key = \"x'\(hex)'\";"
     _ = sqlite3_exec(handle, keySQL, nil, nil, nil)
+        // Ensure we are really running against a SQLCipher-enabled build. cipher_version should return a row.
+        var verStmt: OpaquePointer?
+        if sqlite3_prepare_v2(handle, "PRAGMA cipher_version;", -1, &verStmt, nil) == SQLITE_OK {
+            if sqlite3_step(verStmt) == SQLITE_ROW, let c = sqlite3_column_text(verStmt, 0) {
+                let v = String(cString: c)
+                print("[SQLCipher] Opened with cipher_version=\(v)")
+            } else {
+                print("[SQLCipher][WARN] cipher_version unavailable; this likely means the system SQLite (unencrypted) was linked. The database is NOT encrypted.")
+            }
+        }
+        sqlite3_finalize(verStmt)
         _ = sqlite3_exec(handle, "PRAGMA cipher_compatibility = 4;", nil, nil, nil)
         _ = sqlite3_exec(handle, "PRAGMA kdf_iter = 256000;", nil, nil, nil)
         _ = sqlite3_exec(handle, "PRAGMA cipher_page_size = 4096;", nil, nil, nil)
@@ -116,6 +147,8 @@ final class DB {
         sqlite3_finalize(testStmt)
         try createSchema()
         try migrateIfNeeded()
+        // After schema ensures at least one write, verify the on-disk header is no longer the plaintext SQLite magic.
+        verifyEncryptedHeader()
     }
 
     func close() {
@@ -125,7 +158,7 @@ final class DB {
 
     // Log SQLCipher version if available; useful to verify encryption at runtime
     func logCipherVersion() {
-        _ = try? onQueueSync {
+        onQueueSync {
             guard let db = db else { return }
             var stmt: OpaquePointer?
             defer { sqlite3_finalize(stmt) }
@@ -167,6 +200,21 @@ final class DB {
         // Create FTS table if missing
         let fts = "CREATE VIRTUAL TABLE IF NOT EXISTS ts_text USING fts5(content, tokenize='unicode61 remove_diacritics 2');"
         _ = sqlite3_exec(db, fts, nil, nil, nil)
+    }
+
+    // Best-effort on-disk header verification; if the first 16 bytes still show the plain SQLite header
+    // after opening with a key and creating schema, we warn so the user knows encryption isn't active.
+    private func verifyEncryptedHeader() {
+        guard let url = dbURL else { return }
+        if let fh = try? FileHandle(forReadingFrom: url) {
+            defer { try? fh.close() }
+            let head = try? fh.read(upToCount: 16) ?? Data()
+            if let head = head, let s = String(data: head, encoding: .utf8), s.hasPrefix("SQLite format 3") {
+                print("[SQLCipher][WARN] On-disk header still plaintext. This indicates SQLCipher is not actually applied. Ensure the SQLCipher package is imported (import SQLCipher) and system libsqlite3 is not used.")
+            } else {
+                print("[SQLCipher] On-disk header does not match plaintext magic; looks encrypted.")
+            }
+        }
     }
 
     private func tableExists(_ name: String) -> Bool {

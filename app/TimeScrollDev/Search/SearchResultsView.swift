@@ -14,6 +14,7 @@ struct SearchResultsView: View {
     @State private var rows: [SearchResult] = []
     @State private var isLoading: Bool = false
     @State private var hasNext: Bool = false
+    @State private var useAI: Bool = false
 
     private let pageSize: Int = 50
     private let search = SearchService()
@@ -26,7 +27,11 @@ struct SearchResultsView: View {
             Divider()
             pager
         }
-        .onAppear { loadPage(0) }
+        .onAppear {
+            // Initialize AI toggle from settings (optional feature)
+            useAI = settings.aiEmbeddingsEnabled && settings.aiModeOn
+            loadPage(0)
+        }
         .onChange(of: query) { _ in resetAndReload() }
         .onChange(of: appBundleIds) { _ in resetAndReload() }
         .onChange(of: startMs) { _ in resetAndReload() }
@@ -34,10 +39,17 @@ struct SearchResultsView: View {
     }
 
     private var header: some View {
-        HStack {
+        HStack(spacing: 12) {
             Text(query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "Latest Snapshots" : "Results for \"\(query)\"")
                 .font(.headline)
             Spacer()
+            Toggle("AI mode", isOn: Binding(get: { useAI }, set: { v in
+                useAI = v
+                UserDefaults.standard.set(v, forKey: "settings.aiModeOn")
+                resetAndReload()
+            }))
+            .disabled(!settings.aiEmbeddingsEnabled || EmbeddingService.shared.dim == 0)
+            .help((settings.aiEmbeddingsEnabled && EmbeddingService.shared.dim > 0) ? "Use local embeddings for relevance" : "Enable in Preferences or ensure NL embeddings available")
             Button("Close") { onClose() }
         }
         .padding(8)
@@ -119,6 +131,13 @@ struct SearchResultsView: View {
                                                appBundleIds: appBundleIds,
                                                startMs: startMs,
                                                endMs: endMs)
+        } else if useAI && settings.aiEmbeddingsEnabled {
+            fetched = search.searchAI(trimmed,
+                                      appBundleIds: appBundleIds,
+                                      startMs: startMs,
+                                      endMs: endMs,
+                                      limit: limit,
+                                      offset: offset)
         } else {
             fetched = search.searchWithContent(trimmed,
                                                fuzziness: fuzz,

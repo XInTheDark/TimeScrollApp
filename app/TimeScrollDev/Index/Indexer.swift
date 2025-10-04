@@ -61,6 +61,21 @@ final class Indexer {
             if !result.lines.isEmpty {
                 try DB.shared.replaceBoxes(snapshotId: snapshotId, boxes: result.lines)
             }
+            // Optional: compute and store embedding of OCR text when enabled
+            let d = UserDefaults.standard
+            let aiOn = (d.object(forKey: "settings.aiEmbeddingsEnabled") != nil) ? d.bool(forKey: "settings.aiEmbeddingsEnabled") : false
+            if aiOn {
+                let svc = EmbeddingService.shared
+                let (vec, known, total) = svc.embedWithStats(result.text)
+                if !vec.isEmpty && svc.dim == vec.count {
+                    try? DB.shared.upsertEmbedding(snapshotId: snapshotId, dim: svc.dim, vec: vec)
+                    // Debug log snapshot embedding
+                    if UserDefaults.standard.bool(forKey: "settings.debugMode") {
+                        let head = vec.prefix(8).map { String(format: "%.4f", $0) }.joined(separator: ", ")
+                        print("[AI][Store] snapshotId=\(snapshotId) dim=\(vec.count) tokens=\(known)/\(total) head=[\(head)]")
+                    }
+                }
+            }
         } catch {
         }
     }

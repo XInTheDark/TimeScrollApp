@@ -170,6 +170,23 @@ final class TimelineModel: ObservableObject {
         }
     }
 
+    // Open a specific snapshot by id by loading a time window around it and selecting it.
+    func openSnapshot(id: Int64, spanMs: Int64 = 6 * 60 * 60 * 1000) {
+        // Fetch anchor meta to know its timestamp
+        guard let anchor = try? DB.shared.snapshotMetaById(id) else { return }
+        let s = max(0, anchor.startedAtMs - spanMs)
+        let e = anchor.startedAtMs + spanMs
+        let appIds = selectedAppBundleIds.isEmpty ? nil : Array(selectedAppBundleIds)
+        let list = (try? DB.shared.latestMetas(limit: 5000,
+                                               appBundleIds: appIds,
+                                               startMs: s,
+                                               endMs: e)) ?? []
+        metas = list.sorted { $0.startedAtMs > $1.startedAtMs }
+        selectedIndex = metas.firstIndex(where: { $0.id == id }) ?? (metas.isEmpty ? -1 : 0)
+        rebuildAscCache()
+        refreshSegments()
+    }
+
     func prev() { if selectedIndex + 1 < metas.count { selectedIndex += 1 } }
     func next() { if selectedIndex - 1 >= 0 { selectedIndex -= 1 } }
 

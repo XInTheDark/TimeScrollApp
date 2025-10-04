@@ -182,6 +182,13 @@ final class DB {
             app_bundle_id TEXT,
             app_name TEXT
         );
+        -- L2-normalized sentence embeddings for semantic search
+        CREATE TABLE IF NOT EXISTS ts_embedding (
+            snapshot_id INTEGER PRIMARY KEY,
+            dim INTEGER NOT NULL,
+            vec BLOB NOT NULL,
+            updated_at_ms INTEGER NOT NULL
+        );
         CREATE TABLE IF NOT EXISTS ts_ocr_boxes (
             snapshot_id INTEGER NOT NULL,
             text TEXT NOT NULL,
@@ -200,6 +207,9 @@ final class DB {
         // Create FTS table if missing
         let fts = "CREATE VIRTUAL TABLE IF NOT EXISTS ts_text USING fts5(content, tokenize='unicode61 remove_diacritics 2');"
         _ = sqlite3_exec(db, fts, nil, nil, nil)
+        // Indices for faster joins and scans
+        _ = sqlite3_exec(db, "CREATE INDEX IF NOT EXISTS idx_ts_snapshot_started_at_ms ON ts_snapshot(started_at_ms DESC);", nil, nil, nil)
+        _ = sqlite3_exec(db, "CREATE INDEX IF NOT EXISTS idx_ts_embedding_dim ON ts_embedding(dim);", nil, nil, nil)
     }
 
     // Best-effort on-disk header verification; if the first 16 bytes still show the plain SQLite header
@@ -275,6 +285,11 @@ final class DB {
         if !tableExists("ts_text") {
             let fts = "CREATE VIRTUAL TABLE ts_text USING fts5(content, tokenize='unicode61 remove_diacritics 2');"
             _ = sqlite3_exec(db, fts, nil, nil, nil)
+        }
+        if !tableExists("ts_embedding") {
+            let sql = "CREATE TABLE ts_embedding (snapshot_id INTEGER PRIMARY KEY, dim INTEGER NOT NULL, vec BLOB NOT NULL, updated_at_ms INTEGER NOT NULL);"
+            _ = sqlite3_exec(db, sql, nil, nil, nil)
+            _ = sqlite3_exec(db, "CREATE INDEX IF NOT EXISTS idx_ts_embedding_dim ON ts_embedding(dim);", nil, nil, nil)
         }
     }
 
@@ -414,6 +429,92 @@ final class DB {
             if sqlite3_step(stmt) != SQLITE_DONE {
                 throw NSError(domain: "TS.DB", code: 101)
             }
+        }
+    }
+
+    // MARK: - Embeddings
+
+    func upsertEmbedding(snapshotId: Int64, dim: Int, vec: [Float]) throws {
+        try onQueueSync {
+            try openIfNeeded()
+            guard let db = db else { return }
+            var stmt: OpaquePointer?
+            defer { sqlite3_finalize(stmt) }
+            let sql = "INSERT INTO ts_embedding(snapshot_id, dim, vec, updated_at_ms) VALUES(?, ?, ?, ?)\n                       ON CONFLICT(snapshot_id) DO UPDATE SET dim=excluded.dim, vec=excluded.vec, updated_at_ms=excluded.updated_at_ms;"
+            guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return }
+            sqlite3_bind_int64(stmt, 1, snapshotId)
+            sqlite3_bind_int(stmt, 2, Int32(dim))
+            // Store as raw Float32 contiguous data
+            let data = vec.withUnsafeBufferPointer { Data(buffer: $0) }
+            data.withUnsafeBytes { raw in
+                sqlite3_bind_blob(stmt, 3, raw.baseAddress, Int32(data.count), SQLITE_TRANSIENT)
+            }
+            let nowMs = Int64(Date().timeIntervalSince1970 * 1000)
+            sqlite3_bind_int64(stmt, 4, nowMs)
+            _ = sqlite3_step(stmt)
+        }
+    }
+
+    struct EmbeddingCandidate: Hashable {
+        let result: SearchResult
+        let vector: [Float]
+        let dim: Int
+    }
+
+    func embeddingCandidates(appBundleIds: [String]? = nil,
+                              startMs: Int64? = nil,
+                              endMs: Int64? = nil,
+                              limit: Int = 2000,
+                              offset: Int = 0,
+                              requireDim: Int) throws -> [EmbeddingCandidate] {
+        try onQueueSync {
+            try openIfNeeded()
+            guard let db = db else { return [] }
+            var sql = """
+            SELECT s.id, s.started_at_ms, s.path, s.app_bundle_id, s.app_name, t.content, e.vec, e.dim
+            FROM ts_embedding e
+            JOIN ts_snapshot s ON s.id = e.snapshot_id
+            LEFT JOIN ts_text t ON t.rowid = s.id
+            WHERE e.dim = ?
+            """
+            if let s = startMs { sql += " AND s.started_at_ms >= \(s)" }
+            if let e = endMs { sql += " AND s.started_at_ms <= \(e)" }
+            if let ids = appBundleIds, !ids.isEmpty {
+                let placeholders = Array(repeating: "?", count: ids.count).joined(separator: ",")
+                sql += " AND s.app_bundle_id IN (\(placeholders))"
+            }
+            sql += " ORDER BY s.started_at_ms DESC LIMIT ? OFFSET ?;"
+            var stmt: OpaquePointer?
+            defer { sqlite3_finalize(stmt) }
+            guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return [] }
+            var idx: Int32 = 1
+            sqlite3_bind_int(stmt, idx, Int32(requireDim)); idx += 1
+            if let ids = appBundleIds, !ids.isEmpty {
+                for bid in ids { sqlite3_bind_text(stmt, idx, bid, -1, SQLITE_TRANSIENT); idx += 1 }
+            }
+            sqlite3_bind_int(stmt, idx, Int32(limit)); idx += 1
+            sqlite3_bind_int(stmt, idx, Int32(offset))
+            var rows: [EmbeddingCandidate] = []
+            while sqlite3_step(stmt) == SQLITE_ROW {
+                let id = sqlite3_column_int64(stmt, 0)
+                let ts = sqlite3_column_int64(stmt, 1)
+                let path = String(cString: sqlite3_column_text(stmt, 2))
+                let bid = sqlite3_column_text(stmt, 3).map { String(cString: $0) }
+                let name = sqlite3_column_text(stmt, 4).map { String(cString: $0) }
+                let content = sqlite3_column_text(stmt, 5).map { String(cString: $0) } ?? ""
+                // vec blob
+                let blobPtr = sqlite3_column_blob(stmt, 6)
+                let blobLen = Int(sqlite3_column_bytes(stmt, 6))
+                let dim = Int(sqlite3_column_int(stmt, 7))
+                var vector: [Float] = []
+                if let ptr = blobPtr, blobLen >= dim * MemoryLayout<Float>.size {
+                    let count = blobLen / MemoryLayout<Float>.size
+                    vector = Array(UnsafeBufferPointer(start: ptr.assumingMemoryBound(to: Float.self), count: count))
+                }
+                let res = SearchResult(id: id, startedAtMs: ts, path: path, appBundleId: bid, appName: name, content: content)
+                rows.append(EmbeddingCandidate(result: res, vector: vector, dim: dim))
+            }
+            return rows
         }
     }
 
@@ -606,6 +707,26 @@ final class DB {
                 rows.append(SnapshotMeta(id: id, startedAtMs: ts, path: path, appBundleId: bid, appName: name))
             }
             return rows
+        }
+    }
+
+    // Fetch a single snapshot meta by id
+    func snapshotMetaById(_ id: Int64) throws -> SnapshotMeta? {
+        try onQueueSync {
+            try openIfNeeded(); guard let db = db else { return nil }
+            var stmt: OpaquePointer?; defer { sqlite3_finalize(stmt) }
+            let sql = "SELECT id, started_at_ms, path, app_bundle_id, app_name FROM ts_snapshot WHERE id=? LIMIT 1;"
+            guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return nil }
+            sqlite3_bind_int64(stmt, 1, id)
+            if sqlite3_step(stmt) == SQLITE_ROW {
+                let id = sqlite3_column_int64(stmt, 0)
+                let ts = sqlite3_column_int64(stmt, 1)
+                let path = String(cString: sqlite3_column_text(stmt, 2))
+                let bid = sqlite3_column_text(stmt, 3).map { String(cString: $0) }
+                let name = sqlite3_column_text(stmt, 4).map { String(cString: $0) }
+                return SnapshotMeta(id: id, startedAtMs: ts, path: path, appBundleId: bid, appName: name)
+            }
+            return nil
         }
     }
 

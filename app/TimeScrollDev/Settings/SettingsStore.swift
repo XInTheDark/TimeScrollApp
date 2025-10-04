@@ -47,6 +47,14 @@ final class SettingsStore: ObservableObject {
     // Search behavior
     // When enabled, search tolerates common OCR character confusions (e.g., i↔l↔1, o↔0, rn↔m).
     @Published var intelligentAccuracy: Bool = true { didSet { if !isLoading { save() } } }
+    // AI (embedding) search settings
+    @Published var aiEmbeddingsEnabled: Bool = false { didSet { if !isLoading { save() } } }
+    // Remembers the toggle position in the search UI
+    @Published var aiModeOn: Bool = true { didSet { if !isLoading { save() } } }
+    // Similarity threshold (0..1)
+    @Published var aiThreshold: Double = 0.40 { didSet { if !isLoading { save() } } }
+    // Max candidates scored per query (performance knob)
+    @Published var aiMaxCandidates: Int = 10000 { didSet { if !isLoading { save() } } }
 
     // Privacy
     // List of bundle identifiers for which capture should be suppressed when frontmost
@@ -114,6 +122,15 @@ final class SettingsStore: ObservableObject {
         if defaults.object(forKey: "settings.intelligentAccuracy") != nil {
             intelligentAccuracy = defaults.bool(forKey: "settings.intelligentAccuracy")
         }
+        // AI search
+        if defaults.object(forKey: "settings.aiEmbeddingsEnabled") != nil {
+            aiEmbeddingsEnabled = defaults.bool(forKey: "settings.aiEmbeddingsEnabled")
+        }
+        if defaults.object(forKey: "settings.aiModeOn") != nil {
+            aiModeOn = defaults.bool(forKey: "settings.aiModeOn")
+        }
+        let aiThr = defaults.double(forKey: "settings.aiThreshold"); if aiThr > 0 { aiThreshold = min(1.0, max(0.0, aiThr)) }
+        let aiMC = defaults.integer(forKey: "settings.aiMaxCandidates"); if aiMC > 0 { aiMaxCandidates = aiMC }
 
         // Updates
         if defaults.object(forKey: "settings.updateChannelBeta") != nil {
@@ -176,6 +193,11 @@ final class SettingsStore: ObservableObject {
         defaults.set(autoDownloadInstallUpdates, forKey: "settings.autoDownloadInstallUpdates")
         // Search behavior
         defaults.set(intelligentAccuracy, forKey: "settings.intelligentAccuracy")
+        // AI search
+        defaults.set(aiEmbeddingsEnabled, forKey: "settings.aiEmbeddingsEnabled")
+        defaults.set(aiModeOn, forKey: "settings.aiModeOn")
+        defaults.set(aiThreshold, forKey: "settings.aiThreshold")
+        defaults.set(aiMaxCandidates, forKey: "settings.aiMaxCandidates")
     // Security
     defaults.set(vaultEnabled, forKey: "settings.vaultEnabled")
     defaults.set(captureWhileLocked, forKey: "settings.captureWhileLocked")

@@ -330,7 +330,7 @@ private struct SearchPane: View {
     @ObservedObject var settings: SettingsStore
     var body: some View {
         Form {
-            Section(header: Text("Search behavior")) {
+            Section {
                 LabeledContent("Fuzziness") {
                     Picker("", selection: $settings.fuzziness) {
                         ForEach(SettingsStore.Fuzziness.allCases) { f in
@@ -343,11 +343,43 @@ private struct SearchPane: View {
                 }
                 Toggle("Show highlight boxes", isOn: $settings.showHighlights)
                 Toggle("Intelligent accuracy improvement", isOn: $settings.intelligentAccuracy)
-            }
+            } header: { Text("Search behavior") }
+            Section {
+                Toggle("Enable AI Mode", isOn: $settings.aiEmbeddingsEnabled)
+                Text("AI mode uses on-device machine learning to improve search results. It slightly increases energy and disk usage.")
+                    .font(.footnote)
+                    .foregroundColor(.secondary)
+                Toggle("Default to AI mode in search", isOn: $settings.aiModeOn)
+                    .disabled(!settings.aiEmbeddingsEnabled)
+                LabeledContent("Similarity threshold") {
+                    HStack {
+                        Slider(value: $settings.aiThreshold, in: 0.2...0.8, step: 0.05)
+                            .disabled(!settings.aiEmbeddingsEnabled)
+                        Text(String(format: "%.2f", settings.aiThreshold))
+                            .monospacedDigit()
+                            .frame(width: 44, alignment: .trailing)
+                    }
+                }
+                LabeledContent("Max candidates per query") {
+                    HStack(spacing: 6) {
+                        TextField("", value: $settings.aiMaxCandidates, formatter: Self.aiIntFormatter)
+                            .frame(width: 90)
+                            .disabled(!settings.aiEmbeddingsEnabled)
+                        Text("rows").foregroundColor(.secondary)
+                    }
+                }
+            } header: { Text("AI Search") }
         }
         .formStyle(.grouped)
     }
 }
+
+extension SearchPane {
+    private static var aiIntFormatter: NumberFormatter {
+        let f = NumberFormatter(); f.numberStyle = .none; f.minimum = 100; f.maximum = 100000; return f
+    }
+}
+
 
 private struct StatsPane: View {
     var body: some View {
@@ -470,7 +502,9 @@ private struct StoragePane: View {
         f.maximum = 365
         return f
     }()
+
 }
+
 
  
 
@@ -505,4 +539,3 @@ private struct DataResetConfirmSheet: View {
         .frame(minWidth: 520)
     }
 }
-

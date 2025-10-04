@@ -215,15 +215,8 @@ struct TimelineUnifiedView: View {
                                       appBundleIds: (model.selectedAppBundleIds.isEmpty ? nil : Array(model.selectedAppBundleIds).sorted()),
                                       startMs: model.startMs,
                                       endMs: model.endMs,
-                                      onOpen: { row, absIndex in
-                                          // Ensure timeline has enough items to include selection
-                                          let limitNeeded = max(absIndex + 1, 50)
-                                          model.load(limit: limitNeeded)
-                                          if let idx = model.metas.firstIndex(where: { $0.id == row.id }) {
-                                              model.selectedIndex = idx
-                                          } else {
-                                              model.selectedIndex = model.metas.isEmpty ? -1 : 0
-                                          }
+                                      onOpen: { row, _ in
+                                          model.openSnapshot(id: row.id)
                                           showingResults = false
                                       },
                                       onClose: {
@@ -361,6 +354,7 @@ private struct TimelineAppMultiFilter: View {
                 TextField("Filter apps", text: $filter)
                     .textFieldStyle(.roundedBorder)
                 Button("Clear") { selected.removeAll() }
+                Button("All") { selected = Set(apps.map { $0.bundleId }) }
             }
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 6) {

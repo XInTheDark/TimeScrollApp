@@ -328,6 +328,9 @@ private struct GeneralPane: View {
 
 private struct SearchPane: View {
     @ObservedObject var settings: SettingsStore
+    @State private var isInstallingModel = false
+    @State private var installError: String?
+
     var body: some View {
         Form {
             Section {
@@ -349,6 +352,52 @@ private struct SearchPane: View {
                 Text("AI mode uses on-device machine learning to improve search results. It slightly increases energy and disk usage.")
                     .font(.footnote)
                     .foregroundColor(.secondary)
+
+                LabeledContent("Embedding provider") {
+                    Picker("", selection: $settings.embeddingProvider) {
+                        ForEach(EmbeddingService.Provider.allCases, id: \.rawValue) { provider in
+                            Text(provider.displayName).tag(provider.rawValue)
+                        }
+                    }
+                    .labelsHidden()
+                    .pickerStyle(.menu)
+                    .frame(width: 280)
+                    .disabled(!settings.aiEmbeddingsEnabled)
+                }
+
+                if settings.embeddingProvider == "ollama-snowflake-33m" {
+                    if OllamaEmbeddingProvider.isModelInstalled("snowflake-arctic-embed:33m") {
+                        HStack {
+                            Image(systemName: "checkmark.circle.fill")
+                                .foregroundColor(.green)
+                            Text("Model installed")
+                                .font(.footnote)
+                                .foregroundColor(.secondary)
+                        }
+                    } else {
+                        VStack(alignment: .leading, spacing: 8) {
+                            HStack {
+                                Image(systemName: "exclamationmark.triangle.fill")
+                                    .foregroundColor(.orange)
+                                Text("Model not installed")
+                                    .font(.footnote)
+                                    .foregroundColor(.secondary)
+                            }
+                            Button(isInstallingModel ? "Installing..." : "Install snowflake-arctic-embed:33m") {
+                                installOllamaModel()
+                            }
+                            .buttonStyle(.borderedProminent)
+                            .disabled(isInstallingModel)
+
+                            if let error = installError {
+                                Text(error)
+                                    .font(.footnote)
+                                    .foregroundColor(.red)
+                            }
+                        }
+                    }
+                }
+
                 Toggle("Default to AI mode in search", isOn: $settings.aiModeOn)
                     .disabled(!settings.aiEmbeddingsEnabled)
                 LabeledContent("Similarity threshold") {
@@ -377,6 +426,20 @@ private struct SearchPane: View {
 extension SearchPane {
     private static var aiIntFormatter: NumberFormatter {
         let f = NumberFormatter(); f.numberStyle = .none; f.minimum = 100; f.maximum = 100000; return f
+    }
+
+    private func installOllamaModel() {
+        isInstallingModel = true
+        installError = nil
+
+        OllamaEmbeddingProvider.pullModel("snowflake-arctic-embed:33m") { success, error in
+            DispatchQueue.main.async {
+                isInstallingModel = false
+                if !success {
+                    installError = error ?? "Failed to install model"
+                }
+            }
+        }
     }
 }
 

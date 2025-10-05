@@ -177,7 +177,8 @@ final class DB {
             snapshot_id INTEGER PRIMARY KEY,
             dim INTEGER NOT NULL,
             vec BLOB NOT NULL,
-            updated_at_ms INTEGER NOT NULL
+            updated_at_ms INTEGER NOT NULL,
+            provider TEXT NOT NULL DEFAULT 'apple-nl'
         );
         CREATE TABLE IF NOT EXISTS ts_ocr_boxes (
             snapshot_id INTEGER NOT NULL,
@@ -277,9 +278,13 @@ final class DB {
             _ = sqlite3_exec(db, fts, nil, nil, nil)
         }
         if !tableExists("ts_embedding") {
-            let sql = "CREATE TABLE ts_embedding (snapshot_id INTEGER PRIMARY KEY, dim INTEGER NOT NULL, vec BLOB NOT NULL, updated_at_ms INTEGER NOT NULL);"
+            let sql = "CREATE TABLE ts_embedding (snapshot_id INTEGER PRIMARY KEY, dim INTEGER NOT NULL, vec BLOB NOT NULL, updated_at_ms INTEGER NOT NULL, provider TEXT NOT NULL DEFAULT 'apple-nl');"
             _ = sqlite3_exec(db, sql, nil, nil, nil)
             _ = sqlite3_exec(db, "CREATE INDEX IF NOT EXISTS idx_ts_embedding_dim ON ts_embedding(dim);", nil, nil, nil)
+        }
+        // Migrate existing ts_embedding to add provider column
+        if tableExists("ts_embedding") && !columnExists("ts_embedding", column: "provider") {
+            _ = sqlite3_exec(db, "ALTER TABLE ts_embedding ADD COLUMN provider TEXT NOT NULL DEFAULT 'apple-nl';", nil, nil, nil)
         }
     }
 
@@ -424,13 +429,13 @@ final class DB {
 
     // MARK: - Embeddings
 
-    func upsertEmbedding(snapshotId: Int64, dim: Int, vec: [Float]) throws {
+    func upsertEmbedding(snapshotId: Int64, dim: Int, vec: [Float], provider: String) throws {
         try onQueueSync {
             try openIfNeeded()
             guard let db = db else { return }
             var stmt: OpaquePointer?
             defer { sqlite3_finalize(stmt) }
-            let sql = "INSERT INTO ts_embedding(snapshot_id, dim, vec, updated_at_ms) VALUES(?, ?, ?, ?)\n                       ON CONFLICT(snapshot_id) DO UPDATE SET dim=excluded.dim, vec=excluded.vec, updated_at_ms=excluded.updated_at_ms;"
+            let sql = "INSERT INTO ts_embedding(snapshot_id, dim, vec, updated_at_ms, provider) VALUES(?, ?, ?, ?, ?)\n                       ON CONFLICT(snapshot_id) DO UPDATE SET dim=excluded.dim, vec=excluded.vec, updated_at_ms=excluded.updated_at_ms, provider=excluded.provider;"
             guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return }
             sqlite3_bind_int64(stmt, 1, snapshotId)
             sqlite3_bind_int(stmt, 2, Int32(dim))
@@ -441,6 +446,7 @@ final class DB {
             }
             let nowMs = Int64(Date().timeIntervalSince1970 * 1000)
             sqlite3_bind_int64(stmt, 4, nowMs)
+            sqlite3_bind_text(stmt, 5, provider, -1, SQLITE_TRANSIENT)
             _ = sqlite3_step(stmt)
         }
     }
@@ -456,7 +462,8 @@ final class DB {
                               endMs: Int64? = nil,
                               limit: Int = 2000,
                               offset: Int = 0,
-                              requireDim: Int) throws -> [EmbeddingCandidate] {
+                              requireDim: Int,
+                              requireProvider: String) throws -> [EmbeddingCandidate] {
         try onQueueSync {
             try openIfNeeded()
             guard let db = db else { return [] }
@@ -465,7 +472,7 @@ final class DB {
             FROM ts_embedding e
             JOIN ts_snapshot s ON s.id = e.snapshot_id
             LEFT JOIN ts_text t ON t.rowid = s.id
-            WHERE e.dim = ?
+            WHERE e.dim = ? AND e.provider = ?
             """
             if let s = startMs { sql += " AND s.started_at_ms >= \(s)" }
             if let e = endMs { sql += " AND s.started_at_ms <= \(e)" }
@@ -479,6 +486,7 @@ final class DB {
             guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return [] }
             var idx: Int32 = 1
             sqlite3_bind_int(stmt, idx, Int32(requireDim)); idx += 1
+            sqlite3_bind_text(stmt, idx, requireProvider, -1, SQLITE_TRANSIENT); idx += 1
             if let ids = appBundleIds, !ids.isEmpty {
                 for bid in ids { sqlite3_bind_text(stmt, idx, bid, -1, SQLITE_TRANSIENT); idx += 1 }
             }

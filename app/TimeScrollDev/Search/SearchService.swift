@@ -144,13 +144,14 @@ final class SearchService {
         let (qVec, known, total) = svc.embedWithStats(trimmed)
         let maxC = svc.maxCandidates
         let thresh = Float(svc.threshold)
-        // Fetch candidate rows
+        // Fetch candidate rows (filtered by both dimension AND provider)
         let candidates = (try? DB.shared.embeddingCandidates(appBundleIds: appBundleIds,
                                                              startMs: startMs,
                                                              endMs: endMs,
                                                              limit: maxC,
                                                              offset: 0,
-                                                             requireDim: svc.dim)) ?? []
+                                                             requireDim: svc.dim,
+                                                             requireProvider: svc.providerID)) ?? []
         if UserDefaults.standard.bool(forKey: "settings.debugMode") {
             let head = qVec.prefix(8).map { String(format: "%.4f", $0) }.joined(separator: ", ")
             print("[AI][Query] dim=\(qVec.count) tokens=\(known)/\(total) threshold=\(String(format: "%.2f", thresh)) candidates=\(candidates.count) head=[\(head)]")

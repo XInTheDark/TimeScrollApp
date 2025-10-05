@@ -60,6 +60,8 @@ final class SettingsStore: ObservableObject {
     @Published var aiThreshold: Double = 0.30 { didSet { if !isLoading { save() } } }
     // Max candidates scored per query (performance knob)
     @Published var aiMaxCandidates: Int = 10000 { didSet { if !isLoading { save() } } }
+    // Embedding provider selection
+    @Published var embeddingProvider: String = "apple-nl" { didSet { if !isLoading { save() } } }
 
     // Privacy
     // List of bundle identifiers for which capture should be suppressed when frontmost
@@ -139,6 +141,7 @@ final class SettingsStore: ObservableObject {
         }
         let aiThr = defaults.double(forKey: "settings.aiThreshold"); if aiThr > 0 { aiThreshold = min(1.0, max(0.0, aiThr)) }
         let aiMC = defaults.integer(forKey: "settings.aiMaxCandidates"); if aiMC > 0 { aiMaxCandidates = aiMC }
+        if let provider = defaults.string(forKey: "settings.embeddingProvider") { embeddingProvider = provider }
 
         // Updates
         if defaults.object(forKey: "settings.updateChannelBeta") != nil {
@@ -206,6 +209,7 @@ final class SettingsStore: ObservableObject {
         defaults.set(aiModeOn, forKey: "settings.aiModeOn")
         defaults.set(aiThreshold, forKey: "settings.aiThreshold")
         defaults.set(aiMaxCandidates, forKey: "settings.aiMaxCandidates")
+        defaults.set(embeddingProvider, forKey: "settings.embeddingProvider")
         // Storage location display path (bookmark handled via StoragePaths.setStorageFolder)
         defaults.set(storageFolderPath, forKey: StoragePaths.displayPathKey)
         // Backup settings

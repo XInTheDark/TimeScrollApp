@@ -15,8 +15,13 @@ struct SearchResultsView: View {
     @State private var isLoading: Bool = false
     @State private var hasNext: Bool = false
     @State private var useAI: Bool = false
+    @State private var viewMode: ViewMode = ViewMode(rawValue: UserDefaults.standard.string(forKey: "settings.searchViewMode") ?? "list") ?? .list
 
     private let pageSize: Int = 50
+
+    enum ViewMode: String {
+        case list, tiles
+    }
     private let search = SearchService()
 
     var body: some View {
@@ -43,6 +48,15 @@ struct SearchResultsView: View {
             Text(query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "Latest Snapshots" : "Results for \"\(query)\"")
                 .font(.headline)
             Spacer()
+            Picker("View", selection: Binding(get: { viewMode }, set: { mode in
+                viewMode = mode
+                UserDefaults.standard.set(mode.rawValue, forKey: "settings.searchViewMode")
+            })) {
+                Text("List").tag(ViewMode.list)
+                Text("Tiles").tag(ViewMode.tiles)
+            }
+            .pickerStyle(.segmented)
+            .frame(width: 120)
             Toggle("AI mode", isOn: Binding(get: { useAI }, set: { v in
                 useAI = v
                 UserDefaults.standard.set(v, forKey: "settings.aiModeOn")
@@ -58,29 +72,49 @@ struct SearchResultsView: View {
     private var list: some View {
         ZStack {
             ScrollView {
-                LazyVStack(alignment: .leading, spacing: 8) {
-                    if rows.isEmpty && !isLoading {
-                        // Friendly placeholder instead of an empty pane
-                        Text("No results")
-                            .foregroundColor(.secondary)
-                            .padding()
-                    }
-                    ForEach(Array(rows.enumerated()), id: \.0) { (idx, row) in
-                        Button(action: {
-                            let absIndex = page * pageSize + idx
-                            onOpen(row, absIndex)
-                        }) {
-                            SearchRowView(row: row, query: query)
-                                .padding(.horizontal, 8)
-                                .padding(.vertical, 6)
-                                .background(Color(NSColor.textBackgroundColor))
-                                .cornerRadius(8)
+                if viewMode == .list {
+                    LazyVStack(alignment: .leading, spacing: 8) {
+                        if rows.isEmpty && !isLoading {
+                            // Friendly placeholder instead of an empty pane
+                            Text("No results")
+                                .foregroundColor(.secondary)
+                                .padding()
                         }
-                        .buttonStyle(.plain)
-                        .padding(.horizontal, 8)
+                        ForEach(Array(rows.enumerated()), id: \.0) { (idx, row) in
+                            Button(action: {
+                                let absIndex = page * pageSize + idx
+                                onOpen(row, absIndex)
+                            }) {
+                                SearchRowView(row: row, query: query)
+                                    .padding(.horizontal, 8)
+                                    .padding(.vertical, 6)
+                                    .background(Color(NSColor.textBackgroundColor))
+                                    .cornerRadius(8)
+                            }
+                            .buttonStyle(.plain)
+                            .padding(.horizontal, 8)
+                        }
                     }
+                    .padding(.vertical, 8)
+                } else {
+                    LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible()), GridItem(.flexible())], spacing: 16) {
+                        if rows.isEmpty && !isLoading {
+                            Text("No results")
+                                .foregroundColor(.secondary)
+                                .padding()
+                        }
+                        ForEach(Array(rows.enumerated()), id: \.0) { (idx, row) in
+                            Button(action: {
+                                let absIndex = page * pageSize + idx
+                                onOpen(row, absIndex)
+                            }) {
+                                SearchTileView(row: row)
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                    .padding(16)
                 }
-                .padding(.vertical, 8)
             }
             if isLoading {
                 VStack(spacing: 8) {
@@ -326,4 +360,52 @@ private struct SearchRowView: View {
         combined += AttributedString(trailing)
         return combined
     }
+}
+
+private struct SearchTileView: View {
+    let row: SearchResult
+
+    var body: some View {
+        VStack(spacing: 8) {
+            thumb
+            HStack(spacing: 6) {
+                if let bid = row.appBundleId, let icon = AppIconCache.shared.icon(for: bid) {
+                    Image(nsImage: icon)
+                        .resizable()
+                        .frame(width: 14, height: 14)
+                        .cornerRadius(2)
+                }
+                Text(dateString(ms: row.startedAtMs))
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                Spacer()
+            }
+        }
+        .padding(8)
+        .background(Color(NSColor.textBackgroundColor))
+        .cornerRadius(8)
+    }
+
+    private var thumb: some View {
+        let url = URL(fileURLWithPath: row.path)
+        if let img = ThumbnailCache.shared.thumbnail(for: url, maxPixel: 400) {
+            return AnyView(Image(nsImage: img)
+                .resizable()
+                .aspectRatio(contentMode: .fit)
+                .cornerRadius(6))
+        }
+        return AnyView(Rectangle().fill(Color.secondary.opacity(0.2)).aspectRatio(16/10, contentMode: .fit).cornerRadius(6))
+    }
+
+    private func dateString(ms: Int64) -> String {
+        let d = Date(timeIntervalSince1970: TimeInterval(ms) / 1000)
+        return Self.df.string(from: d)
+    }
+
+    private static let df: DateFormatter = {
+        let f = DateFormatter()
+        f.dateStyle = .medium
+        f.timeStyle = .short
+        return f
+    }()
 }

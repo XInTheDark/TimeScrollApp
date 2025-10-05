@@ -179,4 +179,54 @@ final class SearchService {
         guard start < end else { return [] }
         return scored[start..<end].map { $0.0 }
     }
+
+    // AI search returning metas for timeline display (no content)
+    func searchAIMetas(_ query: String,
+                       appBundleIds: [String]?,
+                       startMs: Int64?,
+                       endMs: Int64?,
+                       limit: Int,
+                       offset: Int = 0) -> [SnapshotMeta] {
+        let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            // Fallback to latest when no query present
+            return latestMetas(limit: limit, offset: offset, appBundleIds: appBundleIds, startMs: startMs, endMs: endMs)
+        }
+        let svc = EmbeddingService.shared
+        let (qVec, _, _) = svc.embedWithStats(trimmed)
+        let maxC = svc.maxCandidates
+        let thresh = Float(svc.threshold)
+        // Fetch candidate rows (filtered by both dimension AND provider)
+        let candidates = (try? DB.shared.embeddingCandidates(appBundleIds: appBundleIds,
+                                                             startMs: startMs,
+                                                             endMs: endMs,
+                                                             limit: maxC,
+                                                             offset: 0,
+                                                             requireDim: svc.dim,
+                                                             requireProvider: svc.providerID)) ?? []
+        // Score and filter
+        var scored: [(SnapshotMeta, Float)] = []
+        scored.reserveCapacity(candidates.count)
+        for c in candidates {
+            let s = EmbeddingService.dot(qVec, c.vector)
+            if s >= thresh {
+                let meta = SnapshotMeta(id: c.result.id,
+                                        startedAtMs: c.result.startedAtMs,
+                                        path: c.result.path,
+                                        appBundleId: c.result.appBundleId,
+                                        appName: c.result.appName)
+                scored.append((meta, s))
+            }
+        }
+        // Sort by score desc then recency desc
+        scored.sort { (a, b) in
+            if a.1 == b.1 { return a.0.startedAtMs > b.0.startedAtMs }
+            return a.1 > b.1
+        }
+        // Page
+        let start = max(0, offset)
+        let end = min(scored.count, start + limit)
+        guard start < end else { return [] }
+        return scored[start..<end].map { $0.0 }
+    }
 }

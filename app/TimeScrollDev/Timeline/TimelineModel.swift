@@ -48,7 +48,9 @@ final class TimelineModel: ObservableObject {
         Task { @MainActor in await Task.yield() }
 
         let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
-        let fuzz = SettingsStore.shared.fuzziness
+        let settings = SettingsStore.shared
+        let useAI = settings.aiEmbeddingsEnabled && settings.aiModeOn && EmbeddingService.shared.dim > 0
+        let fuzz = settings.fuzziness
         let appIds = selectedAppBundleIds.isEmpty ? nil : Array(selectedAppBundleIds)
 
         let list: [SnapshotMeta]
@@ -57,6 +59,12 @@ final class TimelineModel: ObservableObject {
                                       appBundleIds: appIds,
                                       startMs: startMs,
                                       endMs: endMs)
+        } else if useAI {
+            list = search.searchAIMetas(trimmed,
+                                        appBundleIds: appIds,
+                                        startMs: startMs,
+                                        endMs: endMs,
+                                        limit: limit)
         } else {
             list = search.searchMetas(trimmed,
                                       fuzziness: fuzz,

@@ -187,6 +187,8 @@ final class HEVCVideoStore {
             }
             _ = try? FileManager.default.removeItem(at: c.outURL)
         }
+        else {
+        }
         // After a segment is sealed/closed, remove posters for rows in this segment window.
         PosterManager.cleanupSegment(startMs: c.startMs, endMs: c.startMs + segmentMs - 1)
         awaitingCallback = false

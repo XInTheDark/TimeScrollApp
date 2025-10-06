@@ -5,8 +5,10 @@ import ImageIO
 final class ThumbnailCache {
     static let shared = ThumbnailCache()
     private let cache = NSCache<NSString, NSImage>()
+    private let hevcCache = NSCache<NSString, NSImage>()
     private init() {
         cache.countLimit = 500
+        hevcCache.countLimit = 500
     }
 
     func clear() { cache.removeAllObjects() }
@@ -17,11 +19,21 @@ final class ThumbnailCache {
             return img
         }
         var src: CGImageSource?
+        if url.pathExtension.lowercased() == "mov" {
+            // HEVC video (plaintext) – we cannot deduce timestamp here; caller should prefer HEVCFrameExtractor.image(...)
+            return nil
+        }
         if url.pathExtension.lowercased() == "tse" {
-            // Only attempt decrypt if vault is unlocked
+            // Encrypted container: peek header; only use ImageIO when payload is image/*
             let unlocked = UserDefaults.standard.bool(forKey: "vault.isUnlocked")
-            if unlocked, let data = try? FileCrypter.shared.decryptImage(at: url) {
-                src = CGImageSourceCreateWithData(data as CFData, [kCGImageSourceShouldCache: false] as CFDictionary)
+            if unlocked, let (header, blob) = try? FileCrypter.shared.decryptTSE(at: url) {
+                if header.mime.hasPrefix("image/") {
+                    src = CGImageSourceCreateWithData(blob as CFData, [kCGImageSourceShouldCache: false] as CFDictionary)
+                } else {
+                    return nil
+                }
+            } else {
+                return nil
             }
         } else {
             src = CGImageSourceCreateWithURL(url as CFURL, [kCGImageSourceShouldCache: false] as CFDictionary)
@@ -45,5 +57,16 @@ final class ThumbnailCache {
         let nsImage = NSImage(cgImage: cgThumb, size: NSSize(width: cgThumb.width, height: cgThumb.height))
         cache.setObject(nsImage, forKey: key)
         return nsImage
+    }
+
+    // Asynchronous HEVC thumbnail fetch with in-memory cache
+    func hevcThumbnail(for url: URL, startedAtMs: Int64, maxPixel: CGFloat = 320, completion: @escaping (NSImage?) -> Void) {
+        let key = "\(url.path)#\(startedAtMs)#\(Int(maxPixel))" as NSString
+        if let img = hevcCache.object(forKey: key) { completion(img); return }
+        DispatchQueue.global(qos: .userInitiated).async {
+            let img = HEVCFrameExtractor.image(forPath: url, startedAtMs: startedAtMs, format: "hevc", maxPixel: maxPixel)
+            if let img = img { self.hevcCache.setObject(img, forKey: key) }
+            DispatchQueue.main.async { completion(img) }
+        }
     }
 }

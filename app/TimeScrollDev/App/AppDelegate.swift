@@ -82,6 +82,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             VaultManager.shared.lock()
         }
         SettingsStore.shared.flush()
+        // Ensure any open HEVC writers are flushed (best-effort with timeout)
+        HEVCVideoStore.shared.shutdown(timeout: 2.0)
         UsageTracker.shared.appWillTerminate()
         UserDefaults.standard.synchronize()
     }

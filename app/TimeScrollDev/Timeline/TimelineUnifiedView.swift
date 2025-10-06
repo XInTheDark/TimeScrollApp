@@ -42,16 +42,10 @@ struct TimelineUnifiedView: View {
             if unlocked { model.load() }
         }
         .onChange(of: appState.lastSnapshotURL) { _ in
-            if SettingsStore.shared.refreshOnNewSnapshot {
-                let selId = model.selected?.id
-                model.load()
-                if model.followLatest {
-                    model.selectedIndex = model.metas.isEmpty ? -1 : 0
-                    model.jumpToEndToken &+= 1
-                } else if let id = selId, let idx = model.metas.firstIndex(where: { $0.id == id }) {
-                    model.selectedIndex = idx
-                }
-            }
+            if SettingsStore.shared.refreshOnNewSnapshot { reloadTimelineKeepingSelection() }
+        }
+        .onChange(of: appState.lastSnapshotTick) { _ in
+            if SettingsStore.shared.refreshOnNewSnapshot { reloadTimelineKeepingSelection() }
         }
         // If the user clears the search field, automatically return to timeline
         .onChange(of: query) { newVal in
@@ -70,6 +64,18 @@ struct TimelineUnifiedView: View {
         .frame(minWidth: 1000, minHeight: 700)
     }
 
+    @MainActor
+    private func reloadTimelineKeepingSelection() {
+        let selId = model.selected?.id
+        model.load()
+        if model.followLatest {
+            model.selectedIndex = model.metas.isEmpty ? -1 : 0
+            model.jumpToEndToken &+= 1
+        } else if let id = selId, let idx = model.metas.firstIndex(where: { $0.id == id }) {
+            model.selectedIndex = idx
+        }
+    }
+
     @State private var debugOpen: Bool = false
 
     private var topBar: some View {
@@ -83,11 +89,6 @@ struct TimelineUnifiedView: View {
                         await appState.startCaptureIfNeeded()
                     }
                 }
-            }
-            if let url = appState.lastSnapshotURL, settings.debugMode {
-                Text("Last: \(url.lastPathComponent)")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
             }
 
             Divider().frame(height: 18)

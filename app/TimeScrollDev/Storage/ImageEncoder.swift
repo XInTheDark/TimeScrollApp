@@ -78,6 +78,16 @@ final class ImageEncoder {
             kCGImageDestinationLossyCompressionQuality as CIImageRepresentationOption: quality
         ]
         switch format {
+        case .hevc:
+            // Not applicable for static images; fallback to JPEG
+            if let data = ciContext.jpegRepresentation(of: ci, colorSpace: cs, options: opts) {
+                return EncodedImage(data: data, format: "jpg", width: outW, height: outH)
+            }
+            // Fallback path: render to CGImage then reuse CPU path
+            if let cg = ciContext.createCGImage(ci, from: ci.extent) {
+                return try encode(cgImage: cg, format: .jpeg, maxLongEdge: 0, quality: quality)
+            }
+            throw ImageEncoderError.destinationFailed
         case .heic:
             if #available(macOS 10.13, *) {
                 if let data = ciContext.heifRepresentation(of: ci, format: .RGBA8, colorSpace: cs, options: opts) {
@@ -135,6 +145,12 @@ final class ImageEncoder {
             kCGImageDestinationLossyCompressionQuality as CIImageRepresentationOption: quality
         ]
         switch format {
+        case .hevc:
+            // Not supported in Core Image for static images; fallback to JPEG
+            if let data = ciContext.jpegRepresentation(of: ci, colorSpace: cs, options: opts) {
+                return EncodedImage(data: data, format: "jpg", width: outW, height: outH)
+            }
+            return nil
         case .heic:
             if #available(macOS 10.13, *) {
                 if let data = ciContext.heifRepresentation(of: ci, format: .RGBA8, colorSpace: cs, options: opts) {
@@ -159,6 +175,10 @@ final class ImageEncoder {
     }
     private func resolveUTType(format: SettingsStore.StorageFormat) -> (UTType?, String) {
         switch format {
+        case .hevc:
+            // Map HEVC image request to JPEG for UTType resolution in CPU path
+            if #available(macOS 11.0, *) { return (UTType.jpeg, "jpg") }
+            return (nil, "jpg")
         case .heic:
             if #available(macOS 11.0, *) { return (UTType.heic, "heic") }
             return (nil, "heic")

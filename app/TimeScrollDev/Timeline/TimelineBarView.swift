@@ -300,24 +300,45 @@ final class TimelineBarNSView: NSView {
         guard let m = model else { return }
         let meta = m.metas[index]
         let url = URL(fileURLWithPath: meta.path)
-        let img = ThumbnailCache.shared.thumbnail(for: url, maxPixel: 220)
+        var img: NSImage? = nil
+        if ["mov","mp4","tse"].contains(url.pathExtension.lowercased()) {
+            // Prefer poster; heavy extraction deferred asynchronously
+            if let t = meta.thumbPath {
+                let tu = URL(fileURLWithPath: t)
+                img = ThumbnailCache.shared.thumbnail(for: tu, maxPixel: 220)
+            }
+            if img == nil {
+                // Kick off async extraction; update popover when ready if we're still on same index
+                ThumbnailCache.shared.hevcThumbnail(for: url, startedAtMs: meta.startedAtMs, maxPixel: 220) { [weak self] fetched in
+                    guard let self = self else { return }
+                    guard self.lastPreviewIndex == index else { return }
+                    self.updatePopover(with: fetched, meta: meta, at: point)
+                }
+            }
+        }
+        if img == nil {
+            img = ThumbnailCache.shared.thumbnail(for: url, maxPixel: 220)
+        }
+        // Initial (possibly placeholder) popover content
+        updatePopover(with: img, meta: meta, at: point)
+    }
+
+    private func updatePopover(with image: NSImage?, meta: SnapshotMeta, at point: NSPoint) {
         let appIcon: NSImage? = meta.appBundleId.flatMap { AppIconCache.shared.icon(for: $0) }
         let date = Date(timeIntervalSince1970: TimeInterval(meta.startedAtMs)/1000)
-        let content = HoverPreviewView(thumbnail: img, appIcon: appIcon, appName: meta.appName ?? (meta.appBundleId ?? "Unknown"), date: date)
+        let content = HoverPreviewView(thumbnail: image, appIcon: appIcon, appName: meta.appName ?? (meta.appBundleId ?? "Unknown"), date: date)
         let host = NSHostingView(rootView: content)
         host.frame = NSRect(x: 0, y: 0, width: 260, height: 220)
-        popover.contentSize = host.fittingSize
-        popover.behavior = .transient
-        popover.contentViewController = NSViewController()
+        if popover.contentViewController == nil { popover.contentViewController = NSViewController() }
         popover.contentViewController?.view = host
+        popover.behavior = .transient
         popover.animates = false
         // Anchor to the top edge of the timeline bar so the popover appears just above it
         let clampedX = max(0, min(bounds.width - 1, point.x))
         let anchor = NSRect(x: clampedX, y: 0, width: 1, height: 1)
-        if popover.isShown {
-            popover.performClose(nil)
+        if !popover.isShown {
+            popover.show(relativeTo: anchor, of: self, preferredEdge: .maxY)
         }
-        popover.show(relativeTo: anchor, of: self, preferredEdge: .maxY)
     }
 }
 

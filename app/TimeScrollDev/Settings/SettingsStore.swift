@@ -10,7 +10,7 @@ final class SettingsStore: ObservableObject {
 
     enum OCRMode: String, CaseIterable, Identifiable { case fast, accurate; var id: String { rawValue } }
     enum Fuzziness: String, CaseIterable, Identifiable { case off, low, medium, high; var id: String { rawValue } }
-    enum StorageFormat: String, CaseIterable, Identifiable { case heic, jpeg, png; var id: String { rawValue } }
+    enum StorageFormat: String, CaseIterable, Identifiable { case hevc, heic, jpeg, png; var id: String { rawValue } }
     enum DisplayCaptureMode: String, CaseIterable, Identifiable { case first, all; var id: String { rawValue } }
 
     @Published var ocrMode: OCRMode = .accurate { didSet { if !isLoading { save() } } }
@@ -26,7 +26,7 @@ final class SettingsStore: ObservableObject {
     @Published var maxLongEdge: Int = 1600 { didSet { if !isLoading { save() } } }            // 0 = original
     @Published var lossyQuality: Double = 0.6 { didSet { if !isLoading { save() } } }         // 0.1...1.0
     @Published var dedupEnabled: Bool = true { didSet { if !isLoading { save() } } }
-    @Published var dedupHammingThreshold: Int = 8 { didSet { if !isLoading { save() } } }     // 0..64
+    @Published var dedupHammingThreshold: Int = 6 { didSet { if !isLoading { save() } } }     // 0..64
     @Published var adaptiveSampling: Bool = true { didSet { if !isLoading { save() } } }
     @Published var adaptiveMaxInterval: Double = 30.0 { didSet { if !isLoading { save() } } }  // seconds
     @Published var degradeAfterDays: Int = 7 { didSet { if !isLoading { save() } } }

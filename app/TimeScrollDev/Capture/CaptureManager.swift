@@ -117,11 +117,126 @@ final class FrameOutput: NSObject, SCStreamOutput {
     // Thermal governance
     private var lastThermalState: ProcessInfo.ThermalState = .nominal
     private var lastThermalAdjustAt: TimeInterval = 0
+    private var suppressPostersUntil: TimeInterval = 0
 
     init(onSnapshot: @escaping (URL) -> Void) {
         self.onSnapshot = onSnapshot
         super.init()
         self.currentInterval = baseInterval
+    }
+
+    // MARK: - Persistence helpers
+    private enum PersistOutcome {
+        case saved(url: URL, bytes: Int64, width: Int, height: Int, thumbPath: String?)
+        case queuedWhileLocked
+        case skippedWhileLocked
+    }
+
+    private func persist(
+        pixelBuffer: CVPixelBuffer,
+        fmt: SettingsStore.StorageFormat,
+        tsMs: Int64,
+        maxEdge: Int,
+        quality: Double,
+        vaultOn: Bool,
+        allowWhileLocked: Bool,
+        hash64: UInt64,
+        appBundleId: String?,
+        appName: String?
+    ) throws -> PersistOutcome {
+        let unlocked = UserDefaults.standard.bool(forKey: "vault.isUnlocked")
+        switch fmt {
+        case .hevc:
+            let width = CVPixelBufferGetWidth(pixelBuffer)
+            let height = CVPixelBufferGetHeight(pixelBuffer)
+            if vaultOn && !unlocked {
+                guard allowWhileLocked else { return .skippedWhileLocked }
+                HEVCVideoStore.shared.append(pixelBuffer: pixelBuffer, timestampMs: tsMs, encrypt: true)
+                let targetURL = HEVCVideoStore.shared.urlFor(timestampMs: tsMs, encrypt: true)
+                let bytes = (try? targetURL.resourceValues(forKeys: [.fileSizeKey]).fileSize).map { Int64($0) } ?? 0
+                let ocrResult = try self.runOCR(pixelBuffer)
+                let thumb = self.makePosterThumbIfPossible(pixelBuffer: pixelBuffer, tsMs: tsMs, maxEdge: maxEdge, quality: quality, encrypt: true)
+                try IngestQueue.shared.enqueue(
+                    path: targetURL,
+                    startedAtMs: tsMs,
+                    appBundleId: appBundleId,
+                    appName: appName,
+                    bytes: bytes,
+                    width: width,
+                    height: height,
+                    format: "hevc",
+                    hash64: Int64(bitPattern: hash64),
+                    ocrText: ocrResult.text,
+                    ocrBoxes: ocrResult.lines,
+                    thumbPath: thumb
+                )
+                return .queuedWhileLocked
+            } else {
+                HEVCVideoStore.shared.append(pixelBuffer: pixelBuffer, timestampMs: tsMs, encrypt: vaultOn)
+                let url = HEVCVideoStore.shared.urlFor(timestampMs: tsMs, encrypt: vaultOn)
+                let bytes = (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize).map { Int64($0) } ?? 0
+                let thumb = self.makePosterThumbIfPossible(pixelBuffer: pixelBuffer, tsMs: tsMs, maxEdge: maxEdge, quality: quality, encrypt: vaultOn)
+                return .saved(url: url, bytes: bytes, width: width, height: height, thumbPath: thumb)
+            }
+
+        case .heic, .jpeg, .png:
+            var encoded: EncodedImage
+            do {
+                encoded = try self.encoder.encode(pixelBuffer: pixelBuffer, format: fmt, maxLongEdge: maxEdge, quality: quality)
+            } catch {
+                throw error
+            }
+
+            if vaultOn && !unlocked {
+                guard allowWhileLocked else { return .skippedWhileLocked }
+                let encURL = try FileCrypter.shared.encryptSnapshot(encoded: encoded, timestampMs: tsMs)
+                let ocrResult = try self.runOCR(pixelBuffer)
+                try IngestQueue.shared.enqueue(
+                    path: encURL,
+                    startedAtMs: tsMs,
+                    appBundleId: appBundleId,
+                    appName: appName,
+                    bytes: Int64(encoded.data.count),
+                    width: encoded.width,
+                    height: encoded.height,
+                    format: encoded.format,
+                    hash64: Int64(bitPattern: hash64),
+                    ocrText: ocrResult.text,
+                    ocrBoxes: ocrResult.lines,
+                    thumbPath: nil
+                )
+                return .queuedWhileLocked
+            } else {
+                if vaultOn {
+                    let url = try FileCrypter.shared.encryptSnapshot(encoded: encoded, timestampMs: tsMs)
+                    return .saved(url: url, bytes: Int64(encoded.data.count), width: encoded.width, height: encoded.height, thumbPath: nil)
+                } else {
+                    let ret = try SnapshotStore.shared.saveEncoded(encoded, timestampMs: tsMs, formatExt: encoded.format)
+                    return .saved(url: ret.url, bytes: ret.bytes, width: encoded.width, height: encoded.height, thumbPath: nil)
+                }
+            }
+        }
+    }
+
+    private func makePosterThumbIfPossible(
+        pixelBuffer: CVPixelBuffer,
+        tsMs: Int64,
+        maxEdge: Int,
+        quality: Double,
+        encrypt: Bool
+    ) -> String? {
+        // Skip poster work during thermal backoff window
+        if Date().timeIntervalSince1970 < self.suppressPostersUntil { return nil }
+        do {
+            let poster = try self.encoder.encode(pixelBuffer: pixelBuffer, format: .heic, maxLongEdge: maxEdge, quality: quality)
+            if encrypt {
+                let encURL = try FileCrypter.shared.encryptSnapshot(encoded: poster, timestampMs: tsMs)
+                return encURL.path
+            } else {
+                let saved = try SnapshotStore.shared.saveEncoded(poster, timestampMs: tsMs, formatExt: poster.format)
+                return saved.url.path
+            }
+        } catch { return nil }
     }
 
     func stream(_ stream: SCStream, didOutputSampleBuffer sb: CMSampleBuffer, of outputType: SCStreamOutputType) {
@@ -166,6 +281,9 @@ final class FrameOutput: NSObject, SCStreamOutput {
         let dedupEnabled = (defaults.object(forKey: "settings.dedupEnabled") != nil) ? defaults.bool(forKey: "settings.dedupEnabled") : true
         let thr = (defaults.object(forKey: "settings.dedupHammingThreshold") != nil) ? defaults.integer(forKey: "settings.dedupHammingThreshold") : 8
         let adaptive = (defaults.object(forKey: "settings.adaptiveSampling") != nil) ? defaults.bool(forKey: "settings.adaptiveSampling") : true
+        let vaultOn = (defaults.object(forKey: "settings.vaultEnabled") != nil) ? defaults.bool(forKey: "settings.vaultEnabled") : false
+        let allowWhileLocked = (defaults.object(forKey: "settings.captureWhileLocked") != nil) ? defaults.bool(forKey: "settings.captureWhileLocked") : true
+        let unlockedFlag = defaults.bool(forKey: "vault.isUnlocked")
 
         // IMPORTANT: Compute hash directly from the pixel buffer (cheap, uses CI) before making any CGImage.
         var hashVal: UInt64 = 0
@@ -174,10 +292,15 @@ final class FrameOutput: NSObject, SCStreamOutput {
             if let prev = self.lastHash {
                 let hamming = ImageHasher.hamming(prev, hashVal)
                 if hamming <= thr {
-                    if adaptive {
-                        self.stableCount += 1
-                        self.currentInterval = min(self.maxInterval, self.baseInterval * CFTimeInterval(pow(1.5, Double(self.stableCount))))
+                    // For HEVC we still append frames to the segment to keep the video continuous,
+                    // but we skip DB/metadata work for unchanged frames.
+                    if fmt == .hevc {
+                        let tsMs = Int64(Date().timeIntervalSince1970 * 1000)
+                        if !vaultOn || (vaultOn && (unlockedFlag ? true : allowWhileLocked)) {
+                            HEVCVideoStore.shared.append(pixelBuffer: pixelBuffer, timestampMs: tsMs, encrypt: vaultOn)
+                        }
                     }
+                    if adaptive { self.stableCount += 1; self.currentInterval = min(self.maxInterval, self.baseInterval * CFTimeInterval(pow(1.5, Double(self.stableCount)))) }
                     self.evaluating = false
                     return
                 }
@@ -196,88 +319,59 @@ final class FrameOutput: NSObject, SCStreamOutput {
             let pb = retainedPB.takeUnretainedValue()
             do {
                 let tsMs = Int64(Date().timeIntervalSince1970 * 1000)
-                var encodedOpt: EncodedImage?
-                var encError: Error?
-                autoreleasepool {
-                    do {
-                        encodedOpt = try self.encoder.encode(pixelBuffer: pb, format: fmt, maxLongEdge: maxEdge, quality: quality)
-                    } catch {
-                        encError = error
-                    }
-                }
-                if let e = encError { throw e }
-                guard let encoded = encodedOpt else { throw ImageEncoderError.destinationFailed }
                 // App metadata from tracker (no main-thread hop)
                 let info = AppActivityTracker.shared.current()
                 let bid = info.bundleId
                 let name = info.name
 
-                let d = UserDefaults.standard
-                let vaultOn = (d.object(forKey: "settings.vaultEnabled") != nil) ? d.bool(forKey: "settings.vaultEnabled") : false
-                let allowWhileLocked = (d.object(forKey: "settings.captureWhileLocked") != nil) ? d.bool(forKey: "settings.captureWhileLocked") : true
-                if vaultOn && !VaultManager.shared.isUnlocked {
-                    // Locked path: encrypt snapshot to .tse and enqueue ingest record
-                    if allowWhileLocked {
-                        let encURL = try FileCrypter.shared.encryptSnapshot(encoded: encoded, timestampMs: tsMs)
-                        // OCR on the retained pixel buffer to keep queue rich with text
-                        let ocrResult = try self.runOCR(retainedPB.takeUnretainedValue())
-                        try IngestQueue.shared.enqueue(
-                            path: encURL,
-                            startedAtMs: tsMs,
-                            appBundleId: bid,
-                            appName: name,
-                            bytes: Int64(encoded.data.count),
-                            width: encoded.width,
-                            height: encoded.height,
-                            format: encoded.format,
-                            hash64: Int64(bitPattern: hashVal),
-                            ocrText: ocrResult.text,
-                            ocrBoxes: ocrResult.lines
-                        )
-                    }
-                    // Do not update lastSnapshotURL to avoid revealing disk paths while locked
-                    retainedPB.release()
-                    return
-                }
-
-                // Normal path: if vault enabled (unlocked), write encrypted file; else plaintext
-                let url: URL
-                let bytes: Int64
-                if vaultOn {
-                    url = try FileCrypter.shared.encryptSnapshot(encoded: encoded, timestampMs: tsMs)
-                    bytes = Int64(encoded.data.count)
-                } else {
-                    let ret = try SnapshotStore.shared.saveEncoded(encoded, timestampMs: tsMs, formatExt: encoded.format)
-                    url = ret.url; bytes = ret.bytes
-                }
-                let rowId = Indexer.shared.insertStub(
-                    startedAtMs: tsMs,
-                    savedURL: url,
-                    extra: Indexer.SnapshotExtraMeta(
-                        bytes: bytes,
-                        width: encoded.width,
-                        height: encoded.height,
-                        format: encoded.format,
-                        hash64: Int64(bitPattern: hashVal)
-                    ),
+                let outcome = try self.persist(
+                    pixelBuffer: pb,
+                    fmt: fmt,
+                    tsMs: tsMs,
+                    maxEdge: maxEdge,
+                    quality: quality,
+                    vaultOn: vaultOn,
+                    allowWhileLocked: allowWhileLocked,
+                    hash64: hashVal,
                     appBundleId: bid,
                     appName: name
                 )
 
-                // Notify UI before OCR to avoid races
-                DispatchQueue.main.async { self.onSnapshot(url) }
-
-                // Reset adaptive state after a real persist
-                self.lastHash = hashVal
-                self.stableCount = 0
-                self.currentInterval = self.baseInterval
-                self.lastPersistedPTS = pts
-
-                // Offload OCR to a dedicated serial queue; retain/release around the async call.
-                self.ocrQueue.async {
-                    let pb2 = retainedPB.takeUnretainedValue()
-                    Indexer.shared.completeOCR(snapshotId: rowId, pixelBuffer: pb2)
+                switch outcome {
+                case .queuedWhileLocked, .skippedWhileLocked:
                     retainedPB.release()
+                    return
+                case let .saved(url, bytes, width, height, thumbPath):
+                    let rowId = Indexer.shared.insertStub(
+                        startedAtMs: tsMs,
+                        savedURL: url,
+                        extra: Indexer.SnapshotExtraMeta(
+                            bytes: bytes,
+                            width: width,
+                            height: height,
+                            format: fmt.dbFormatString,
+                            hash64: Int64(bitPattern: hashVal)
+                        ),
+                        appBundleId: bid,
+                        appName: name,
+                        thumbPath: thumbPath
+                    )
+
+                    // Notify UI before OCR to avoid races
+                    DispatchQueue.main.async { self.onSnapshot(url) }
+
+                    // Reset adaptive state after a real persist
+                    self.lastHash = hashVal
+                    self.stableCount = 0
+                    self.currentInterval = self.baseInterval
+                    self.lastPersistedPTS = pts
+
+                    // Offload OCR to a dedicated serial queue; retain/release around the async call.
+                    self.ocrQueue.async {
+                        let pb2 = retainedPB.takeUnretainedValue()
+                        Indexer.shared.completeOCR(snapshotId: rowId, pixelBuffer: pb2)
+                        retainedPB.release()
+                    }
                 }
             } catch {
                 retainedPB.release()
@@ -312,9 +406,11 @@ final class FrameOutput: NSObject, SCStreamOutput {
         case .serious:
             currentInterval = min(maxInterval, max(currentInterval, baseInterval) * 2)
             Indexer.shared.setOCRCooldown(seconds: 30)
+            suppressPostersUntil = now + 30
         case .critical:
             currentInterval = min(maxInterval, max(currentInterval, baseInterval) * 3)
             Indexer.shared.setOCRCooldown(seconds: 60)
+            suppressPostersUntil = now + 60
         @unknown default:
             break
         }

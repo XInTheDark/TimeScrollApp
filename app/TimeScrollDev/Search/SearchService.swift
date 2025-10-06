@@ -214,7 +214,8 @@ final class SearchService {
                                         startedAtMs: c.result.startedAtMs,
                                         path: c.result.path,
                                         appBundleId: c.result.appBundleId,
-                                        appName: c.result.appName)
+                                        appName: c.result.appName,
+                                        thumbPath: nil)
                 scored.append((meta, s))
             }
         }

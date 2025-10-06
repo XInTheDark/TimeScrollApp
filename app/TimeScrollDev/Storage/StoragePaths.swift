@@ -41,6 +41,13 @@ enum StoragePaths {
     /// Snapshots directory under the current root.
     static func snapshotsDir() -> URL { currentRoot().appendingPathComponent("Snapshots", isDirectory: true) }
 
+    /// HEVC video chunks directory under the current root.
+    static func videosDir() -> URL { currentRoot().appendingPathComponent("Videos", isDirectory: true) }
+
+    /// Encrypted HEVC segments directory under the current root.
+    /// As of the simplified design, encrypted and plaintext segments share the same Videos/ folder.
+    static func videosEncDir() -> URL { videosDir() }
+
     /// Ingest queue directory under the current root (for encrypted mode).
     static func ingestQueueDir() -> URL { currentRoot().appendingPathComponent("IngestQueue", isDirectory: true) }
 

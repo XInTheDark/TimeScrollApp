@@ -9,70 +9,36 @@ struct SnapshotStageView: View {
     @State private var rects: [CGRect] = []
     @State private var localQuery: String = ""
     @State private var nsImage: NSImage? = nil
+    @State private var isLoading: Bool = false
+    @State private var lastRequestedId: Int64 = 0
+    @State private var loadToken: Int = 0
+    @State private var showSpinner: Bool = false
 
     var body: some View {
         ZStack { // center-aligned content by default
             if let sel = model.selected {
-                let url = URL(fileURLWithPath: sel.path)
-                let image: NSImage? = {
-                    if url.pathExtension.lowercased() == "tse" {
-                        // Only allow decrypt when vault is unlocked (regardless of vaultEnabled setting)
-                        let unlocked = UserDefaults.standard.bool(forKey: "vault.isUnlocked")
-                        guard unlocked else { return nil }
-                        if let data = try? FileCrypter.shared.decryptImage(at: url) {
-                            return NSImage(data: data)
-                        }
-                        return nil
-                    }
-                    return nsImage ?? NSImage(contentsOf: url)
-                }()
-                if let image = image {
+                let _ = sel.path // silence unused warning after refactor
+                if let image = nsImage {
                     ZoomableImageView(image: image, rects: rects)
                         .id(model.selected?.id) // ensure NSViewRepresentable refreshes on selection change
+                        .transition(.opacity)
+                        .animation(.easeInOut(duration: 0.12), value: nsImage)
                         .onAppear {
-                            nsImage = image
                             refreshRects()
                         }
-                        .onChange(of: model.selected?.id) { _ in
-                            if let p = model.selected?.path {
-                                let u = URL(fileURLWithPath: p)
-                                if u.pathExtension.lowercased() == "tse" {
-                                    let unlocked = UserDefaults.standard.bool(forKey: "vault.isUnlocked")
-                                    if unlocked {
-                                        nsImage = (try? FileCrypter.shared.decryptImage(at: u)).flatMap { NSImage(data: $0) }
-                                    } else {
-                                        nsImage = nil
-                                    }
-                                } else {
-                                    nsImage = NSImage(contentsOf: u)
-                                }
-                            } else {
-                                nsImage = nil
-                            }
-                            rects = []
-                            refreshRects()
-                        }
-                        .onChange(of: model.selectedIndex) { _ in
-                            if let p = model.selected?.path {
-                                let u = URL(fileURLWithPath: p)
-                                if u.pathExtension.lowercased() == "tse" {
-                                    let unlocked = UserDefaults.standard.bool(forKey: "vault.isUnlocked")
-                                    if unlocked {
-                                        nsImage = (try? FileCrypter.shared.decryptImage(at: u)).flatMap { NSImage(data: $0) }
-                                    } else {
-                                        nsImage = nil
-                                    }
-                                } else {
-                                    nsImage = NSImage(contentsOf: u)
-                                }
-                            } else {
-                                nsImage = nil
-                            }
-                            rects = []
-                            refreshRects()
-                        }
+                        // Selection change handlers moved to outer container so they fire
+                        // even when there is no current image.
                 } else {
-                    Text("Failed to load image").foregroundColor(.secondary)
+                    if showSpinner {
+                        ProgressView("Preparing frame…")
+                            .progressViewStyle(.linear)
+                            .padding()
+                    } else if isLoading {
+                        // Avoid flicker: keep background empty while waiting for spinner or image
+                        Color.clear
+                    } else {
+                        Text("No image").foregroundColor(.secondary)
+                    }
                 }
             } else {
                 Text("No snapshots").foregroundColor(.secondary)
@@ -93,12 +59,30 @@ struct SnapshotStageView: View {
                          onReveal: revealCurrent,
                          onDelete: confirmAndDeleteCurrent)
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
+
+            // Debug overlay (top-left), visible only when Debug Mode is ON
+            if SettingsStore.shared.debugMode, let s = model.selected {
+                DebugOverlay(meta: s)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                    .padding(8)
+            }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .onChange(of: globalQuery) { _ in
             refreshRects()
         }
         .onChange(of: localQuery) { _ in
+            refreshRects()
+        }
+        .onAppear { loadSelectedIfNeeded() }
+        .onChange(of: model.selected?.id) { _ in
+            loadSelectedIfNeeded()
+            rects = []
+            refreshRects()
+        }
+        .onChange(of: model.selectedIndex) { _ in
+            loadSelectedIfNeeded()
+            rects = []
             refreshRects()
         }
     }
@@ -243,8 +227,101 @@ struct SnapshotStageView: View {
         }
     }
 
-    private func copyCurrent() { if let p = model.selected?.path { SnapshotActions.copyImage(at: URL(fileURLWithPath: p)) } }
-    private func saveCurrent() { if let p = model.selected?.path { SnapshotActions.saveImageAs(from: URL(fileURLWithPath: p)) } }
+    // MARK: - Image loading logic
+    private func loadSelectedIfNeeded() {
+        guard let s = model.selected else { nsImage = nil; isLoading = false; return }
+        if lastRequestedId == s.id && nsImage != nil { return }
+        lastRequestedId = s.id
+        loadToken &+= 1
+        let token = loadToken
+        // 1) If we have a poster image (thumbPath), prefer it for instant UX
+        if let t = s.thumbPath {
+            let tu = URL(fileURLWithPath: t)
+            if tu.pathExtension.lowercased() == "tse" {
+                if let (hdr, data) = try? FileCrypter.shared.decryptTSE(at: tu), hdr.mime.hasPrefix("image/") {
+                    withAnimation(.easeInOut(duration: 0.12)) { nsImage = NSImage(data: data) }
+                    isLoading = false
+                    showSpinner = false
+                    return
+                }
+            } else if let im = NSImage(contentsOf: tu) {
+                withAnimation(.easeInOut(duration: 0.12)) { nsImage = im }
+                isLoading = false
+                showSpinner = false
+                return
+            }
+        }
+        // 2) Begin background load with small retries for live segment flush
+        // Do not clear nsImage here to avoid flicker; overlay spinner instead
+        isLoading = true
+        showSpinner = false
+        let url = URL(fileURLWithPath: s.path)
+        let ext = url.pathExtension.lowercased()
+        var isVideo = ["mov","mp4"].contains(ext)
+        if ext == "tse" {
+            if let hdr = try? FileCrypter.shared.peekTSEHeader(at: url) {
+                isVideo = hdr.mime.hasPrefix("video/")
+            }
+        }
+        let unlocked = UserDefaults.standard.bool(forKey: "vault.isUnlocked")
+
+        func attemptLoad() -> NSImage? {
+            if ext == "tse" {
+                // Decide by cleartext header mime
+                if let hdr = try? FileCrypter.shared.peekTSEHeader(at: url) {
+                    if hdr.mime.hasPrefix("video/") {
+                        return HEVCFrameExtractor.image(forPath: url, startedAtMs: s.startedAtMs, format: "hevc")
+                    } else if hdr.mime.hasPrefix("image/"), unlocked,
+                              let (_, data) = try? FileCrypter.shared.decryptTSE(at: url) {
+                        return NSImage(data: data)
+                    } else {
+                        return nil
+                    }
+                }
+            }
+            if ["mov","mp4"].contains(ext) {
+                return HEVCFrameExtractor.image(forPath: url, startedAtMs: s.startedAtMs, format: "hevc")
+            }
+            return NSImage(contentsOf: url)
+        }
+
+        // Delay the spinner by 0.2s to avoid flicker for very fast loads
+        let spinnerToken = token
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+            if self.loadToken == spinnerToken && self.isLoading && self.nsImage == nil {
+                withAnimation(.easeInOut(duration: 0.12)) { self.showSpinner = true }
+            }
+        }
+
+        DispatchQueue.global(qos: .userInitiated).async {
+            var image: NSImage? = attemptLoad()
+            if image == nil && isVideo {
+                // Try a few short delays to allow a movie fragment to flush
+                let delays: [UInt64] = [120_000_000, 280_000_000, 500_000_000] // ns
+                for d in delays {
+                    usleep(useconds_t(d / 1000))
+                    image = attemptLoad()
+                    if image != nil { break }
+                }
+            }
+            DispatchQueue.main.async {
+                // Ensure we are still showing the same load attempt
+                guard self.loadToken == token else { return }
+                if let im = image {
+                    withAnimation(.easeInOut(duration: 0.12)) { self.nsImage = im }
+                } // else keep the previous image to avoid flicker/flash
+                self.isLoading = false
+                withAnimation(.easeInOut(duration: 0.12)) { self.showSpinner = false }
+            }
+        }
+    }
+
+    private func copyCurrent() {
+        if let p = model.selected?.path { SnapshotActions.copyImage(at: URL(fileURLWithPath: p), fallbackImage: nsImage) }
+    }
+    private func saveCurrent() {
+        if let p = model.selected?.path { SnapshotActions.saveImageAs(from: URL(fileURLWithPath: p), fallbackImage: nsImage) }
+    }
     private func revealCurrent() { if let p = model.selected?.path { SnapshotActions.revealInFinder(URL(fileURLWithPath: p)) } }
     private func confirmAndDeleteCurrent() {
         guard let meta = model.selected else { return }
@@ -257,6 +334,75 @@ struct SnapshotStageView: View {
         if alert.runModal() == .alertFirstButtonReturn {
             model.deleteSnapshot(id: meta.id)
         }
+    }
+}
+
+// MARK: - Debug Overlay
+private struct DebugOverlay: View {
+    let meta: SnapshotMeta
+
+    private func fmtDate(_ ms: Int64, pattern: String) -> String {
+        let d = Date(timeIntervalSince1970: TimeInterval(ms) / 1000)
+        return DebugOverlay.cachedFormatter(pattern: pattern).string(from: d)
+    }
+
+    private func segmentStart(from url: URL) -> Int64? {
+        let name = url.deletingPathExtension().lastPathComponent
+        guard name.hasPrefix("seg-") else { return nil }
+        let ts = String(name.dropFirst(4))
+        let df = DebugOverlay.cachedFormatter(pattern: "yyyy-MM-dd-HH-mm-ss")
+        if let d = df.date(from: ts) { return Int64(d.timeIntervalSince1970 * 1000) }
+        return nil
+    }
+
+    var body: some View {
+        let url = URL(fileURLWithPath: meta.path)
+        let ext = url.pathExtension.lowercased()
+        let mime: String? = (ext == "tse") ? (try? FileCrypter.shared.peekTSEHeader(at: url).mime) : nil
+        let isVideo = ["mov","mp4"].contains(ext) || (mime?.hasPrefix("video/") ?? false)
+        let segStart = isVideo ? (segmentStart(from: url) ?? 0) : 0
+        let offset = isVideo ? max(0, meta.startedAtMs - segStart) : 0
+        let liveMov = StoragePaths.videosDir().appendingPathComponent("seg-\(fmtDate(segStart, pattern: "yyyy-MM-dd-HH-mm-ss")).mov")
+        let liveExists = FileManager.default.fileExists(atPath: liveMov.path)
+        let sealedExists = FileManager.default.fileExists(atPath: url.path)
+
+        let rows: [String] = {
+            var r: [String] = []
+            r.append("id: \(meta.id)")
+            r.append("time: \(fmtDate(meta.startedAtMs, pattern: "HH:mm:ss.SSS")) (\(meta.startedAtMs))")
+            if let app = meta.appName { r.append("app: \(app)") }
+            r.append("path: \(url.lastPathComponent)")
+            if isVideo {
+                r.append("format: hevc (video)")
+                r.append("segStart: \(fmtDate(segStart, pattern: "HH:mm:ss")) offsetMs=\(offset)")
+                r.append("source: \(ext == "tse" ? (sealedExists ? "tse(sealed)" : (liveExists ? "mov(live)" : "(missing)")) : "mov(live)")")
+            } else {
+                if ext == "tse" && (mime?.hasPrefix("image/") ?? false) {
+                    r.append("format: image (encrypted)")
+                } else {
+                    r.append("format: \(ext.isEmpty ? "(unknown)" : ext)")
+                }
+            }
+            return r
+        }()
+
+        return VStack(alignment: .leading, spacing: 2) {
+            ForEach(rows, id: \.self) { s in Text(s) }
+        }
+        .font(.system(size: 11, weight: .regular, design: .monospaced))
+        .padding(8)
+        .background(.black.opacity(0.45))
+        .foregroundColor(.white)
+        .cornerRadius(6)
+        .shadow(radius: 3)
+    }
+
+    private static var dfCache: [String: DateFormatter] = [:]
+    private static func cachedFormatter(pattern: String) -> DateFormatter {
+        if let f = dfCache[pattern] { return f }
+        let f = DateFormatter(); f.locale = Locale(identifier: "en_US_POSIX"); f.dateFormat = pattern
+        dfCache[pattern] = f
+        return f
     }
 }
 
@@ -372,8 +518,9 @@ private struct ActionsPanel: View {
 }
 
 enum SnapshotActions {
-    static func copyImage(at url: URL) {
+    static func copyImage(at url: URL, fallbackImage: NSImage? = nil) {
         let img: NSImage? = {
+            if let fb = fallbackImage { return fb }
             if url.pathExtension.lowercased() == "tse" {
                 let unlocked = UserDefaults.standard.bool(forKey: "vault.isUnlocked")
                 if unlocked, let data = try? FileCrypter.shared.decryptImage(at: url) { return NSImage(data: data) }
@@ -390,11 +537,11 @@ enum SnapshotActions {
         }
     }
 
-    static func saveImageAs(from url: URL) {
+    static func saveImageAs(from url: URL, fallbackImage: NSImage? = nil) {
         let panel = NSSavePanel()
         panel.canCreateDirectories = true
         panel.title = "Save Image As"
-        if url.pathExtension.lowercased() == "tse" {
+        if url.pathExtension.lowercased() == "tse" && fallbackImage == nil {
             // Suggest original extension (unknown here); default to .png
             panel.nameFieldStringValue = url.deletingPathExtension().lastPathComponent + ".png"
             if #available(macOS 11.0, *) {
@@ -415,7 +562,20 @@ enum SnapshotActions {
         }
         if panel.runModal() == .OK, let dest = panel.url {
             do {
-                if url.pathExtension.lowercased() == "tse" {
+                if let fb = fallbackImage {
+                    // Save the displayed image
+                    if let t = dest.pathExtension.lowercased().isEmpty ? UTType.png : UTType(filenameExtension: dest.pathExtension), #available(macOS 11.0, *) {
+                        guard let cg = fb.cgImage(forProposedRect: nil, context: nil, hints: nil) else { throw NSError(domain: "TS.Save", code: -2) }
+                        let uti = t.identifier as CFString
+                        guard let dst = CGImageDestinationCreateWithURL(dest as CFURL, uti, 1, nil) else { throw NSError(domain: "TS.Save", code: -3) }
+                        CGImageDestinationAddImage(dst, cg, nil)
+                        if !CGImageDestinationFinalize(dst) { throw NSError(domain: "TS.Save", code: -4) }
+                    } else {
+                        // Fallback: PNG via NSBitmapImageRep
+                        guard let tiff = fb.tiffRepresentation, let rep = NSBitmapImageRep(data: tiff), let data = rep.representation(using: .png, properties: [:]) else { throw NSError(domain: "TS.Save", code: -5) }
+                        try data.write(to: dest, options: .atomic)
+                    }
+                } else if url.pathExtension.lowercased() == "tse" {
                     let unlocked = UserDefaults.standard.bool(forKey: "vault.isUnlocked")
                     guard unlocked, let data = try? FileCrypter.shared.decryptImage(at: url) else {
                         throw NSError(domain: "TS.Save", code: -1)

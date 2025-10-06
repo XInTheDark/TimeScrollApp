@@ -91,12 +91,10 @@ struct StatsView: View {
         if let c = cutoffMs {
             snapshotCount = (try? DB.shared.snapshotCountSince(ms: c)) ?? 0
             snapshotsBytes = (try? DB.shared.sumSnapshotBytesSince(ms: c)) ?? 0
-            avgBytes = (try? DB.shared.avgSnapshotBytesSince(ms: c)) ?? 0
             usageSeconds = (try? DB.shared.usageSecondsSince(cutoff: now - (window.seconds ?? 0), now: now)) ?? 0
         } else {
             snapshotCount = (try? DB.shared.snapshotCount()) ?? 0
             snapshotsBytes = (try? DB.shared.sumSnapshotBytesAll()) ?? 0
-            avgBytes = (try? DB.shared.avgSnapshotBytesAll()) ?? 0
             usageSeconds = (try? DB.shared.totalUsageSeconds(now: now)) ?? 0
         }
         if fullDisk {
@@ -104,6 +102,13 @@ struct StatsView: View {
             // Refresh snapshot directory size only when fullDisk is requested (expensive); we reuse snapshotsBytes
         }
         storageBytes = snapshotsBytes + dbBytes
+        // Average snapshot bytes should include the database as well:
+        // literally (total storage) / (number of snapshots)
+        if snapshotCount > 0 {
+            avgBytes = storageBytes / Int64(snapshotCount)
+        } else {
+            avgBytes = 0
+        }
     }
 
     // For timer updates: only usage needs frequent refresh (and any open session count unaffected).

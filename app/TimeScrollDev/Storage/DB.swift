@@ -16,6 +16,7 @@ struct SnapshotMeta: Identifiable, Hashable {
     let path: String
     let appBundleId: String?
     let appName: String?
+    let thumbPath: String?
 }
 
 // Search result row including raw text content for snippet building in UI
@@ -25,6 +26,7 @@ struct SearchResult: Identifiable, Hashable {
     let path: String
     let appBundleId: String?
     let appName: String?
+    let thumbPath: String?
     let content: String
 }
 
@@ -468,7 +470,7 @@ final class DB {
             try openIfNeeded()
             guard let db = db else { return [] }
             var sql = """
-            SELECT s.id, s.started_at_ms, s.path, s.app_bundle_id, s.app_name, t.content, e.vec, e.dim
+            SELECT s.id, s.started_at_ms, s.path, s.app_bundle_id, s.app_name, s.thumb_path, t.content, e.vec, e.dim
             FROM ts_embedding e
             JOIN ts_snapshot s ON s.id = e.snapshot_id
             LEFT JOIN ts_text t ON t.rowid = s.id
@@ -499,17 +501,18 @@ final class DB {
                 let path = String(cString: sqlite3_column_text(stmt, 2))
                 let bid = sqlite3_column_text(stmt, 3).map { String(cString: $0) }
                 let name = sqlite3_column_text(stmt, 4).map { String(cString: $0) }
-                let content = sqlite3_column_text(stmt, 5).map { String(cString: $0) } ?? ""
+                let thumb = sqlite3_column_text(stmt, 5).map { String(cString: $0) }
+                let content = sqlite3_column_text(stmt, 6).map { String(cString: $0) } ?? ""
                 // vec blob
-                let blobPtr = sqlite3_column_blob(stmt, 6)
-                let blobLen = Int(sqlite3_column_bytes(stmt, 6))
-                let dim = Int(sqlite3_column_int(stmt, 7))
+                let blobPtr = sqlite3_column_blob(stmt, 7)
+                let blobLen = Int(sqlite3_column_bytes(stmt, 7))
+                let dim = Int(sqlite3_column_int(stmt, 8))
                 var vector: [Float] = []
                 if let ptr = blobPtr, blobLen >= dim * MemoryLayout<Float>.size {
                     let count = blobLen / MemoryLayout<Float>.size
                     vector = Array(UnsafeBufferPointer(start: ptr.assumingMemoryBound(to: Float.self), count: count))
                 }
-                let res = SearchResult(id: id, startedAtMs: ts, path: path, appBundleId: bid, appName: name, content: content)
+                let res = SearchResult(id: id, startedAtMs: ts, path: path, appBundleId: bid, appName: name, thumbPath: thumb, content: content)
                 rows.append(EmbeddingCandidate(result: res, vector: vector, dim: dim))
             }
             return rows
@@ -580,7 +583,7 @@ final class DB {
             try openIfNeeded()
             guard let db = db else { return [] }
             var sql = """
-            SELECT id, started_at_ms, path, app_bundle_id, app_name
+            SELECT id, started_at_ms, path, app_bundle_id, app_name, thumb_path
             FROM ts_snapshot
             WHERE 1=1
             """
@@ -607,7 +610,8 @@ final class DB {
                 let path = String(cString: sqlite3_column_text(stmt, 2))
                 let bid = sqlite3_column_text(stmt, 3).map { String(cString: $0) }
                 let name = sqlite3_column_text(stmt, 4).map { String(cString: $0) }
-                rows.append(SnapshotMeta(id: id, startedAtMs: ts, path: path, appBundleId: bid, appName: name))
+                let thumb = sqlite3_column_text(stmt, 5).map { String(cString: $0) }
+                rows.append(SnapshotMeta(id: id, startedAtMs: ts, path: path, appBundleId: bid, appName: name, thumbPath: thumb))
             }
             return rows
         }
@@ -624,7 +628,7 @@ final class DB {
             try openIfNeeded()
             guard let db = db else { return [] }
             var sql = """
-            SELECT s.id, s.started_at_ms, s.path, s.app_bundle_id, s.app_name
+            SELECT s.id, s.started_at_ms, s.path, s.app_bundle_id, s.app_name, s.thumb_path
             FROM ts_text t
             JOIN ts_snapshot s ON s.id = t.rowid
             WHERE t.content MATCH ?
@@ -653,7 +657,8 @@ final class DB {
                 let path = String(cString: sqlite3_column_text(stmt, 2))
                 let bid = sqlite3_column_text(stmt, 3).map { String(cString: $0) }
                 let name = sqlite3_column_text(stmt, 4).map { String(cString: $0) }
-                rows.append(SnapshotMeta(id: id, startedAtMs: ts, path: path, appBundleId: bid, appName: name))
+                let thumb = sqlite3_column_text(stmt, 5).map { String(cString: $0) }
+                rows.append(SnapshotMeta(id: id, startedAtMs: ts, path: path, appBundleId: bid, appName: name, thumbPath: thumb))
             }
             return rows
         }
@@ -671,7 +676,7 @@ final class DB {
             try openIfNeeded()
             guard let db = db else { return [] }
             var sql = """
-            SELECT s.id, s.started_at_ms, s.path, s.app_bundle_id, s.app_name
+            SELECT s.id, s.started_at_ms, s.path, s.app_bundle_id, s.app_name, s.thumb_path
             FROM ts_text t
             JOIN ts_snapshot s ON s.id = t.rowid
             WHERE 1=1
@@ -702,7 +707,8 @@ final class DB {
                 let path = String(cString: sqlite3_column_text(stmt, 2))
                 let bid = sqlite3_column_text(stmt, 3).map { String(cString: $0) }
                 let name = sqlite3_column_text(stmt, 4).map { String(cString: $0) }
-                rows.append(SnapshotMeta(id: id, startedAtMs: ts, path: path, appBundleId: bid, appName: name))
+                let thumb = sqlite3_column_text(stmt, 5).map { String(cString: $0) }
+                rows.append(SnapshotMeta(id: id, startedAtMs: ts, path: path, appBundleId: bid, appName: name, thumbPath: thumb))
             }
             return rows
         }
@@ -713,7 +719,7 @@ final class DB {
         try onQueueSync {
             try openIfNeeded(); guard let db = db else { return nil }
             var stmt: OpaquePointer?; defer { sqlite3_finalize(stmt) }
-            let sql = "SELECT id, started_at_ms, path, app_bundle_id, app_name FROM ts_snapshot WHERE id=? LIMIT 1;"
+            let sql = "SELECT id, started_at_ms, path, app_bundle_id, app_name, thumb_path FROM ts_snapshot WHERE id=? LIMIT 1;"
             guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return nil }
             sqlite3_bind_int64(stmt, 1, id)
             if sqlite3_step(stmt) == SQLITE_ROW {
@@ -722,9 +728,44 @@ final class DB {
                 let path = String(cString: sqlite3_column_text(stmt, 2))
                 let bid = sqlite3_column_text(stmt, 3).map { String(cString: $0) }
                 let name = sqlite3_column_text(stmt, 4).map { String(cString: $0) }
-                return SnapshotMeta(id: id, startedAtMs: ts, path: path, appBundleId: bid, appName: name)
+                let thumb = sqlite3_column_text(stmt, 5).map { String(cString: $0) }
+                return SnapshotMeta(id: id, startedAtMs: ts, path: path, appBundleId: bid, appName: name, thumbPath: thumb)
             }
             return nil
+        }
+    }
+
+    func updateThumbPath(rowId: Int64, thumbPath: String?) {
+        _ = try? onQueueSync {
+            try openIfNeeded()
+            guard let db = db else { return }
+            var stmt: OpaquePointer?
+            defer { sqlite3_finalize(stmt) }
+            let sql = "UPDATE ts_snapshot SET thumb_path=? WHERE id=?;"
+            if sqlite3_prepare_v2(db, sql, -1, &stmt, nil) != SQLITE_OK { return }
+            if let p = thumbPath { sqlite3_bind_text(stmt, 1, p, -1, SQLITE_TRANSIENT) } else { sqlite3_bind_null(stmt, 1) }
+            sqlite3_bind_int64(stmt, 2, rowId)
+            _ = sqlite3_step(stmt)
+        }
+    }
+
+    // Return (id, thumbPath) for rows with posters in the range [startMs, endMs]
+    func rowsWithThumbs(startMs: Int64, endMs: Int64) throws -> [(Int64, String)] {
+        try onQueueSync {
+            try openIfNeeded(); guard let db = db else { return [] }
+            let sql = "SELECT id, thumb_path FROM ts_snapshot WHERE started_at_ms >= ? AND started_at_ms <= ? AND thumb_path IS NOT NULL;"
+            var stmt: OpaquePointer?; defer { sqlite3_finalize(stmt) }
+            guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return [] }
+            sqlite3_bind_int64(stmt, 1, startMs)
+            sqlite3_bind_int64(stmt, 2, endMs)
+            var out: [(Int64, String)] = []
+            while sqlite3_step(stmt) == SQLITE_ROW {
+                let id = sqlite3_column_int64(stmt, 0)
+                if let c = sqlite3_column_text(stmt, 1) {
+                    out.append((id, String(cString: c)))
+                }
+            }
+            return out
         }
     }
 
@@ -739,7 +780,7 @@ final class DB {
             try openIfNeeded()
             guard let db = db else { return [] }
             var sql = """
-            SELECT s.id, s.started_at_ms, s.path, s.app_bundle_id, s.app_name, t.content
+            SELECT s.id, s.started_at_ms, s.path, s.app_bundle_id, s.app_name, s.thumb_path, t.content
             FROM ts_text t
             JOIN ts_snapshot s ON s.id = t.rowid
             WHERE t.content MATCH ?
@@ -768,8 +809,9 @@ final class DB {
                 let path = String(cString: sqlite3_column_text(stmt, 2))
                 let bid = sqlite3_column_text(stmt, 3).map { String(cString: $0) }
                 let name = sqlite3_column_text(stmt, 4).map { String(cString: $0) }
-                let content = sqlite3_column_text(stmt, 5).map { String(cString: $0) } ?? ""
-                rows.append(SearchResult(id: id, startedAtMs: ts, path: path, appBundleId: bid, appName: name, content: content))
+                let thumb = sqlite3_column_text(stmt, 5).map { String(cString: $0) }
+                let content = sqlite3_column_text(stmt, 6).map { String(cString: $0) } ?? ""
+                rows.append(SearchResult(id: id, startedAtMs: ts, path: path, appBundleId: bid, appName: name, thumbPath: thumb, content: content))
             }
             return rows
         }
@@ -787,7 +829,7 @@ final class DB {
             try openIfNeeded()
             guard let db = db else { return [] }
             var sql = """
-            SELECT s.id, s.started_at_ms, s.path, s.app_bundle_id, s.app_name, t.content
+            SELECT s.id, s.started_at_ms, s.path, s.app_bundle_id, s.app_name, s.thumb_path, t.content
             FROM ts_text t
             JOIN ts_snapshot s ON s.id = t.rowid
             WHERE 1=1
@@ -817,8 +859,9 @@ final class DB {
                 let path = String(cString: sqlite3_column_text(stmt, 2))
                 let bid = sqlite3_column_text(stmt, 3).map { String(cString: $0) }
                 let name = sqlite3_column_text(stmt, 4).map { String(cString: $0) }
-                let content = sqlite3_column_text(stmt, 5).map { String(cString: $0) } ?? ""
-                rows.append(SearchResult(id: id, startedAtMs: ts, path: path, appBundleId: bid, appName: name, content: content))
+                let thumb = sqlite3_column_text(stmt, 5).map { String(cString: $0) }
+                let content = sqlite3_column_text(stmt, 6).map { String(cString: $0) } ?? ""
+                rows.append(SearchResult(id: id, startedAtMs: ts, path: path, appBundleId: bid, appName: name, thumbPath: thumb, content: content))
             }
             return rows
         }
@@ -834,7 +877,7 @@ final class DB {
             try openIfNeeded()
             guard let db = db else { return [] }
             var sql = """
-            SELECT s.id, s.started_at_ms, s.path, s.app_bundle_id, s.app_name, t.content
+            SELECT s.id, s.started_at_ms, s.path, s.app_bundle_id, s.app_name, s.thumb_path, t.content
             FROM ts_snapshot s
             LEFT JOIN ts_text t ON t.rowid = s.id
             WHERE 1=1
@@ -862,8 +905,9 @@ final class DB {
                 let path = String(cString: sqlite3_column_text(stmt, 2))
                 let bid = sqlite3_column_text(stmt, 3).map { String(cString: $0) }
                 let name = sqlite3_column_text(stmt, 4).map { String(cString: $0) }
-                let content = sqlite3_column_text(stmt, 5).map { String(cString: $0) } ?? ""
-                rows.append(SearchResult(id: id, startedAtMs: ts, path: path, appBundleId: bid, appName: name, content: content))
+                let thumb = sqlite3_column_text(stmt, 5).map { String(cString: $0) }
+                let content = sqlite3_column_text(stmt, 6).map { String(cString: $0) } ?? ""
+                rows.append(SearchResult(id: id, startedAtMs: ts, path: path, appBundleId: bid, appName: name, thumbPath: thumb, content: content))
             }
             return rows
         }
@@ -1336,6 +1380,35 @@ final class DB {
         DELETE FROM ts_snapshot WHERE started_at_ms < \(cutoff);
         """
         _ = sqlite3_exec(db, sql, nil, nil, nil)
+        }
+    }
+
+    // Delete rows older than a specific cutoff, optionally skipping on-disk deletions.
+    func purgeRowsOlderThan(cutoffMs cutoff: Int64, deleteFiles: Bool) throws {
+        try onQueueSync {
+            try openIfNeeded(); guard let db = db else { return }
+            var pathsToHandle: [String] = []
+            if deleteFiles {
+                var stmt: OpaquePointer?; defer { sqlite3_finalize(stmt) }
+                if sqlite3_prepare_v2(db, "SELECT path FROM ts_snapshot WHERE started_at_ms < ?;", -1, &stmt, nil) == SQLITE_OK {
+                    sqlite3_bind_int64(stmt, 1, cutoff)
+                    while sqlite3_step(stmt) == SQLITE_ROW {
+                        if let cstr = sqlite3_column_text(stmt, 0) { pathsToHandle.append(String(cString: cstr)) }
+                    }
+                }
+                let fm = FileManager.default
+                for p in pathsToHandle {
+                    let srcURL = URL(fileURLWithPath: p)
+                    let archived = StoragePaths.archiveSnapshotToBackupIfEnabled(srcURL)
+                    if !archived { _ = try? fm.removeItem(at: srcURL) }
+                }
+            }
+            let sql = """
+            DELETE FROM ts_text WHERE rowid IN (SELECT id FROM ts_snapshot WHERE started_at_ms < \(cutoff));
+            DELETE FROM ts_ocr_boxes WHERE snapshot_id IN (SELECT id FROM ts_snapshot WHERE started_at_ms < \(cutoff));
+            DELETE FROM ts_snapshot WHERE started_at_ms < \(cutoff);
+            """
+            _ = sqlite3_exec(db, sql, nil, nil, nil)
         }
     }
 

@@ -1,4 +1,5 @@
 import Foundation
+import SwiftUI
 import CoreGraphics
 
 final class IngestQueue {
@@ -17,6 +18,7 @@ final class IngestQueue {
         let hash64: Int64
         let ocrText: String
         let ocrBoxes: [OCRLine]
+        let thumbPath: String?
     }
 
     private var ingestTimer: Timer?
@@ -39,9 +41,10 @@ final class IngestQueue {
                  format: String,
                  hash64: Int64,
                  ocrText: String,
-                 ocrBoxes: [OCRLine]) throws {
+                 ocrBoxes: [OCRLine],
+                 thumbPath: String?) throws {
         ensureDir()
-        let rec = Record(snapshotPath: path.path, startedAtMs: startedAtMs, appBundleId: appBundleId, appName: appName, bytes: bytes, width: width, height: height, format: format, hash64: hash64, ocrText: ocrText, ocrBoxes: ocrBoxes)
+        let rec = Record(snapshotPath: path.path, startedAtMs: startedAtMs, appBundleId: appBundleId, appName: appName, bytes: bytes, width: width, height: height, format: format, hash64: hash64, ocrText: ocrText, ocrBoxes: ocrBoxes, thumbPath: thumbPath)
         let clear = try JSONEncoder().encode(rec)
         let data = try FileCrypter.shared.encryptData(clear, timestampMs: startedAtMs)
         StoragePaths.withSecurityScope {
@@ -98,9 +101,14 @@ final class IngestQueue {
                     height: rec.height,
                     format: rec.format,
                     hash64: rec.hash64,
-                    thumbPath: nil
+                    thumbPath: rec.thumbPath
                 )
-                if rowId > 0 { try? StoragePaths.withSecurityScope { try fm.removeItem(at: u) }; processed += 1 }
+                if rowId > 0 {
+                    // Notify UI that a snapshot row was inserted while previously locked
+                    Task { @MainActor in AppState.shared.lastSnapshotTick &+= 1 }
+                    try? StoragePaths.withSecurityScope { try fm.removeItem(at: u) }
+                    processed += 1
+                }
             } catch {
                 // Move to failed/
                 let failedDir = dir.appendingPathComponent("failed", isDirectory: true)

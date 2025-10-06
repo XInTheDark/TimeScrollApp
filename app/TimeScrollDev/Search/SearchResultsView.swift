@@ -197,6 +197,7 @@ struct SearchResultsView: View {
 private struct SearchRowView: View {
     let row: SearchResult
     let query: String
+    @State private var hevcThumb: NSImage? = nil
 
     var body: some View {
         HStack(alignment: .top, spacing: 10) {
@@ -212,12 +213,25 @@ private struct SearchRowView: View {
 
     private var thumb: some View {
         let url = URL(fileURLWithPath: row.path)
+        let ext = url.pathExtension.lowercased()
+        // Prefer poster thumbnail if available
+        if let t = row.thumbPath,
+           let img = ThumbnailCache.shared.thumbnail(for: URL(fileURLWithPath: t), maxPixel: 140) {
+            return AnyView(Image(nsImage: img).resizable().aspectRatio(contentMode: .fit).frame(width: 120, height: 72).cornerRadius(6))
+        }
+        if ["mov","mp4","tse"].contains(ext) {
+            if let img = hevcThumb {
+                return AnyView(Image(nsImage: img).resizable().aspectRatio(contentMode: .fit).frame(width: 120, height: 72).cornerRadius(6))
+            }
+            DispatchQueue.main.async {
+                ThumbnailCache.shared.hevcThumbnail(for: url, startedAtMs: row.startedAtMs, maxPixel: 140) { img in
+                    self.hevcThumb = img
+                }
+            }
+            return AnyView(Rectangle().fill(Color.gray.opacity(0.08)).overlay{ ProgressView().scaleEffect(0.6) }.frame(width: 120, height: 72).cornerRadius(6))
+        }
         if let img = ThumbnailCache.shared.thumbnail(for: url, maxPixel: 140) {
-            return AnyView(Image(nsImage: img)
-                .resizable()
-                .aspectRatio(contentMode: .fit)
-                .frame(width: 120, height: 72)
-                .cornerRadius(6))
+            return AnyView(Image(nsImage: img).resizable().aspectRatio(contentMode: .fit).frame(width: 120, height: 72).cornerRadius(6))
         }
         return AnyView(Rectangle().fill(Color.secondary.opacity(0.2)).frame(width: 120, height: 72).cornerRadius(6))
     }
@@ -364,6 +378,7 @@ private struct SearchRowView: View {
 
 private struct SearchTileView: View {
     let row: SearchResult
+    @State private var hevcThumb: NSImage? = nil
 
     var body: some View {
         VStack(spacing: 8) {
@@ -388,11 +403,24 @@ private struct SearchTileView: View {
 
     private var thumb: some View {
         let url = URL(fileURLWithPath: row.path)
+        let ext = url.pathExtension.lowercased()
+        if let t = row.thumbPath,
+           let img = ThumbnailCache.shared.thumbnail(for: URL(fileURLWithPath: t), maxPixel: 400) {
+            return AnyView(Image(nsImage: img).resizable().aspectRatio(contentMode: .fit).cornerRadius(6))
+        }
+        if ["mov","mp4","tse"].contains(ext) {
+            if let img = hevcThumb {
+                return AnyView(Image(nsImage: img).resizable().aspectRatio(contentMode: .fit).cornerRadius(6))
+            }
+            DispatchQueue.main.async {
+                ThumbnailCache.shared.hevcThumbnail(for: url, startedAtMs: row.startedAtMs, maxPixel: 400) { img in
+                    self.hevcThumb = img
+                }
+            }
+            return AnyView(Rectangle().fill(Color.gray.opacity(0.08)).overlay{ ProgressView().scaleEffect(0.7) }.aspectRatio(16/10, contentMode: .fit).cornerRadius(6))
+        }
         if let img = ThumbnailCache.shared.thumbnail(for: url, maxPixel: 400) {
-            return AnyView(Image(nsImage: img)
-                .resizable()
-                .aspectRatio(contentMode: .fit)
-                .cornerRadius(6))
+            return AnyView(Image(nsImage: img).resizable().aspectRatio(contentMode: .fit).cornerRadius(6))
         }
         return AnyView(Rectangle().fill(Color.secondary.opacity(0.2)).aspectRatio(16/10, contentMode: .fit).cornerRadius(6))
     }

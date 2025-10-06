@@ -539,7 +539,12 @@ private struct StoragePane: View {
 
                 LabeledContent("Dedup sensitivity") {
                     HStack {
-                        Slider(value: Binding(get: { Double(settings.dedupHammingThreshold) }, set: { settings.dedupHammingThreshold = Int($0) }), in: 0...16, step: 1)
+                        Slider(
+                            value: Binding(get: { Double(settings.dedupHammingThreshold) }, set: { settings.dedupHammingThreshold = Int($0) }),
+                            in: 0...16,
+                            step: 1
+                        )
+                        .help("Lower = more sensitive (keeps more snapshots). Higher = more aggressive dedup (keeps fewer snapshots).")
                         Text("\(settings.dedupHammingThreshold)")
                             .monospacedDigit()
                             .frame(width: 28, alignment: .trailing)

@@ -6,6 +6,8 @@ final class AppState: ObservableObject {
     static let shared = AppState()
     @Published var isCapturing: Bool = false
     @Published var lastSnapshotURL: URL?
+    // Always increments for every snapshot row inserted so SwiftUI can react
+    @Published var lastSnapshotTick: Int = 0
 
     let snapshotStore = SnapshotStore.shared
     lazy var captureManager: CaptureManager = {
@@ -13,6 +15,7 @@ final class AppState: ObservableObject {
             Task { @MainActor in
                 if !VaultManager.shared.isVaultEnabled || VaultManager.shared.isUnlocked {
                     self?.lastSnapshotURL = url
+                    self?.lastSnapshotTick &+= 1
                 }
             }
         }

@@ -28,7 +28,7 @@ final class SettingsStore: ObservableObject {
     @Published var dedupEnabled: Bool = true { didSet { if !isLoading { save() } } }
     @Published var dedupHammingThreshold: Int = 6 { didSet { if !isLoading { save() } } }     // 0..64
     @Published var adaptiveSampling: Bool = true { didSet { if !isLoading { save() } } }
-    @Published var adaptiveMaxInterval: Double = 30.0 { didSet { if !isLoading { save() } } }  // seconds
+    @Published var adaptiveMaxInterval: Double = 10.0 { didSet { if !isLoading { save() } } }  // seconds
     @Published var degradeAfterDays: Int = 7 { didSet { if !isLoading { save() } } }
     @Published var degradeMaxLongEdge: Int = 1200 { didSet { if !isLoading { save() } } }
     @Published var degradeQuality: Double = 0.5 { didSet { if !isLoading { save() } } }

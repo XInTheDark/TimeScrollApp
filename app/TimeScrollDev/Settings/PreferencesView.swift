@@ -553,9 +553,10 @@ private struct StoragePane: View {
 
                 Toggle("Adaptive sampling", isOn: $settings.adaptiveSampling)
 
-                LabeledContent("Max interval") {
+                LabeledContent("Max sampling interval") {
                     HStack {
-                        Slider(value: $settings.adaptiveMaxInterval, in: 10.0...120.0, step: 5.0)
+                        Slider(value: $settings.adaptiveMaxInterval, in: 5.0...30.0, step: 5.0)
+                            .help("Max time between frame-processing checks")
                         Text(String(format: "%.0f s", settings.adaptiveMaxInterval))
                             .monospacedDigit()
                             .frame(width: 36, alignment: .trailing)

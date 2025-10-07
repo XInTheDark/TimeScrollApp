@@ -11,7 +11,7 @@ struct PrivacyPane: View {
             Text("Blacklisted Apps")
                 .font(.headline)
 
-            Text("When any app below is frontmost, TimeScroll will skip captures.")
+            Text("Windows from these apps are excluded from capture when visible.")
                 .font(.footnote)
                 .foregroundColor(.secondary)
 
@@ -46,6 +46,11 @@ struct PrivacyPane: View {
             }
         }
         .padding(.top, 4)
+        .onChange(of: settings.blacklistBundleIds) { newList in
+            Task { @MainActor in
+                await AppState.shared.captureManager.updateExclusions(with: newList)
+            }
+        }
     }
 
     private func addApps() {

@@ -8,6 +8,7 @@ import AppKit
 final class CaptureManager: NSObject {
     private var streams: [SCStream] = []
     private var outputs: [FrameOutput] = []
+    private var capturedDisplays: [SCDisplay] = []
     private let outputQueue = DispatchQueue(label: "TimeScroll.Capture.Output")
     private let streamDelegate = StreamDelegate()
     private let onSnapshot: (URL) -> Void
@@ -18,7 +19,7 @@ final class CaptureManager: NSObject {
     }
 
     func start() async throws {
-        let content = try await SCShareableContent.current
+        let content = try await shareableContent()
 
         // Determine which displays to capture based on settings (background-safe via UserDefaults)
         let d = UserDefaults.standard
@@ -34,6 +35,10 @@ final class CaptureManager: NSObject {
         // Configure and start a stream per display
         var newStreams: [SCStream] = []
         var newOutputs: [FrameOutput] = []
+        // Compute initial exclusion set once and reuse per display
+        let blacklistBundleSet = Set((UserDefaults.standard.array(forKey: "settings.blacklistBundleIds") as? [String]) ?? [])
+        let blacklistApps: [SCRunningApplication] = excludedApplications(bundleIds: blacklistBundleSet, content: content)
+
         for display in displays {
             let cfg = SCStreamConfiguration()
             cfg.queueDepth = 8
@@ -44,15 +49,14 @@ final class CaptureManager: NSObject {
             cfg.minimumFrameInterval = CMTime(value: 1, timescale: 10) // 10 fps cap
 
             // Downscale at the source to cut energy cost
-            if #available(macOS 13.0, *) {
-                let w = Int(Double(display.width) * scale)
-                let h = Int(Double(display.height) * scale)
-                cfg.width = max(640, w)
-                cfg.height = max(360, h)
-                cfg.scalesToFit = true
-            }
+            let w = Int(Double(display.width) * scale)
+            let h = Int(Double(display.height) * scale)
+            cfg.width = max(640, w)
+            cfg.height = max(360, h)
+            cfg.scalesToFit = true
 
-            let filter = SCContentFilter(display: display, excludingWindows: [])
+            // Build a content filter that excludes any blacklisted applications
+            let filter = filterFor(display: display, apps: blacklistApps)
             let stream = SCStream(filter: filter, configuration: cfg, delegate: streamDelegate)
             let output = FrameOutput(onSnapshot: onSnapshot)
             try stream.addStreamOutput(output, type: .screen, sampleHandlerQueue: outputQueue)
@@ -63,6 +67,7 @@ final class CaptureManager: NSObject {
         // Assign to properties so they are retained during start
         self.streams = newStreams
         self.outputs = newOutputs
+        self.capturedDisplays = displays
         for s in self.streams {
             try await s.startCapture()
         }
@@ -74,6 +79,43 @@ final class CaptureManager: NSObject {
         }
         streams.removeAll()
         outputs.removeAll()
+        capturedDisplays.removeAll()
+    }
+
+    // MARK: - Helpers (DRY)
+    private func shareableContent() async throws -> SCShareableContent {
+        return try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
+    }
+
+    private func excludedApplications(bundleIds: Set<String>, content: SCShareableContent) -> [SCRunningApplication] {
+        guard !bundleIds.isEmpty else { return [] }
+        return content.applications.filter { bundleIds.contains($0.bundleIdentifier) }
+    }
+
+    private func filterFor(display: SCDisplay, apps: [SCRunningApplication]) -> SCContentFilter {
+        return SCContentFilter(display: display, excludingApplications: apps, exceptingWindows: [])
+    }
+
+    @MainActor
+    func updateExclusions(with bundleIds: [String]) async {
+        guard !streams.isEmpty else { return }
+        do {
+            let content = try await self.shareableContent()
+            let apps = self.excludedApplications(bundleIds: Set(bundleIds), content: content)
+            await self.applyExclusions(apps: apps)
+        } catch {
+            // ignore
+        }
+    }
+
+    @MainActor
+    private func applyExclusions(apps: [SCRunningApplication]) async {
+        for (idx, stream) in streams.enumerated() {
+            guard capturedDisplays.indices.contains(idx) else { continue }
+            let display = capturedDisplays[idx]
+            let filter = filterFor(display: display, apps: apps)
+            do { try await stream.updateContentFilter(filter) } catch { /* ignore */ }
+        }
     }
 }
 
@@ -260,14 +302,7 @@ final class FrameOutput: NSObject, SCStreamOutput {
         }
         if evaluating { return }
 
-        // Privacy: skip capture if the frontmost app is blacklisted
-        if let blacklist = UserDefaults.standard.array(forKey: "settings.blacklistBundleIds") as? [String], !blacklist.isEmpty {
-            let info = AppActivityTracker.shared.current()
-            if let bid = info.bundleId, blacklist.contains(bid) {
-                lastEvaluatedPTS = pts
-                return
-            }
-        }
+        // Privacy handled via SCContentFilter exclusions at the stream level.
 
         evaluating = true
         lastEvaluatedPTS = pts

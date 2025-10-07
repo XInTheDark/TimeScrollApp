@@ -64,7 +64,7 @@ final class SettingsStore: ObservableObject {
     @Published var embeddingProvider: String = "apple-nl" { didSet { if !isLoading { save() } } }
 
     // Privacy
-    // List of bundle identifiers for which capture should be suppressed when frontmost
+    // List of bundle identifiers whose windows should be excluded from capture when visible
     @Published var blacklistBundleIds: [String] = [] { didSet { if !isLoading { save() } } }
 
     // Updates

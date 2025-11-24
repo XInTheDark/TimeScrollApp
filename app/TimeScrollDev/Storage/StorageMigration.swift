@@ -65,6 +65,20 @@ final class StorageMigrationManager {
         // Persist new location bookmark + display path
         StoragePaths.setStorageFolder(newRoot)
 
+        // After moving files, ensure DB rows which contain absolute on-disk paths are updated
+        // to reflect the new root. This ensures older snapshots (whose path values were
+        // stored using the old root) continue to resolve after migration.
+        if moveExisting {
+            // Best-effort: open DB at new root and rewrite any path/thumb_path prefixes.
+            do {
+                try DB.shared.openIfNeeded()
+                DB.shared.updateSnapshotPathsAfterRootMove(oldRoot: oldRoot.path, newRoot: newRoot.path)
+            } catch {
+                // Non-fatal; log and continue — best-effort migration
+                fputs("[StorageMigration] warn: failed to update DB paths after move: \(error.localizedDescription)\n", stderr)
+            }
+        }
+
         // Optionally delete old location (if it still exists)
         if deleteOld {
             onProgress?("Cleaning up old location…")
@@ -98,18 +112,14 @@ final class StorageMigrationManager {
     }
 
     // MARK: - Private helpers
-    nonisolated private static func transfer(from oldRoot: URL, to newRoot: URL) throws {
+    nonisolated static func transfer(from oldRoot: URL, to newRoot: URL) throws {
         let fm = FileManager.default
-        // Move or copy specific entries
-        let entries: [String] = [
-            "db.sqlite", "db.sqlite-wal", "db.sqlite-shm",
-            "Snapshots",
-            "IngestQueue",
-            "Vault"
-        ]
-        for name in entries {
-            let src = oldRoot.appendingPathComponent(name)
-            let dst = newRoot.appendingPathComponent(name)
+        // Move/copy everything from oldRoot into newRoot preserving directory names.
+        // This is safer than maintaining a fixed list of entries and ensures future
+        // additions are included automatically.
+        let items = try fm.contentsOfDirectory(at: oldRoot, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles])
+        for src in items {
+            let dst = newRoot.appendingPathComponent(src.lastPathComponent)
             if fm.fileExists(atPath: src.path) {
                 if fm.fileExists(atPath: dst.path) { _ = try? fm.removeItem(at: dst) }
                 do {

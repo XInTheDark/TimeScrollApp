@@ -30,6 +30,18 @@ struct SearchResult: Identifiable, Hashable {
     let content: String
 }
 
+// Internal unified row used to de-duplicate FTS/latest query implementations.
+// Not exposed outside this file; higher-level APIs map this to public types.
+private struct SearchRowUnified: Hashable {
+    let id: Int64
+    let startedAtMs: Int64
+    let path: String
+    let appBundleId: String?
+    let appName: String?
+    let thumbPath: String?
+    let content: String? // present only when includeContent == true
+}
+
 final class DB {
     static let shared = DB()
     private init() { queue.setSpecific(key: queueKey, value: true) }
@@ -55,7 +67,7 @@ final class DB {
         if db != nil { return }
         try StoragePaths.withSecurityScope {
         // If vault is enabled but not unlocked, block DB access to avoid leaking metadata
-        let d = UserDefaults.standard
+        let d = UserDefaults(suiteName: StoragePaths.appGroupID) ?? .standard
         let vaultOn = (d.object(forKey: "settings.vaultEnabled") != nil) ? d.bool(forKey: "settings.vaultEnabled") : false
         let unlocked = d.bool(forKey: "vault.isUnlocked")
         // When vault is enabled & unlocked the caller should have already opened via SQLCipherBridge.
@@ -75,6 +87,7 @@ final class DB {
         sqlite3_exec(handle, "PRAGMA cache_size=-2000;", nil, nil, nil)
         try createSchema()
         try migrateIfNeeded()
+        if let u = dbURL { fputs("[DB] opened at \(u.path)\n", stderr) }
         }
     }
 
@@ -109,9 +122,9 @@ final class DB {
         if sqlite3_prepare_v2(handle, "PRAGMA cipher_version;", -1, &verStmt, nil) == SQLITE_OK {
             if sqlite3_step(verStmt) == SQLITE_ROW, let c = sqlite3_column_text(verStmt, 0) {
                 let v = String(cString: c)
-                print("[SQLCipher] Opened with cipher_version=\(v)")
+                fputs("[SQLCipher] Opened with cipher_version=\(v)\n", stderr)
             } else {
-                print("[SQLCipher][WARN] cipher_version unavailable; this likely means the system SQLite (unencrypted) was linked. The database is NOT encrypted.")
+                fputs("[SQLCipher][WARN] cipher_version unavailable; this likely means the system SQLite (unencrypted) was linked. The database is NOT encrypted.\n", stderr)
             }
         }
         sqlite3_finalize(verStmt)
@@ -156,9 +169,9 @@ final class DB {
             defer { sqlite3_finalize(stmt) }
             if sqlite3_prepare_v2(db, "PRAGMA cipher_version;", -1, &stmt, nil) == SQLITE_OK {
                 if sqlite3_step(stmt) == SQLITE_ROW, let c = sqlite3_column_text(stmt, 0) {
-                    print("[SQLCipher] cipher_version=\(String(cString: c))")
+                    fputs("[SQLCipher] cipher_version=\(String(cString: c))\n", stderr)
                 } else {
-                    print("[SQLCipher] cipher_version=(unavailable)")
+                    fputs("[SQLCipher] cipher_version=(unavailable)\n", stderr)
                 }
             }
         }
@@ -180,7 +193,8 @@ final class DB {
             dim INTEGER NOT NULL,
             vec BLOB NOT NULL,
             updated_at_ms INTEGER NOT NULL,
-            provider TEXT NOT NULL DEFAULT 'apple-nl'
+            provider TEXT NOT NULL DEFAULT 'apple-nl',
+            model TEXT NOT NULL DEFAULT ''
         );
         CREATE TABLE IF NOT EXISTS ts_ocr_boxes (
             snapshot_id INTEGER NOT NULL,
@@ -203,6 +217,7 @@ final class DB {
         // Indices for faster joins and scans
         _ = sqlite3_exec(db, "CREATE INDEX IF NOT EXISTS idx_ts_snapshot_started_at_ms ON ts_snapshot(started_at_ms DESC);", nil, nil, nil)
         _ = sqlite3_exec(db, "CREATE INDEX IF NOT EXISTS idx_ts_embedding_dim ON ts_embedding(dim);", nil, nil, nil)
+        _ = sqlite3_exec(db, "CREATE INDEX IF NOT EXISTS idx_ts_embedding_model ON ts_embedding(model);", nil, nil, nil)
     }
 
     // Best-effort on-disk header verification; if the first 16 bytes still show the plain SQLite header
@@ -213,9 +228,9 @@ final class DB {
             defer { try? fh.close() }
             let head = try? fh.read(upToCount: 16) ?? Data()
             if let head = head, let s = String(data: head, encoding: .utf8), s.hasPrefix("SQLite format 3") {
-                print("[SQLCipher][WARN] On-disk header still plaintext. This indicates SQLCipher is not actually applied. Ensure the SQLCipher package is imported (import SQLCipher) and system libsqlite3 is not used.")
+                fputs("[SQLCipher][WARN] On-disk header still plaintext. This indicates SQLCipher is not actually applied. Ensure the SQLCipher package is imported (import SQLCipher) and system libsqlite3 is not used.\n", stderr)
             } else {
-                print("[SQLCipher] On-disk header does not match plaintext magic; looks encrypted.")
+                fputs("[SQLCipher] On-disk header does not match plaintext magic; looks encrypted.\n", stderr)
             }
         }
     }
@@ -280,13 +295,19 @@ final class DB {
             _ = sqlite3_exec(db, fts, nil, nil, nil)
         }
         if !tableExists("ts_embedding") {
-            let sql = "CREATE TABLE ts_embedding (snapshot_id INTEGER PRIMARY KEY, dim INTEGER NOT NULL, vec BLOB NOT NULL, updated_at_ms INTEGER NOT NULL, provider TEXT NOT NULL DEFAULT 'apple-nl');"
+            let sql = "CREATE TABLE ts_embedding (snapshot_id INTEGER PRIMARY KEY, dim INTEGER NOT NULL, vec BLOB NOT NULL, updated_at_ms INTEGER NOT NULL, provider TEXT NOT NULL DEFAULT 'apple-nl', model TEXT NOT NULL DEFAULT '');"
             _ = sqlite3_exec(db, sql, nil, nil, nil)
             _ = sqlite3_exec(db, "CREATE INDEX IF NOT EXISTS idx_ts_embedding_dim ON ts_embedding(dim);", nil, nil, nil)
+            _ = sqlite3_exec(db, "CREATE INDEX IF NOT EXISTS idx_ts_embedding_model ON ts_embedding(model);", nil, nil, nil)
         }
         // Migrate existing ts_embedding to add provider column
         if tableExists("ts_embedding") && !columnExists("ts_embedding", column: "provider") {
             _ = sqlite3_exec(db, "ALTER TABLE ts_embedding ADD COLUMN provider TEXT NOT NULL DEFAULT 'apple-nl';", nil, nil, nil)
+        }
+        // Add model column if missing
+        if tableExists("ts_embedding") && !columnExists("ts_embedding", column: "model") {
+            _ = sqlite3_exec(db, "ALTER TABLE ts_embedding ADD COLUMN model TEXT NOT NULL DEFAULT '';", nil, nil, nil)
+            _ = sqlite3_exec(db, "CREATE INDEX IF NOT EXISTS idx_ts_embedding_model ON ts_embedding(model);", nil, nil, nil)
         }
     }
 
@@ -431,14 +452,17 @@ final class DB {
 
     // MARK: - Embeddings
 
-    func upsertEmbedding(snapshotId: Int64, dim: Int, vec: [Float], provider: String) throws {
+    func upsertEmbedding(snapshotId: Int64, dim: Int, vec: [Float], provider: String, model: String) throws {
         try onQueueSync {
             try openIfNeeded()
-            guard let db = db else { return }
+            guard let db = db else { throw NSError(domain: "TS.DB", code: 190, userInfo: [NSLocalizedDescriptionKey: "db is nil"]) }
             var stmt: OpaquePointer?
             defer { sqlite3_finalize(stmt) }
-            let sql = "INSERT INTO ts_embedding(snapshot_id, dim, vec, updated_at_ms, provider) VALUES(?, ?, ?, ?, ?)\n                       ON CONFLICT(snapshot_id) DO UPDATE SET dim=excluded.dim, vec=excluded.vec, updated_at_ms=excluded.updated_at_ms, provider=excluded.provider;"
-            guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return }
+            let sql = "INSERT INTO ts_embedding(snapshot_id, dim, vec, updated_at_ms, provider, model) VALUES(?, ?, ?, ?, ?, ?)\n                       ON CONFLICT(snapshot_id) DO UPDATE SET dim=excluded.dim, vec=excluded.vec, updated_at_ms=excluded.updated_at_ms, provider=excluded.provider, model=excluded.model;"
+            if sqlite3_prepare_v2(db, sql, -1, &stmt, nil) != SQLITE_OK {
+                let msg = String(cString: sqlite3_errmsg(db))
+                throw NSError(domain: "TS.DB", code: 191, userInfo: [NSLocalizedDescriptionKey: "prepare failed: \(msg)"])
+            }
             sqlite3_bind_int64(stmt, 1, snapshotId)
             sqlite3_bind_int(stmt, 2, Int32(dim))
             // Store as raw Float32 contiguous data
@@ -449,7 +473,12 @@ final class DB {
             let nowMs = Int64(Date().timeIntervalSince1970 * 1000)
             sqlite3_bind_int64(stmt, 4, nowMs)
             sqlite3_bind_text(stmt, 5, provider, -1, SQLITE_TRANSIENT)
-            _ = sqlite3_step(stmt)
+            sqlite3_bind_text(stmt, 6, model, -1, SQLITE_TRANSIENT)
+            let step = sqlite3_step(stmt)
+            if step != SQLITE_DONE {
+                let msg = String(cString: sqlite3_errmsg(db))
+                throw NSError(domain: "TS.DB", code: 192, userInfo: [NSLocalizedDescriptionKey: "step failed: \(step) \(msg)"])
+            }
         }
     }
 
@@ -459,13 +488,78 @@ final class DB {
         let dim: Int
     }
 
+    /// Lightweight counts for embedding availability. Used for debugging AI search filters.
+    func embeddingCandidateCounts(requireDim: Int?, requireProvider: String?, requireModel: String?) throws -> (total: Int, dimOnly: Int, dimProviderModel: Int) {
+        try onQueueSync {
+            try openIfNeeded()
+            guard let db = db else { return (0, 0, 0) }
+
+            func count(_ sql: String, _ binds: ((OpaquePointer?) -> Void)? = nil) -> Int {
+                var stmt: OpaquePointer?
+                defer { sqlite3_finalize(stmt) }
+                guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return 0 }
+                binds?(stmt)
+                if sqlite3_step(stmt) == SQLITE_ROW {
+                    return Int(sqlite3_column_int64(stmt, 0))
+                }
+                return 0
+            }
+
+            let total = count("SELECT COUNT(*) FROM ts_embedding;")
+
+            let dimOnly: Int
+            if let dim = requireDim {
+                dimOnly = count("SELECT COUNT(*) FROM ts_embedding WHERE dim = ?;") { stmt in
+                    sqlite3_bind_int(stmt, 1, Int32(dim))
+                }
+            } else {
+                dimOnly = total
+            }
+
+            let dimProviderModel: Int
+            if let dim = requireDim, let prov = requireProvider, let model = requireModel {
+                dimProviderModel = count("SELECT COUNT(*) FROM ts_embedding WHERE dim = ? AND provider = ? AND model = ?;") { stmt in
+                    sqlite3_bind_int(stmt, 1, Int32(dim))
+                    sqlite3_bind_text(stmt, 2, prov, -1, SQLITE_TRANSIENT)
+                    sqlite3_bind_text(stmt, 3, model, -1, SQLITE_TRANSIENT)
+                }
+            } else {
+                dimProviderModel = dimOnly
+            }
+
+            return (total, dimOnly, dimProviderModel)
+        }
+    }
+
+    /// Returns counts of embeddings grouped by model for the given provider+dim. Used to detect mismatched model strings.
+    func embeddingModelStats(requireDim: Int, requireProvider: String) throws -> [(model: String, count: Int)] {
+        try onQueueSync {
+            try openIfNeeded()
+            guard let db = db else { return [] }
+            let sql = "SELECT model, COUNT(*) FROM ts_embedding WHERE dim = ? AND provider = ? GROUP BY model ORDER BY COUNT(*) DESC;"
+            var stmt: OpaquePointer?
+            defer { sqlite3_finalize(stmt) }
+            guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return [] }
+            sqlite3_bind_int(stmt, 1, Int32(requireDim))
+            sqlite3_bind_text(stmt, 2, requireProvider, -1, SQLITE_TRANSIENT)
+            var out: [(String, Int)] = []
+            while sqlite3_step(stmt) == SQLITE_ROW {
+                let model = sqlite3_column_text(stmt, 0).map { String(cString: $0) } ?? ""
+                let count = Int(sqlite3_column_int64(stmt, 1))
+                out.append((model, count))
+            }
+            return out
+        }
+    }
+
     func embeddingCandidates(appBundleIds: [String]? = nil,
                               startMs: Int64? = nil,
                               endMs: Int64? = nil,
                               limit: Int = 2000,
                               offset: Int = 0,
                               requireDim: Int,
-                              requireProvider: String) throws -> [EmbeddingCandidate] {
+                              requireProvider: String,
+                              requireModel: String) throws -> [EmbeddingCandidate] {
         try onQueueSync {
             try openIfNeeded()
             guard let db = db else { return [] }
@@ -474,7 +568,7 @@ final class DB {
             FROM ts_embedding e
             JOIN ts_snapshot s ON s.id = e.snapshot_id
             LEFT JOIN ts_text t ON t.rowid = s.id
-            WHERE e.dim = ? AND e.provider = ?
+            WHERE e.dim = ? AND e.provider = ? AND e.model = ?
             """
             if let s = startMs { sql += " AND s.started_at_ms >= \(s)" }
             if let e = endMs { sql += " AND s.started_at_ms <= \(e)" }
@@ -489,6 +583,7 @@ final class DB {
             var idx: Int32 = 1
             sqlite3_bind_int(stmt, idx, Int32(requireDim)); idx += 1
             sqlite3_bind_text(stmt, idx, requireProvider, -1, SQLITE_TRANSIENT); idx += 1
+            sqlite3_bind_text(stmt, idx, requireModel, -1, SQLITE_TRANSIENT); idx += 1
             if let ids = appBundleIds, !ids.isEmpty {
                 for bid in ids { sqlite3_bind_text(stmt, idx, bid, -1, SQLITE_TRANSIENT); idx += 1 }
             }
@@ -624,43 +719,17 @@ final class DB {
                      endMs: Int64? = nil,
                      limit: Int = 1000,
                      offset: Int = 0) throws -> [SnapshotMeta] {
-        try onQueueSync {
-            try openIfNeeded()
-            guard let db = db else { return [] }
-            var sql = """
-            SELECT s.id, s.started_at_ms, s.path, s.app_bundle_id, s.app_name, s.thumb_path
-            FROM ts_text t
-            JOIN ts_snapshot s ON s.id = t.rowid
-            WHERE t.content MATCH ?
-            """
-            if let s = startMs { sql += " AND s.started_at_ms >= \(s)" }
-            if let e = endMs { sql += " AND s.started_at_ms <= \(e)" }
-            if let ids = appBundleIds, !ids.isEmpty {
-                let placeholders = Array(repeating: "?", count: ids.count).joined(separator: ",")
-                sql += " AND s.app_bundle_id IN (\(placeholders))"
-            }
-            sql += " ORDER BY s.started_at_ms DESC LIMIT ? OFFSET ?;"
-            var stmt: OpaquePointer?
-            defer { sqlite3_finalize(stmt) }
-            guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return [] }
-            var idx: Int32 = 1
-            sqlite3_bind_text(stmt, idx, ftsQuery, -1, SQLITE_TRANSIENT); idx += 1
-            if let ids = appBundleIds, !ids.isEmpty {
-                for bid in ids { sqlite3_bind_text(stmt, idx, bid, -1, SQLITE_TRANSIENT); idx += 1 }
-            }
-            sqlite3_bind_int(stmt, idx, Int32(limit)); idx += 1
-            sqlite3_bind_int(stmt, idx, Int32(offset))
-            var rows: [SnapshotMeta] = []
-            while sqlite3_step(stmt) == SQLITE_ROW {
-                let id = sqlite3_column_int64(stmt, 0)
-                let ts = sqlite3_column_int64(stmt, 1)
-                let path = String(cString: sqlite3_column_text(stmt, 2))
-                let bid = sqlite3_column_text(stmt, 3).map { String(cString: $0) }
-                let name = sqlite3_column_text(stmt, 4).map { String(cString: $0) }
-                let thumb = sqlite3_column_text(stmt, 5).map { String(cString: $0) }
-                rows.append(SnapshotMeta(id: id, startedAtMs: ts, path: path, appBundleId: bid, appName: name, thumbPath: thumb))
-            }
-            return rows
+        // Delegate to unified implementation using a single MATCH part
+        let rows = try searchUnified(ftsParts: [ftsQuery],
+                                     appBundleIds: appBundleIds,
+                                     startMs: startMs,
+                                     endMs: endMs,
+                                     limit: limit,
+                                     offset: offset,
+                                     includeContent: false)
+        return rows.map { r in
+            SnapshotMeta(id: r.id, startedAtMs: r.startedAtMs, path: r.path,
+                         appBundleId: r.appBundleId, appName: r.appName, thumbPath: r.thumbPath)
         }
     }
 
@@ -671,46 +740,17 @@ final class DB {
                      endMs: Int64? = nil,
                      limit: Int = 1000,
                      offset: Int = 0) throws -> [SnapshotMeta] {
-        try onQueueSync {
-            guard !ftsParts.isEmpty else { return [] }
-            try openIfNeeded()
-            guard let db = db else { return [] }
-            var sql = """
-            SELECT s.id, s.started_at_ms, s.path, s.app_bundle_id, s.app_name, s.thumb_path
-            FROM ts_text t
-            JOIN ts_snapshot s ON s.id = t.rowid
-            WHERE 1=1
-            """
-            // Add one MATCH per part to preserve per-token OR-group semantics
-            for _ in ftsParts { sql += " AND t.content MATCH ?" }
-            if let s = startMs { sql += " AND s.started_at_ms >= \(s)" }
-            if let e = endMs { sql += " AND s.started_at_ms <= \(e)" }
-            if let ids = appBundleIds, !ids.isEmpty {
-                let placeholders = Array(repeating: "?", count: ids.count).joined(separator: ",")
-                sql += " AND s.app_bundle_id IN (\(placeholders))"
-            }
-            sql += " ORDER BY s.started_at_ms DESC LIMIT ? OFFSET ?;"
-            var stmt: OpaquePointer?
-            defer { sqlite3_finalize(stmt) }
-            guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return [] }
-            var idx: Int32 = 1
-            for p in ftsParts { sqlite3_bind_text(stmt, idx, p, -1, SQLITE_TRANSIENT); idx += 1 }
-            if let ids = appBundleIds, !ids.isEmpty {
-                for bid in ids { sqlite3_bind_text(stmt, idx, bid, -1, SQLITE_TRANSIENT); idx += 1 }
-            }
-            sqlite3_bind_int(stmt, idx, Int32(limit)); idx += 1
-            sqlite3_bind_int(stmt, idx, Int32(offset))
-            var rows: [SnapshotMeta] = []
-            while sqlite3_step(stmt) == SQLITE_ROW {
-                let id = sqlite3_column_int64(stmt, 0)
-                let ts = sqlite3_column_int64(stmt, 1)
-                let path = String(cString: sqlite3_column_text(stmt, 2))
-                let bid = sqlite3_column_text(stmt, 3).map { String(cString: $0) }
-                let name = sqlite3_column_text(stmt, 4).map { String(cString: $0) }
-                let thumb = sqlite3_column_text(stmt, 5).map { String(cString: $0) }
-                rows.append(SnapshotMeta(id: id, startedAtMs: ts, path: path, appBundleId: bid, appName: name, thumbPath: thumb))
-            }
-            return rows
+        guard !ftsParts.isEmpty else { return [] }
+        let rows = try searchUnified(ftsParts: ftsParts,
+                                     appBundleIds: appBundleIds,
+                                     startMs: startMs,
+                                     endMs: endMs,
+                                     limit: limit,
+                                     offset: offset,
+                                     includeContent: false)
+        return rows.map { r in
+            SnapshotMeta(id: r.id, startedAtMs: r.startedAtMs, path: r.path,
+                         appBundleId: r.appBundleId, appName: r.appName, thumbPath: r.thumbPath)
         }
     }
 
@@ -730,6 +770,20 @@ final class DB {
                 let name = sqlite3_column_text(stmt, 4).map { String(cString: $0) }
                 let thumb = sqlite3_column_text(stmt, 5).map { String(cString: $0) }
                 return SnapshotMeta(id: id, startedAtMs: ts, path: path, appBundleId: bid, appName: name, thumbPath: thumb)
+            }
+            return nil
+        }
+    }
+
+    func textContent(snapshotId: Int64) throws -> String? {
+        try onQueueSync {
+            try openIfNeeded(); guard let db = db else { return nil }
+            var stmt: OpaquePointer?; defer { sqlite3_finalize(stmt) }
+            let sql = "SELECT content FROM ts_text WHERE rowid=? LIMIT 1;"
+            guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return nil }
+            sqlite3_bind_int64(stmt, 1, snapshotId)
+            if sqlite3_step(stmt) == SQLITE_ROW, let c = sqlite3_column_text(stmt, 0) {
+                return String(cString: c)
             }
             return nil
         }
@@ -776,44 +830,17 @@ final class DB {
                            endMs: Int64? = nil,
                            limit: Int = 50,
                            offset: Int = 0) throws -> [SearchResult] {
-        try onQueueSync {
-            try openIfNeeded()
-            guard let db = db else { return [] }
-            var sql = """
-            SELECT s.id, s.started_at_ms, s.path, s.app_bundle_id, s.app_name, s.thumb_path, t.content
-            FROM ts_text t
-            JOIN ts_snapshot s ON s.id = t.rowid
-            WHERE t.content MATCH ?
-            """
-            if let s = startMs { sql += " AND s.started_at_ms >= \(s)" }
-            if let e = endMs { sql += " AND s.started_at_ms <= \(e)" }
-            if let ids = appBundleIds, !ids.isEmpty {
-                let placeholders = Array(repeating: "?", count: ids.count).joined(separator: ",")
-                sql += " AND s.app_bundle_id IN (\(placeholders))"
-            }
-            sql += " ORDER BY s.started_at_ms DESC LIMIT ? OFFSET ?;"
-            var stmt: OpaquePointer?
-            defer { sqlite3_finalize(stmt) }
-            guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return [] }
-            var idx: Int32 = 1
-            sqlite3_bind_text(stmt, idx, ftsQuery, -1, SQLITE_TRANSIENT); idx += 1
-            if let ids = appBundleIds, !ids.isEmpty {
-                for bid in ids { sqlite3_bind_text(stmt, idx, bid, -1, SQLITE_TRANSIENT); idx += 1 }
-            }
-            sqlite3_bind_int(stmt, idx, Int32(limit)); idx += 1
-            sqlite3_bind_int(stmt, idx, Int32(offset))
-            var rows: [SearchResult] = []
-            while sqlite3_step(stmt) == SQLITE_ROW {
-                let id = sqlite3_column_int64(stmt, 0)
-                let ts = sqlite3_column_int64(stmt, 1)
-                let path = String(cString: sqlite3_column_text(stmt, 2))
-                let bid = sqlite3_column_text(stmt, 3).map { String(cString: $0) }
-                let name = sqlite3_column_text(stmt, 4).map { String(cString: $0) }
-                let thumb = sqlite3_column_text(stmt, 5).map { String(cString: $0) }
-                let content = sqlite3_column_text(stmt, 6).map { String(cString: $0) } ?? ""
-                rows.append(SearchResult(id: id, startedAtMs: ts, path: path, appBundleId: bid, appName: name, thumbPath: thumb, content: content))
-            }
-            return rows
+        let rows = try searchUnified(ftsParts: [ftsQuery],
+                                     appBundleIds: appBundleIds,
+                                     startMs: startMs,
+                                     endMs: endMs,
+                                     limit: limit,
+                                     offset: offset,
+                                     includeContent: true)
+        return rows.map { r in
+            SearchResult(id: r.id, startedAtMs: r.startedAtMs, path: r.path,
+                         appBundleId: r.appBundleId, appName: r.appName, thumbPath: r.thumbPath,
+                         content: r.content ?? "")
         }
     }
 
@@ -824,46 +851,18 @@ final class DB {
                            endMs: Int64? = nil,
                            limit: Int = 50,
                            offset: Int = 0) throws -> [SearchResult] {
-        try onQueueSync {
-            guard !ftsParts.isEmpty else { return [] }
-            try openIfNeeded()
-            guard let db = db else { return [] }
-            var sql = """
-            SELECT s.id, s.started_at_ms, s.path, s.app_bundle_id, s.app_name, s.thumb_path, t.content
-            FROM ts_text t
-            JOIN ts_snapshot s ON s.id = t.rowid
-            WHERE 1=1
-            """
-            for _ in ftsParts { sql += " AND t.content MATCH ?" }
-            if let s = startMs { sql += " AND s.started_at_ms >= \(s)" }
-            if let e = endMs { sql += " AND s.started_at_ms <= \(e)" }
-            if let ids = appBundleIds, !ids.isEmpty {
-                let placeholders = Array(repeating: "?", count: ids.count).joined(separator: ",")
-                sql += " AND s.app_bundle_id IN (\(placeholders))"
-            }
-            sql += " ORDER BY s.started_at_ms DESC LIMIT ? OFFSET ?;"
-            var stmt: OpaquePointer?
-            defer { sqlite3_finalize(stmt) }
-            guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return [] }
-            var idx: Int32 = 1
-            for p in ftsParts { sqlite3_bind_text(stmt, idx, p, -1, SQLITE_TRANSIENT); idx += 1 }
-            if let ids = appBundleIds, !ids.isEmpty {
-                for bid in ids { sqlite3_bind_text(stmt, idx, bid, -1, SQLITE_TRANSIENT); idx += 1 }
-            }
-            sqlite3_bind_int(stmt, idx, Int32(limit)); idx += 1
-            sqlite3_bind_int(stmt, idx, Int32(offset))
-            var rows: [SearchResult] = []
-            while sqlite3_step(stmt) == SQLITE_ROW {
-                let id = sqlite3_column_int64(stmt, 0)
-                let ts = sqlite3_column_int64(stmt, 1)
-                let path = String(cString: sqlite3_column_text(stmt, 2))
-                let bid = sqlite3_column_text(stmt, 3).map { String(cString: $0) }
-                let name = sqlite3_column_text(stmt, 4).map { String(cString: $0) }
-                let thumb = sqlite3_column_text(stmt, 5).map { String(cString: $0) }
-                let content = sqlite3_column_text(stmt, 6).map { String(cString: $0) } ?? ""
-                rows.append(SearchResult(id: id, startedAtMs: ts, path: path, appBundleId: bid, appName: name, thumbPath: thumb, content: content))
-            }
-            return rows
+        guard !ftsParts.isEmpty else { return [] }
+        let rows = try searchUnified(ftsParts: ftsParts,
+                                     appBundleIds: appBundleIds,
+                                     startMs: startMs,
+                                     endMs: endMs,
+                                     limit: limit,
+                                     offset: offset,
+                                     includeContent: true)
+        return rows.map { r in
+            SearchResult(id: r.id, startedAtMs: r.startedAtMs, path: r.path,
+                         appBundleId: r.appBundleId, appName: r.appName, thumbPath: r.thumbPath,
+                         content: r.content ?? "")
         }
     }
 
@@ -873,43 +872,16 @@ final class DB {
                            appBundleIds: [String]? = nil,
                            startMs: Int64? = nil,
                            endMs: Int64? = nil) throws -> [SearchResult] {
-        try onQueueSync {
-            try openIfNeeded()
-            guard let db = db else { return [] }
-            var sql = """
-            SELECT s.id, s.started_at_ms, s.path, s.app_bundle_id, s.app_name, s.thumb_path, t.content
-            FROM ts_snapshot s
-            LEFT JOIN ts_text t ON t.rowid = s.id
-            WHERE 1=1
-            """
-            if let s = startMs { sql += " AND s.started_at_ms >= \(s)" }
-            if let e = endMs { sql += " AND s.started_at_ms <= \(e)" }
-            if let ids = appBundleIds, !ids.isEmpty {
-                let placeholders = Array(repeating: "?", count: ids.count).joined(separator: ",")
-                sql += " AND s.app_bundle_id IN (\(placeholders))"
-            }
-            sql += " ORDER BY s.started_at_ms DESC LIMIT ? OFFSET ?;"
-            var stmt: OpaquePointer?
-            defer { sqlite3_finalize(stmt) }
-            guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return [] }
-            var idx: Int32 = 1
-            if let ids = appBundleIds, !ids.isEmpty {
-                for bid in ids { sqlite3_bind_text(stmt, idx, bid, -1, SQLITE_TRANSIENT); idx += 1 }
-            }
-            sqlite3_bind_int(stmt, idx, Int32(limit)); idx += 1
-            sqlite3_bind_int(stmt, idx, Int32(offset))
-            var rows: [SearchResult] = []
-            while sqlite3_step(stmt) == SQLITE_ROW {
-                let id = sqlite3_column_int64(stmt, 0)
-                let ts = sqlite3_column_int64(stmt, 1)
-                let path = String(cString: sqlite3_column_text(stmt, 2))
-                let bid = sqlite3_column_text(stmt, 3).map { String(cString: $0) }
-                let name = sqlite3_column_text(stmt, 4).map { String(cString: $0) }
-                let thumb = sqlite3_column_text(stmt, 5).map { String(cString: $0) }
-                let content = sqlite3_column_text(stmt, 6).map { String(cString: $0) } ?? ""
-                rows.append(SearchResult(id: id, startedAtMs: ts, path: path, appBundleId: bid, appName: name, thumbPath: thumb, content: content))
-            }
-            return rows
+        let rows = try latestUnified(limit: limit,
+                                     offset: offset,
+                                     appBundleIds: appBundleIds,
+                                     startMs: startMs,
+                                     endMs: endMs,
+                                     includeContent: true)
+        return rows.map { r in
+            SearchResult(id: r.id, startedAtMs: r.startedAtMs, path: r.path,
+                         appBundleId: r.appBundleId, appName: r.appName, thumbPath: r.thumbPath,
+                         content: r.content ?? "")
         }
     }
 
@@ -1373,6 +1345,123 @@ final class DB {
         }
     }
 
+    /// Update all snapshot path/thumb_path values that live under `oldRoot` to point to `newRoot`.
+    /// This is used after transferring files to a different storage root so DB rows continue
+    /// to reference the actual on-disk locations.
+    func updateSnapshotPathsAfterRootMove(oldRoot: String, newRoot: String) {
+        _ = try? onQueueSync {
+            try openIfNeeded()
+            guard let db = db else { return }
+
+            // Normalize roots to exact prefixes so REPLACE works correctly
+            let oldPrefix = oldRoot.hasSuffix("/") ? oldRoot : (oldRoot + "/")
+            let newPrefix = newRoot.hasSuffix("/") ? newRoot : (newRoot + "/")
+
+            // Update path and thumb_path using a helper to avoid duplication
+            let changed1 = Self.replacePrefixInColumn(db: db, column: "path", oldPrefix: oldPrefix, newPrefix: newPrefix)
+            _ = Self.replacePrefixInColumn(db: db, column: "thumb_path", oldPrefix: oldPrefix, newPrefix: newPrefix)
+            fputs("[DB] updateSnapshotPathsAfterRootMove changed path/thumb entries: \(changed1)\n", stderr)
+        }
+    }
+
+    /// Helper: run REPLACE on a specific column where the column value begins with oldPrefix.
+    /// Returns number of rows changed by the UPDATE.
+    private static func replacePrefixInColumn(db: OpaquePointer, column: String, oldPrefix: String, newPrefix: String) -> Int {
+        var stmt: OpaquePointer?
+        defer { sqlite3_finalize(stmt) }
+        let sql = "UPDATE ts_snapshot SET \(column) = REPLACE(\(column), ?, ?) WHERE \(column) LIKE ?;"
+        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return 0 }
+        sqlite3_bind_text(stmt, 1, oldPrefix, -1, SQLITE_TRANSIENT)
+        sqlite3_bind_text(stmt, 2, newPrefix, -1, SQLITE_TRANSIENT)
+        let likePat = (oldPrefix + "%")
+        sqlite3_bind_text(stmt, 3, likePat, -1, SQLITE_TRANSIENT)
+        _ = sqlite3_step(stmt)
+        sqlite3_reset(stmt)
+        return Int(sqlite3_changes(db))
+    }
+
+    /// Scan all snapshots and rewrite any `path`/`thumb_path` entries that are not
+    /// under the current `StoragePaths.snapshotsDir()` root to use the current root.
+    /// Returns the number of rows updated (path + thumb updates counted separately).
+    func updateSnapshotPathsToCurrentRoot() -> Int {
+        return (try? onQueueSync { () -> Int in
+            try openIfNeeded()
+            guard let db = db else { return 0 }
+
+            let snapshotsDirPath = StoragePaths.snapshotsDir().path
+
+            // Select id, path, thumb_path
+            var selStmt: OpaquePointer?
+            defer { sqlite3_finalize(selStmt) }
+            if sqlite3_prepare_v2(db, "SELECT id, path, thumb_path FROM ts_snapshot;", -1, &selStmt, nil) != SQLITE_OK { return 0 }
+
+            // Prepare update statements by id
+            var updPathStmt: OpaquePointer?
+            var updThumbStmt: OpaquePointer?
+            defer { sqlite3_finalize(updPathStmt); sqlite3_finalize(updThumbStmt) }
+            let updPathSQL = "UPDATE ts_snapshot SET path=? WHERE id=?;"
+            let updThumbSQL = "UPDATE ts_snapshot SET thumb_path=? WHERE id=?;"
+            _ = sqlite3_prepare_v2(db, updPathSQL, -1, &updPathStmt, nil)
+            _ = sqlite3_prepare_v2(db, updThumbSQL, -1, &updThumbStmt, nil)
+
+            var changed = 0
+
+            while sqlite3_step(selStmt) == SQLITE_ROW {
+                let id = sqlite3_column_int64(selStmt, 0)
+                guard let cpath = sqlite3_column_text(selStmt, 1) else { continue }
+                let path = String(cString: cpath)
+                var thumb: String? = nil
+                if let cthumb = sqlite3_column_text(selStmt, 2) { thumb = String(cString: cthumb) }
+
+                // If path not already under current snapshots dir, try to rewrite it.
+                if !path.hasPrefix(snapshotsDirPath) {
+                    var newPath: String? = nil
+                    if let r = path.range(of: "/Snapshots/") {
+                        let suffix = String(path[r.upperBound...])
+                        newPath = (snapshotsDirPath as NSString).appendingPathComponent(suffix)
+                    } else if let r = path.range(of: "Snapshots/") {
+                        let suffix = String(path[r.upperBound...])
+                        newPath = (snapshotsDirPath as NSString).appendingPathComponent(suffix)
+                    } else {
+                        // Fallback: move by filename into snapshots root
+                        let filename = URL(fileURLWithPath: path).lastPathComponent
+                        newPath = (snapshotsDirPath as NSString).appendingPathComponent(filename)
+                    }
+                    if let np = newPath {
+                        if sqlite3_bind_text(updPathStmt, 1, np, -1, SQLITE_TRANSIENT) == SQLITE_OK && sqlite3_bind_int64(updPathStmt, 2, id) == SQLITE_OK {
+                            _ = sqlite3_step(updPathStmt)
+                            sqlite3_reset(updPathStmt)
+                            changed += 1
+                        }
+                    }
+                }
+
+                // Thumb handling
+                if let t = thumb, !t.hasPrefix(snapshotsDirPath) {
+                    var newThumb: String? = nil
+                    if let r = t.range(of: "/Snapshots/") {
+                        let suffix = String(t[r.upperBound...])
+                        newThumb = (snapshotsDirPath as NSString).appendingPathComponent(suffix)
+                    } else if let r = t.range(of: "Snapshots/") {
+                        let suffix = String(t[r.upperBound...])
+                        newThumb = (snapshotsDirPath as NSString).appendingPathComponent(suffix)
+                    } else {
+                        let filename = URL(fileURLWithPath: t).lastPathComponent
+                        newThumb = (snapshotsDirPath as NSString).appendingPathComponent(filename)
+                    }
+                    if let nt = newThumb {
+                        if sqlite3_bind_text(updThumbStmt, 1, nt, -1, SQLITE_TRANSIENT) == SQLITE_OK && sqlite3_bind_int64(updThumbStmt, 2, id) == SQLITE_OK {
+                            _ = sqlite3_step(updThumbStmt)
+                            sqlite3_reset(updThumbStmt)
+                            changed += 1
+                        }
+                    }
+                }
+            }
+
+            return changed
+        }) ?? 0 }
+
     func clearFTS() throws {
         try onQueueSync {
         try openIfNeeded()
@@ -1472,6 +1561,132 @@ final class DB {
             _ = sqlite3_exec(db, "DELETE FROM ts_text WHERE rowid=\(id);", nil, nil, nil)
             _ = sqlite3_exec(db, "DELETE FROM ts_ocr_boxes WHERE snapshot_id=\(id);", nil, nil, nil)
             _ = sqlite3_exec(db, "DELETE FROM ts_snapshot WHERE id=\(id);", nil, nil, nil)
+        }
+    }
+}
+
+// MARK: - Unified search helpers (private)
+extension DB {
+    /// Core FTS search used by both `searchMetas` and `searchWithContent` wrappers.
+    private func searchUnified(ftsParts: [String],
+                               appBundleIds: [String]?,
+                               startMs: Int64?,
+                               endMs: Int64?,
+                               limit: Int,
+                               offset: Int,
+                               includeContent: Bool) throws -> [SearchRowUnified] {
+        try onQueueSync {
+            guard !ftsParts.isEmpty else { return [] }
+            try openIfNeeded()
+            guard let db = db else { return [] }
+            var sql = """
+            SELECT s.id, s.started_at_ms, s.path, s.app_bundle_id, s.app_name, s.thumb_path
+            FROM ts_text t
+            JOIN ts_snapshot s ON s.id = t.rowid
+            WHERE 1=1
+            """
+            // Add one MATCH per part to preserve per-token OR-group semantics
+            for _ in ftsParts { sql += " AND t.content MATCH ?" }
+            if let s = startMs { sql += " AND s.started_at_ms >= \(s)" }
+            if let e = endMs { sql += " AND s.started_at_ms <= \(e)" }
+            if let ids = appBundleIds, !ids.isEmpty {
+                let placeholders = Array(repeating: "?", count: ids.count).joined(separator: ",")
+                sql += " AND s.app_bundle_id IN (\(placeholders))"
+            }
+            // Projection: optionally include content as the last column
+            if includeContent {
+                sql = sql.replacingOccurrences(of: "SELECT s.id, s.started_at_ms, s.path, s.app_bundle_id, s.app_name, s.thumb_path",
+                                               with: "SELECT s.id, s.started_at_ms, s.path, s.app_bundle_id, s.app_name, s.thumb_path, t.content")
+            }
+            sql += " ORDER BY s.started_at_ms DESC LIMIT ? OFFSET ?;"
+
+            var stmt: OpaquePointer?
+            defer { sqlite3_finalize(stmt) }
+            guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return [] }
+            var idx: Int32 = 1
+            for p in ftsParts { sqlite3_bind_text(stmt, idx, p, -1, SQLITE_TRANSIENT); idx += 1 }
+            if let ids = appBundleIds, !ids.isEmpty {
+                for bid in ids { sqlite3_bind_text(stmt, idx, bid, -1, SQLITE_TRANSIENT); idx += 1 }
+            }
+            sqlite3_bind_int(stmt, idx, Int32(limit)); idx += 1
+            sqlite3_bind_int(stmt, idx, Int32(offset))
+            var rows: [SearchRowUnified] = []
+            while sqlite3_step(stmt) == SQLITE_ROW {
+                let id = sqlite3_column_int64(stmt, 0)
+                let ts = sqlite3_column_int64(stmt, 1)
+                let path = String(cString: sqlite3_column_text(stmt, 2))
+                let bid = sqlite3_column_text(stmt, 3).map { String(cString: $0) }
+                let name = sqlite3_column_text(stmt, 4).map { String(cString: $0) }
+                let thumb = sqlite3_column_text(stmt, 5).map { String(cString: $0) }
+                let content: String?
+                if includeContent {
+                    content = sqlite3_column_text(stmt, 6).map { String(cString: $0) } ?? ""
+                } else {
+                    content = nil
+                }
+                rows.append(SearchRowUnified(id: id, startedAtMs: ts, path: path,
+                                             appBundleId: bid, appName: name, thumbPath: thumb,
+                                             content: content))
+            }
+            return rows
+        }
+    }
+
+    /// Core latest page helper backing both meta and content variants.
+    private func latestUnified(limit: Int,
+                               offset: Int,
+                               appBundleIds: [String]?,
+                               startMs: Int64?,
+                               endMs: Int64?,
+                               includeContent: Bool) throws -> [SearchRowUnified] {
+        try onQueueSync {
+            try openIfNeeded()
+            guard let db = db else { return [] }
+            var sql = """
+            SELECT s.id, s.started_at_ms, s.path, s.app_bundle_id, s.app_name, s.thumb_path
+            FROM ts_snapshot s
+            LEFT JOIN ts_text t ON t.rowid = s.id
+            WHERE 1=1
+            """
+            if includeContent {
+                sql = sql.replacingOccurrences(of: "SELECT s.id, s.started_at_ms, s.path, s.app_bundle_id, s.app_name, s.thumb_path",
+                                               with: "SELECT s.id, s.started_at_ms, s.path, s.app_bundle_id, s.app_name, s.thumb_path, t.content")
+            }
+            if let s = startMs { sql += " AND s.started_at_ms >= \(s)" }
+            if let e = endMs { sql += " AND s.started_at_ms <= \(e)" }
+            if let ids = appBundleIds, !ids.isEmpty {
+                let placeholders = Array(repeating: "?", count: ids.count).joined(separator: ",")
+                sql += " AND s.app_bundle_id IN (\(placeholders))"
+            }
+            sql += " ORDER BY s.started_at_ms DESC LIMIT ? OFFSET ?;"
+            var stmt: OpaquePointer?
+            defer { sqlite3_finalize(stmt) }
+            guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return [] }
+            var idx: Int32 = 1
+            if let ids = appBundleIds, !ids.isEmpty {
+                for bid in ids { sqlite3_bind_text(stmt, idx, bid, -1, SQLITE_TRANSIENT); idx += 1 }
+            }
+            sqlite3_bind_int(stmt, idx, Int32(limit)); idx += 1
+            sqlite3_bind_int(stmt, idx, Int32(offset))
+            var rows: [SearchRowUnified] = []
+            while sqlite3_step(stmt) == SQLITE_ROW {
+                let id = sqlite3_column_int64(stmt, 0)
+                let ts = sqlite3_column_int64(stmt, 1)
+                let path = String(cString: sqlite3_column_text(stmt, 2))
+                let bid = sqlite3_column_text(stmt, 3).map { String(cString: $0) }
+                let name = sqlite3_column_text(stmt, 4).map { String(cString: $0) }
+                let thumb = sqlite3_column_text(stmt, 5).map { String(cString: $0) }
+                let content: String?
+                if includeContent {
+                    content = sqlite3_column_text(stmt, 6).map { String(cString: $0) } ?? ""
+                } else {
+                    content = nil
+                }
+                rows.append(SearchRowUnified(id: id, startedAtMs: ts, path: path,
+                                             appBundleId: bid, appName: name, thumbPath: thumb,
+                                             content: content))
+            }
+            return rows
         }
     }
 }

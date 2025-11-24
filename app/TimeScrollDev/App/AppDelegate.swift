@@ -30,6 +30,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let bundleId = Bundle.main.bundleIdentifier ?? "(nil)"
         let lib = FileManager.default.urls(for: .libraryDirectory, in: .userDomainMask).first?.path ?? "(unknown)"
         print("[Prefs] Launch bundle=\(bundleId) libraryDir=\(lib)")
+        // Seed App Group defaults so the MCP helper can see storage bookmarks/paths immediately
+        StoragePaths.syncSharedDefaultsFromStandard()
         setupStatusItem()
 
         // Sparkle updater (if available)

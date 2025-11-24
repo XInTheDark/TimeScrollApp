@@ -21,6 +21,20 @@
                ReferencedContainer = "container:TimeScroll.xcodeproj">
             </BuildableReference>
          </BuildActionEntry>
+         <BuildActionEntry
+            buildForTesting = "YES"
+            buildForRunning = "YES"
+            buildForProfiling = "YES"
+            buildForArchiving = "YES"
+            buildForAnalyzing = "YES">
+            <BuildableReference
+               BuildableIdentifier = "primary"
+               BlueprintIdentifier = "C44CC30A2EAA2D6200387344"
+               BuildableName = "CoreSearch.framework"
+               BlueprintName = "CoreSearch"
+               ReferencedContainer = "container:TimeScroll.xcodeproj">
+            </BuildableReference>
+         </BuildActionEntry>
       </BuildActionEntries>
    </BuildAction>
    <TestAction
@@ -49,6 +63,17 @@
                BlueprintIdentifier = "C4681DCA2E7C2718004C20D3"
                BuildableName = "TimeScrollUITests.xctest"
                BlueprintName = "TimeScrollUITests"
+               ReferencedContainer = "container:TimeScroll.xcodeproj">
+            </BuildableReference>
+         </TestableReference>
+         <TestableReference
+            skipped = "NO"
+            parallelizable = "YES">
+            <BuildableReference
+               BuildableIdentifier = "primary"
+               BlueprintIdentifier = "C44CC3142EAA2D6200387344"
+               BuildableName = "CoreSearchTests.xctest"
+               BlueprintName = "CoreSearchTests"
                ReferencedContainer = "container:TimeScroll.xcodeproj">
             </BuildableReference>
          </TestableReference>

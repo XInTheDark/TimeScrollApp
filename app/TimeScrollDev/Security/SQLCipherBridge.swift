@@ -11,13 +11,10 @@ final class SQLCipherBridge {
 
     func openWithUnwrappedKeySilently() {
         // If vault is enabled, do NOT fall back to plaintext open.
-        let d = UserDefaults.standard
+        let d = UserDefaults(suiteName: StoragePaths.appGroupID) ?? .standard
         let vaultOn = (d.object(forKey: "settings.vaultEnabled") != nil) ? d.bool(forKey: "settings.vaultEnabled") : false
         if let key = try? KeyStore.shared.unwrapDbKey() {
-            _ = try? DB.shared.openWithSqlcipher(key: key)
-            // Log runtime cipher version for verification
-            DB.shared.logCipherVersion()
-            verifyHeader()
+            openWithKey(key)
             return
         }
         // No key unwrapped
@@ -27,6 +24,25 @@ final class SQLCipherBridge {
         }
         // Vault disabled: allow normal (plaintext) open
         _ = try? DB.shared.openIfNeeded()
+    }
+    
+    func openWithUnwrappedKeyOrThrow() throws {
+        let d = UserDefaults(suiteName: StoragePaths.appGroupID) ?? .standard
+        let vaultOn = (d.object(forKey: "settings.vaultEnabled") != nil) ? d.bool(forKey: "settings.vaultEnabled") : false
+        
+        if vaultOn {
+            let key = try KeyStore.shared.unwrapDbKey()
+            openWithKey(key)
+        } else {
+            try DB.shared.openIfNeeded()
+        }
+    }
+    
+    func openWithKey(_ key: Data) {
+        _ = try? DB.shared.openWithSqlcipher(key: key)
+        // Log runtime cipher version for verification
+        DB.shared.logCipherVersion()
+        verifyHeader()
     }
 
     func close() { DB.shared.close() }
@@ -39,10 +55,10 @@ final class SQLCipherBridge {
         if isLikelyPlaintextSQLite(url: url) {
             do {
                 try migrateFile(at: url, key: key)
-                print("[SQLCipher] Migration complete: db is now encrypted")
+                    fputs("[SQLCipher] Migration complete: db is now encrypted\n", stderr)
                 verifyHeader()
             } catch {
-                print("[SQLCipher] Migration failed: \(error)")
+                    fputs("[SQLCipher] Migration failed: \(error)\n", stderr)
             }
         } else {
             // Already encrypted (or not a plain SQLite header); nothing to do
@@ -57,9 +73,9 @@ final class SQLCipherBridge {
         if isLikelyPlaintextSQLite(url: url) { return }
         do {
             try migrateEncryptedFileToPlaintext(at: url, key: key)
-            print("[SQLCipher] Reverse migration complete: db is now plaintext")
+              fputs("[SQLCipher] Reverse migration complete: db is now plaintext\n", stderr)
         } catch {
-            print("[SQLCipher] Reverse migration failed: \(error)")
+              fputs("[SQLCipher] Reverse migration failed: \(error)\n", stderr)
         }
     }
 
@@ -192,8 +208,9 @@ final class SQLCipherBridge {
             let head = try? fh.read(upToCount: 16) ?? Data()
             if let head = head, let s = String(data: head, encoding: .utf8), s.hasPrefix("SQLite format 3") {
                 print("[SQLCipher][WARN] Database header still plaintext magic. This implies SQLCipher isn't active (likely linking system libsqlite3). Ensure 'import SQLCipher' is used and the SQLCipher package product is linked.")
+                    fputs("[SQLCipher][WARN] Database header still plaintext magic. This implies SQLCipher isn't active (likely linking system libsqlite3). Ensure 'import SQLCipher' is used and the SQLCipher package product is linked.\n", stderr)
             } else {
-                print("[SQLCipher] Header check passed (no plaintext magic).")
+                    fputs("[SQLCipher] Header check passed (no plaintext magic).\n", stderr)
             }
         }
     }

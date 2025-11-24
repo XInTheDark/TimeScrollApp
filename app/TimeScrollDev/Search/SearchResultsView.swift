@@ -80,7 +80,8 @@ struct SearchResultsView: View {
                                 .foregroundColor(.secondary)
                                 .padding()
                         }
-                        ForEach(Array(rows.enumerated()), id: \.0) { (idx, row) in
+                        // Use stable row identity so SwiftUI doesn't reuse previous-page state
+                        ForEach(Array(rows.enumerated()), id: \.1.id) { (idx, row) in
                             Button(action: {
                                 let absIndex = page * pageSize + idx
                                 onOpen(row, absIndex)
@@ -103,7 +104,8 @@ struct SearchResultsView: View {
                                 .foregroundColor(.secondary)
                                 .padding()
                         }
-                        ForEach(Array(rows.enumerated()), id: \.0) { (idx, row) in
+                        // Use stable row identity so SwiftUI doesn't reuse previous-page state
+                        ForEach(Array(rows.enumerated()), id: \.1.id) { (idx, row) in
                             Button(action: {
                                 let absIndex = page * pageSize + idx
                                 onOpen(row, absIndex)

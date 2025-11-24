@@ -66,14 +66,25 @@ final class Indexer {
             let aiOn = (d.object(forKey: "settings.aiEmbeddingsEnabled") != nil) ? d.bool(forKey: "settings.aiEmbeddingsEnabled") : false
             if aiOn {
                 let svc = EmbeddingService.shared
+                svc.reloadFromSettings()
+                let provider = svc.providerID
+                let model = svc.modelID
                 let (vec, known, total) = svc.embedWithStats(result.text)
-                if !vec.isEmpty && svc.dim == vec.count {
-                    try? DB.shared.upsertEmbedding(snapshotId: snapshotId, dim: svc.dim, vec: vec, provider: svc.providerID)
-                    // Debug log snapshot embedding
-                    if UserDefaults.standard.bool(forKey: "settings.debugMode") {
-                        let head = vec.prefix(8).map { String(format: "%.4f", $0) }.joined(separator: ", ")
-                        print("[AI][Store] snapshotId=\(snapshotId) provider=\(svc.providerID) dim=\(vec.count) tokens=\(known)/\(total) head=[\(head)]")
+                let dim = vec.count
+                if !vec.isEmpty {
+                    do {
+                        try DB.shared.upsertEmbedding(snapshotId: snapshotId, dim: dim, vec: vec, provider: provider, model: model)
+                        if UserDefaults.standard.bool(forKey: "settings.debugMode") {
+                            let head = vec.prefix(8).map { String(format: "%.4f", $0) }.joined(separator: ", ")
+                            print("[AI][Store] snapshotId=\(snapshotId) provider=\(provider) model=\(model) dim=\(vec.count) tokens=\(known)/\(total) head=[\(head)]")
+                        }
+                    } catch {
+                        if UserDefaults.standard.bool(forKey: "settings.debugMode") {
+                            print("[AI][Store][Error] snapshotId=\(snapshotId) provider=\(provider) model=\(model) dim=\(vec.count) err=\(error.localizedDescription)")
+                        }
                     }
+                } else if UserDefaults.standard.bool(forKey: "settings.debugMode") {
+                    print("[AI][Store][Skip] snapshotId=\(snapshotId) provider=\(provider) model=\(model) dim=\(dim) vecCount=\(vec.count) known=\(known)/\(total)")
                 }
             }
         } catch {

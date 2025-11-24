@@ -7,12 +7,34 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		C43960542ED30B9600B5EC03 /* SQLCipher in Frameworks */ = {isa = PBXBuildFile; productRef = C43960532ED30B9600B5EC03 /* SQLCipher */; };
+		C44CC3162EAA2D6200387344 /* CoreSearch.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = C44CC30B2EAA2D6200387344 /* CoreSearch.framework */; };
+		C44CC3202EAA2D6200387344 /* CoreSearch.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = C44CC30B2EAA2D6200387344 /* CoreSearch.framework */; };
+		C44CC3212EAA2D6200387344 /* CoreSearch.framework in Embed Frameworks */ = {isa = PBXBuildFile; fileRef = C44CC30B2EAA2D6200387344 /* CoreSearch.framework */; settings = {ATTRIBUTES = (CodeSignOnCopy, RemoveHeadersOnCopy, ); }; };
+		C44CC3482EAA331000387344 /* SQLCipher in Frameworks */ = {isa = PBXBuildFile; productRef = C44CC3472EAA331000387344 /* SQLCipher */; };
 		C45777802E93EFE9007E2F3D /* Collections in Frameworks */ = {isa = PBXBuildFile; productRef = C457777F2E93EFE9007E2F3D /* Collections */; };
 		C4B151FF2E8FDB30003BBD66 /* SQLCipher in Frameworks */ = {isa = PBXBuildFile; productRef = C4B151FE2E8FDB30003BBD66 /* SQLCipher */; };
+		C4C56C552EAB6B910073342F /* CoreSearch.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = C44CC30B2EAA2D6200387344 /* CoreSearch.framework */; };
+		C4C56C562EAB6B910073342F /* CoreSearch.framework in Embed Frameworks */ = {isa = PBXBuildFile; fileRef = C44CC30B2EAA2D6200387344 /* CoreSearch.framework */; settings = {ATTRIBUTES = (CodeSignOnCopy, RemoveHeadersOnCopy, ); }; };
+		C4C56C642EAB6D4C0073342F /* timescroll-mcp.app in CopyFiles */ = {isa = PBXBuildFile; fileRef = C4C56C2D2EAB6AE50073342F /* timescroll-mcp.app */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 		C4F1215A2E7EEDDC00AB38FC /* Sparkle in Frameworks */ = {isa = PBXBuildFile; productRef = C4F121592E7EEDDC00AB38FC /* Sparkle */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
+		C44CC3172EAA2D6200387344 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = C4681DAB2E7C2717004C20D3 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = C44CC30A2EAA2D6200387344;
+			remoteInfo = CoreSearch;
+		};
+		C44CC3192EAA2D6200387344 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = C4681DAB2E7C2717004C20D3 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = C4681DB22E7C2717004C20D3;
+			remoteInfo = TimeScroll;
+		};
 		C4681DC22E7C2718004C20D3 /* PBXContainerItemProxy */ = {
 			isa = PBXContainerItemProxy;
 			containerPortal = C4681DAB2E7C2717004C20D3 /* Project object */;
@@ -27,29 +49,138 @@
 			remoteGlobalIDString = C4681DB22E7C2717004C20D3;
 			remoteInfo = TimeScroll;
 		};
+		C4C56C572EAB6B910073342F /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = C4681DAB2E7C2717004C20D3 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = C44CC30A2EAA2D6200387344;
+			remoteInfo = CoreSearch;
+		};
+		C4C56C652EAB6E540073342F /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = C4681DAB2E7C2717004C20D3 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = C4C56C2C2EAB6AE50073342F;
+			remoteInfo = "timescroll-mcp";
+		};
 /* End PBXContainerItemProxy section */
 
+/* Begin PBXCopyFilesBuildPhase section */
+		C44CC3252EAA2D6200387344 /* Embed Frameworks */ = {
+			isa = PBXCopyFilesBuildPhase;
+			buildActionMask = 2147483647;
+			dstPath = "";
+			dstSubfolderSpec = 10;
+			files = (
+				C44CC3212EAA2D6200387344 /* CoreSearch.framework in Embed Frameworks */,
+			);
+			name = "Embed Frameworks";
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		C44CC3422EAA2E9300387344 /* CopyFiles */ = {
+			isa = PBXCopyFilesBuildPhase;
+			buildActionMask = 2147483647;
+			dstPath = Contents/Helpers;
+			dstSubfolderSpec = 1;
+			files = (
+				C4C56C642EAB6D4C0073342F /* timescroll-mcp.app in CopyFiles */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		C4C56C592EAB6B910073342F /* Embed Frameworks */ = {
+			isa = PBXCopyFilesBuildPhase;
+			buildActionMask = 2147483647;
+			dstPath = "";
+			dstSubfolderSpec = 10;
+			files = (
+				C4C56C562EAB6B910073342F /* CoreSearch.framework in Embed Frameworks */,
+			);
+			name = "Embed Frameworks";
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXCopyFilesBuildPhase section */
+
 /* Begin PBXFileReference section */
+		C44CC30B2EAA2D6200387344 /* CoreSearch.framework */ = {isa = PBXFileReference; explicitFileType = wrapper.framework; includeInIndex = 0; path = CoreSearch.framework; sourceTree = BUILT_PRODUCTS_DIR; };
+		C44CC3152EAA2D6200387344 /* CoreSearchTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = CoreSearchTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		C4681DB32E7C2717004C20D3 /* TimeScroll.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = TimeScroll.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		C4681DC12E7C2718004C20D3 /* TimeScrollTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = TimeScrollTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		C4681DCB2E7C2718004C20D3 /* TimeScrollUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = TimeScrollUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		C4C56C2D2EAB6AE50073342F /* timescroll-mcp.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "timescroll-mcp.app"; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
+		C44CC32B2EAA2DE100387344 /* Exceptions for "TimeScrollDev" folder in "CoreSearch" target */ = {
+			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
+			membershipExceptions = (
+				AI/EmbeddingService.swift,
+				CoreSearch/PreferencesService.swift,
+				CoreSearch/SearchFacade.swift,
+				OCR/OCRService.swift,
+				Search/OCRConfusion.swift,
+				Search/SearchQueryParser.swift,
+				Search/SearchService.swift,
+				Security/FileCrypter.swift,
+				Security/KeyStore.swift,
+				Security/SQLCipherBridge.swift,
+				Settings/SettingsStore.swift,
+				Storage/DB.swift,
+				Storage/HEVCFrameExtractor.swift,
+				Storage/ImageEncoder.swift,
+				Storage/StoragePaths.swift,
+				Timeline/ThumbnailCache.swift,
+			);
+			target = C44CC30A2EAA2D6200387344 /* CoreSearch */;
+		};
+		C4C56C5F2EAB6BB70073342F /* Exceptions for "TimeScrollDev" folder in "timescroll-mcp" target */ = {
+			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
+			membershipExceptions = (
+				MCP/AnyCodable.swift,
+				MCP/JSONRPC.swift,
+				MCP/MCPMain.swift,
+				MCP/MCPServer.swift,
+				MCP/Schemas.swift,
+			);
+			target = C4C56C2C2EAB6AE50073342F /* timescroll-mcp */;
+		};
+		C4C56C632EAB6CE10073342F /* Exceptions for "timescroll-mcp" folder in "timescroll-mcp" target */ = {
+			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
+			membershipExceptions = (
+				Info.plist,
+			);
+			target = C4C56C2C2EAB6AE50073342F /* timescroll-mcp */;
+		};
 		C4F1215E2E7EF53000AB38FC /* Exceptions for "TimeScrollDev" folder in "TimeScroll" target */ = {
 			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
 			membershipExceptions = (
 				Info.plist,
+				MCP/AnyCodable.swift,
+				MCP/JSONRPC.swift,
+				MCP/MCPMain.swift,
+				MCP/MCPServer.swift,
+				MCP/Schemas.swift,
 			);
 			target = C4681DB22E7C2717004C20D3 /* TimeScroll */;
 		};
 /* End PBXFileSystemSynchronizedBuildFileExceptionSet section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
+		C44CC30C2EAA2D6200387344 /* CoreSearch */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = CoreSearch;
+			sourceTree = "<group>";
+		};
+		C44CC31B2EAA2D6200387344 /* CoreSearchTests */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = CoreSearchTests;
+			sourceTree = "<group>";
+		};
 		C4681DB52E7C2717004C20D3 /* TimeScrollDev */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
 			exceptions = (
 				C4F1215E2E7EF53000AB38FC /* Exceptions for "TimeScrollDev" folder in "TimeScroll" target */,
+				C44CC32B2EAA2DE100387344 /* Exceptions for "TimeScrollDev" folder in "CoreSearch" target */,
+				C4C56C5F2EAB6BB70073342F /* Exceptions for "TimeScrollDev" folder in "timescroll-mcp" target */,
 			);
 			path = TimeScrollDev;
 			sourceTree = "<group>";
@@ -64,9 +195,43 @@
 			path = TimeScrollDevUITests;
 			sourceTree = "<group>";
 		};
+		C4C56C2E2EAB6AE50073342F /* timescroll-mcp */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			exceptions = (
+				C4C56C632EAB6CE10073342F /* Exceptions for "timescroll-mcp" folder in "timescroll-mcp" target */,
+			);
+			path = "timescroll-mcp";
+			sourceTree = "<group>";
+		};
+		C4C56C3D2EAB6AE70073342F /* timescroll-mcp-agentTests */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = "timescroll-mcp-agentTests";
+			sourceTree = "<group>";
+		};
+		C4C56C472EAB6AE70073342F /* timescroll-mcp-agentUITests */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = "timescroll-mcp-agentUITests";
+			sourceTree = "<group>";
+		};
 /* End PBXFileSystemSynchronizedRootGroup section */
 
 /* Begin PBXFrameworksBuildPhase section */
+		C44CC3082EAA2D6200387344 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				C44CC3482EAA331000387344 /* SQLCipher in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		C44CC3122EAA2D6200387344 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				C44CC3162EAA2D6200387344 /* CoreSearch.framework in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 		C4681DB02E7C2717004C20D3 /* Frameworks */ = {
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
@@ -74,6 +239,7 @@
 				C45777802E93EFE9007E2F3D /* Collections in Frameworks */,
 				C4B151FF2E8FDB30003BBD66 /* SQLCipher in Frameworks */,
 				C4F1215A2E7EEDDC00AB38FC /* Sparkle in Frameworks */,
+				C44CC3202EAA2D6200387344 /* CoreSearch.framework in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -88,6 +254,15 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		C4C56C2A2EAB6AE50073342F /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				C43960542ED30B9600B5EC03 /* SQLCipher in Frameworks */,
+				C4C56C552EAB6B910073342F /* CoreSearch.framework in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -107,6 +282,11 @@
 				C4681DB52E7C2717004C20D3 /* TimeScrollDev */,
 				C4681DC42E7C2718004C20D3 /* TimeScrollDevTests */,
 				C4681DCE2E7C2718004C20D3 /* TimeScrollDevUITests */,
+				C44CC30C2EAA2D6200387344 /* CoreSearch */,
+				C44CC31B2EAA2D6200387344 /* CoreSearchTests */,
+				C4C56C2E2EAB6AE50073342F /* timescroll-mcp */,
+				C4C56C3D2EAB6AE70073342F /* timescroll-mcp-agentTests */,
+				C4C56C472EAB6AE70073342F /* timescroll-mcp-agentUITests */,
 				C457777D2E93EFCE007E2F3D /* Frameworks */,
 				C4681DB42E7C2717004C20D3 /* Products */,
 			);
@@ -118,13 +298,74 @@
 				C4681DB32E7C2717004C20D3 /* TimeScroll.app */,
 				C4681DC12E7C2718004C20D3 /* TimeScrollTests.xctest */,
 				C4681DCB2E7C2718004C20D3 /* TimeScrollUITests.xctest */,
+				C44CC30B2EAA2D6200387344 /* CoreSearch.framework */,
+				C44CC3152EAA2D6200387344 /* CoreSearchTests.xctest */,
+				C4C56C2D2EAB6AE50073342F /* timescroll-mcp.app */,
 			);
 			name = Products;
 			sourceTree = "<group>";
 		};
 /* End PBXGroup section */
 
+/* Begin PBXHeadersBuildPhase section */
+		C44CC3062EAA2D6200387344 /* Headers */ = {
+			isa = PBXHeadersBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXHeadersBuildPhase section */
+
 /* Begin PBXNativeTarget section */
+		C44CC30A2EAA2D6200387344 /* CoreSearch */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = C44CC3222EAA2D6200387344 /* Build configuration list for PBXNativeTarget "CoreSearch" */;
+			buildPhases = (
+				C44CC3062EAA2D6200387344 /* Headers */,
+				C44CC3072EAA2D6200387344 /* Sources */,
+				C44CC3082EAA2D6200387344 /* Frameworks */,
+				C44CC3092EAA2D6200387344 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			fileSystemSynchronizedGroups = (
+				C44CC30C2EAA2D6200387344 /* CoreSearch */,
+			);
+			name = CoreSearch;
+			packageProductDependencies = (
+				C44CC3472EAA331000387344 /* SQLCipher */,
+			);
+			productName = CoreSearch;
+			productReference = C44CC30B2EAA2D6200387344 /* CoreSearch.framework */;
+			productType = "com.apple.product-type.framework";
+		};
+		C44CC3142EAA2D6200387344 /* CoreSearchTests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = C44CC3262EAA2D6200387344 /* Build configuration list for PBXNativeTarget "CoreSearchTests" */;
+			buildPhases = (
+				C44CC3112EAA2D6200387344 /* Sources */,
+				C44CC3122EAA2D6200387344 /* Frameworks */,
+				C44CC3132EAA2D6200387344 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				C44CC3182EAA2D6200387344 /* PBXTargetDependency */,
+				C44CC31A2EAA2D6200387344 /* PBXTargetDependency */,
+			);
+			fileSystemSynchronizedGroups = (
+				C44CC31B2EAA2D6200387344 /* CoreSearchTests */,
+			);
+			name = CoreSearchTests;
+			packageProductDependencies = (
+			);
+			productName = CoreSearchTests;
+			productReference = C44CC3152EAA2D6200387344 /* CoreSearchTests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
+		};
 		C4681DB22E7C2717004C20D3 /* TimeScroll */ = {
 			isa = PBXNativeTarget;
 			buildConfigurationList = C4681DD52E7C2718004C20D3 /* Build configuration list for PBXNativeTarget "TimeScroll" */;
@@ -132,10 +373,13 @@
 				C4681DAF2E7C2717004C20D3 /* Sources */,
 				C4681DB02E7C2717004C20D3 /* Frameworks */,
 				C4681DB12E7C2717004C20D3 /* Resources */,
+				C44CC3252EAA2D6200387344 /* Embed Frameworks */,
+				C44CC3422EAA2E9300387344 /* CopyFiles */,
 			);
 			buildRules = (
 			);
 			dependencies = (
+				C4C56C662EAB6E540073342F /* PBXTargetDependency */,
 			);
 			fileSystemSynchronizedGroups = (
 				C4681DB52E7C2717004C20D3 /* TimeScrollDev */,
@@ -196,6 +440,31 @@
 			productReference = C4681DCB2E7C2718004C20D3 /* TimeScrollUITests.xctest */;
 			productType = "com.apple.product-type.bundle.ui-testing";
 		};
+		C4C56C2C2EAB6AE50073342F /* timescroll-mcp */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = C4C56C4C2EAB6AE70073342F /* Build configuration list for PBXNativeTarget "timescroll-mcp" */;
+			buildPhases = (
+				C4C56C292EAB6AE50073342F /* Sources */,
+				C4C56C2A2EAB6AE50073342F /* Frameworks */,
+				C4C56C2B2EAB6AE50073342F /* Resources */,
+				C4C56C592EAB6B910073342F /* Embed Frameworks */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				C4C56C582EAB6B910073342F /* PBXTargetDependency */,
+			);
+			fileSystemSynchronizedGroups = (
+				C4C56C2E2EAB6AE50073342F /* timescroll-mcp */,
+			);
+			name = "timescroll-mcp";
+			packageProductDependencies = (
+				C43960532ED30B9600B5EC03 /* SQLCipher */,
+			);
+			productName = "timescroll-mcp-agent";
+			productReference = C4C56C2D2EAB6AE50073342F /* timescroll-mcp.app */;
+			productType = "com.apple.product-type.application";
+		};
 /* End PBXNativeTarget section */
 
 /* Begin PBXProject section */
@@ -206,6 +475,13 @@
 				LastSwiftUpdateCheck = 1640;
 				LastUpgradeCheck = 1640;
 				TargetAttributes = {
+					C44CC30A2EAA2D6200387344 = {
+						CreatedOnToolsVersion = 16.4;
+					};
+					C44CC3142EAA2D6200387344 = {
+						CreatedOnToolsVersion = 16.4;
+						TestTargetID = C4681DB22E7C2717004C20D3;
+					};
 					C4681DB22E7C2717004C20D3 = {
 						CreatedOnToolsVersion = 16.4;
 					};
@@ -216,6 +492,9 @@
 					C4681DCA2E7C2718004C20D3 = {
 						CreatedOnToolsVersion = 16.4;
 						TestTargetID = C4681DB22E7C2717004C20D3;
+					};
+					C4C56C2C2EAB6AE50073342F = {
+						CreatedOnToolsVersion = 16.4;
 					};
 				};
 			};
@@ -239,13 +518,30 @@
 			projectRoot = "";
 			targets = (
 				C4681DB22E7C2717004C20D3 /* TimeScroll */,
+				C44CC30A2EAA2D6200387344 /* CoreSearch */,
 				C4681DC02E7C2718004C20D3 /* TimeScrollTests */,
 				C4681DCA2E7C2718004C20D3 /* TimeScrollUITests */,
+				C44CC3142EAA2D6200387344 /* CoreSearchTests */,
+				C4C56C2C2EAB6AE50073342F /* timescroll-mcp */,
 			);
 		};
 /* End PBXProject section */
 
 /* Begin PBXResourcesBuildPhase section */
+		C44CC3092EAA2D6200387344 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		C44CC3132EAA2D6200387344 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 		C4681DB12E7C2717004C20D3 /* Resources */ = {
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
@@ -267,9 +563,30 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		C4C56C2B2EAB6AE50073342F /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXResourcesBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
+		C44CC3072EAA2D6200387344 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		C44CC3112EAA2D6200387344 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 		C4681DAF2E7C2717004C20D3 /* Sources */ = {
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
@@ -291,9 +608,26 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		C4C56C292EAB6AE50073342F /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXSourcesBuildPhase section */
 
 /* Begin PBXTargetDependency section */
+		C44CC3182EAA2D6200387344 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = C44CC30A2EAA2D6200387344 /* CoreSearch */;
+			targetProxy = C44CC3172EAA2D6200387344 /* PBXContainerItemProxy */;
+		};
+		C44CC31A2EAA2D6200387344 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = C4681DB22E7C2717004C20D3 /* TimeScroll */;
+			targetProxy = C44CC3192EAA2D6200387344 /* PBXContainerItemProxy */;
+		};
 		C4681DC32E7C2718004C20D3 /* PBXTargetDependency */ = {
 			isa = PBXTargetDependency;
 			target = C4681DB22E7C2717004C20D3 /* TimeScroll */;
@@ -304,9 +638,125 @@
 			target = C4681DB22E7C2717004C20D3 /* TimeScroll */;
 			targetProxy = C4681DCC2E7C2718004C20D3 /* PBXContainerItemProxy */;
 		};
+		C4C56C582EAB6B910073342F /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = C44CC30A2EAA2D6200387344 /* CoreSearch */;
+			targetProxy = C4C56C572EAB6B910073342F /* PBXContainerItemProxy */;
+		};
+		C4C56C662EAB6E540073342F /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = C4C56C2C2EAB6AE50073342F /* timescroll-mcp */;
+			targetProxy = C4C56C652EAB6E540073342F /* PBXContainerItemProxy */;
+		};
 /* End PBXTargetDependency section */
 
 /* Begin XCBuildConfiguration section */
+		C44CC3232EAA2D6200387344 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUILD_LIBRARY_FOR_DISTRIBUTION = YES;
+				CODE_SIGN_STYLE = Automatic;
+				COMBINE_HIDPI_IMAGES = YES;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = AHMJRF4WSG;
+				DYLIB_COMPATIBILITY_VERSION = 1;
+				DYLIB_CURRENT_VERSION = 1;
+				DYLIB_INSTALL_NAME_BASE = "@rpath";
+				ENABLE_MODULE_VERIFIER = YES;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_NSHumanReadableCopyright = "";
+				INSTALL_PATH = "$(LOCAL_LIBRARY_DIR)/Frameworks";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+					"@loader_path/Frameworks",
+				);
+				MACOSX_DEPLOYMENT_TARGET = 13.0;
+				MARKETING_VERSION = 1.0;
+				MODULE_VERIFIER_SUPPORTED_LANGUAGES = "objective-c objective-c++";
+				MODULE_VERIFIER_SUPPORTED_LANGUAGE_STANDARDS = "gnu17 gnu++20";
+				PRODUCT_BUNDLE_IDENTIFIER = com.muzhen.CoreSearch;
+				PRODUCT_NAME = "$(TARGET_NAME:c99extidentifier)";
+				SKIP_INSTALL = YES;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_INSTALL_MODULE = YES;
+				SWIFT_INSTALL_OBJC_HEADER = NO;
+				SWIFT_VERSION = 5.0;
+				VERSIONING_SYSTEM = "apple-generic";
+				VERSION_INFO_PREFIX = "";
+			};
+			name = Debug;
+		};
+		C44CC3242EAA2D6200387344 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUILD_LIBRARY_FOR_DISTRIBUTION = YES;
+				CODE_SIGN_STYLE = Automatic;
+				COMBINE_HIDPI_IMAGES = YES;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = AHMJRF4WSG;
+				DYLIB_COMPATIBILITY_VERSION = 1;
+				DYLIB_CURRENT_VERSION = 1;
+				DYLIB_INSTALL_NAME_BASE = "@rpath";
+				ENABLE_MODULE_VERIFIER = YES;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_NSHumanReadableCopyright = "";
+				INSTALL_PATH = "$(LOCAL_LIBRARY_DIR)/Frameworks";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+					"@loader_path/Frameworks",
+				);
+				MACOSX_DEPLOYMENT_TARGET = 13.0;
+				MARKETING_VERSION = 1.0;
+				MODULE_VERIFIER_SUPPORTED_LANGUAGES = "objective-c objective-c++";
+				MODULE_VERIFIER_SUPPORTED_LANGUAGE_STANDARDS = "gnu17 gnu++20";
+				PRODUCT_BUNDLE_IDENTIFIER = com.muzhen.CoreSearch;
+				PRODUCT_NAME = "$(TARGET_NAME:c99extidentifier)";
+				SKIP_INSTALL = YES;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_INSTALL_MODULE = YES;
+				SWIFT_INSTALL_OBJC_HEADER = NO;
+				SWIFT_VERSION = 5.0;
+				VERSIONING_SYSTEM = "apple-generic";
+				VERSION_INFO_PREFIX = "";
+			};
+			name = Release;
+		};
+		C44CC3272EAA2D6200387344 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = AHMJRF4WSG;
+				GENERATE_INFOPLIST_FILE = YES;
+				MACOSX_DEPLOYMENT_TARGET = 15.5;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.muzhen.CoreSearchTests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_VERSION = 5.0;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/TimeScroll.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/TimeScroll";
+			};
+			name = Debug;
+		};
+		C44CC3282EAA2D6200387344 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = AHMJRF4WSG;
+				GENERATE_INFOPLIST_FILE = YES;
+				MACOSX_DEPLOYMENT_TARGET = 15.5;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.muzhen.CoreSearchTests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_VERSION = 5.0;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/TimeScroll.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/TimeScroll";
+			};
+			name = Release;
+		};
 		C4681DD32E7C2718004C20D3 /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
@@ -436,7 +886,7 @@
 				CODE_SIGN_ENTITLEMENTS = TimeScrollDev/TimeScroll.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
-				CURRENT_PROJECT_VERSION = 20;
+				CURRENT_PROJECT_VERSION = 21;
 				DEVELOPMENT_ASSET_PATHS = "";
 				DEVELOPMENT_TEAM = AHMJRF4WSG;
 				ENABLE_HARDENED_RUNTIME = YES;
@@ -476,7 +926,7 @@
 				CODE_SIGN_ENTITLEMENTS = TimeScrollDev/TimeScroll.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
-				CURRENT_PROJECT_VERSION = 20;
+				CURRENT_PROJECT_VERSION = 21;
 				DEVELOPMENT_ASSET_PATHS = "";
 				DEVELOPMENT_TEAM = AHMJRF4WSG;
 				ENABLE_HARDENED_RUNTIME = YES;
@@ -575,9 +1025,89 @@
 			};
 			name = Release;
 		};
+		C4C56C4D2EAB6AE70073342F /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_ENTITLEMENTS = "timescroll-mcp/timescroll_mcp.entitlements";
+				CODE_SIGN_STYLE = Automatic;
+				COMBINE_HIDPI_IMAGES = YES;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = AHMJRF4WSG;
+				ENABLE_HARDENED_RUNTIME = YES;
+				ENABLE_PREVIEWS = YES;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = "timescroll-mcp/Info.plist";
+				INFOPLIST_KEY_LSUIElement = YES;
+				INFOPLIST_KEY_NSHumanReadableCopyright = "";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				MACOSX_DEPLOYMENT_TARGET = 15.5;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.muzhen.TimeScroll.mcp;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				REGISTER_APP_GROUPS = YES;
+				SKIP_INSTALL = YES;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_VERSION = 5.0;
+			};
+			name = Debug;
+		};
+		C4C56C4E2EAB6AE70073342F /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_ENTITLEMENTS = "timescroll-mcp/timescroll_mcp.entitlements";
+				CODE_SIGN_STYLE = Automatic;
+				COMBINE_HIDPI_IMAGES = YES;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = AHMJRF4WSG;
+				ENABLE_HARDENED_RUNTIME = YES;
+				ENABLE_PREVIEWS = YES;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = "timescroll-mcp/Info.plist";
+				INFOPLIST_KEY_LSUIElement = YES;
+				INFOPLIST_KEY_NSHumanReadableCopyright = "";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				MACOSX_DEPLOYMENT_TARGET = 15.5;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.muzhen.TimeScroll.mcp;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				REGISTER_APP_GROUPS = YES;
+				SKIP_INSTALL = YES;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_VERSION = 5.0;
+			};
+			name = Release;
+		};
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
+		C44CC3222EAA2D6200387344 /* Build configuration list for PBXNativeTarget "CoreSearch" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				C44CC3232EAA2D6200387344 /* Debug */,
+				C44CC3242EAA2D6200387344 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		C44CC3262EAA2D6200387344 /* Build configuration list for PBXNativeTarget "CoreSearchTests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				C44CC3272EAA2D6200387344 /* Debug */,
+				C44CC3282EAA2D6200387344 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
 		C4681DAE2E7C2717004C20D3 /* Build configuration list for PBXProject "TimeScroll" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (
@@ -614,6 +1144,15 @@
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;
 		};
+		C4C56C4C2EAB6AE70073342F /* Build configuration list for PBXNativeTarget "timescroll-mcp" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				C4C56C4D2EAB6AE70073342F /* Debug */,
+				C4C56C4E2EAB6AE70073342F /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
 /* End XCConfigurationList section */
 
 /* Begin XCRemoteSwiftPackageReference section */
@@ -644,6 +1183,16 @@
 /* End XCRemoteSwiftPackageReference section */
 
 /* Begin XCSwiftPackageProductDependency section */
+		C43960532ED30B9600B5EC03 /* SQLCipher */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = C4B151FD2E8FDB30003BBD66 /* XCRemoteSwiftPackageReference "SQLCipher.swift" */;
+			productName = SQLCipher;
+		};
+		C44CC3472EAA331000387344 /* SQLCipher */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = C4B151FD2E8FDB30003BBD66 /* XCRemoteSwiftPackageReference "SQLCipher.swift" */;
+			productName = SQLCipher;
+		};
 		C457777F2E93EFE9007E2F3D /* Collections */ = {
 			isa = XCSwiftPackageProductDependency;
 			package = C457777E2E93EFE9007E2F3D /* XCRemoteSwiftPackageReference "swift-collections" */;

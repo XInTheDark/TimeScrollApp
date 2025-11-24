@@ -54,7 +54,8 @@ struct SnapshotStageView: View {
             ActionsPanel(model: model,
                          localQuery: $localQuery,
                          onSubmitQuery: { refreshRects() },
-                         onCopy: copyCurrent,
+                         onCopyImage: copyCurrent,
+                         onCopyText: copyCurrentText,
                          onSave: saveCurrent,
                          onReveal: revealCurrent,
                          onDelete: confirmAndDeleteCurrent)
@@ -319,6 +320,9 @@ struct SnapshotStageView: View {
     private func copyCurrent() {
         if let p = model.selected?.path { SnapshotActions.copyImage(at: URL(fileURLWithPath: p), fallbackImage: nsImage) }
     }
+    private func copyCurrentText() {
+        if let id = model.selected?.id { SnapshotActions.copyText(snapshotId: id) }
+    }
     private func saveCurrent() {
         if let p = model.selected?.path { SnapshotActions.saveImageAs(from: URL(fileURLWithPath: p), fallbackImage: nsImage) }
     }
@@ -471,7 +475,8 @@ private struct ActionsPanel: View {
     @ObservedObject var model: TimelineModel
     @Binding var localQuery: String
     let onSubmitQuery: () -> Void
-    let onCopy: () -> Void
+    let onCopyImage: () -> Void
+    let onCopyText: () -> Void
     let onSave: () -> Void
     let onReveal: () -> Void
     let onDelete: () -> Void
@@ -494,7 +499,11 @@ private struct ActionsPanel: View {
                         .textFieldStyle(.roundedBorder)
                         .frame(width: 220)
                     HStack(spacing: 8) {
-                        Button("Copy Image") { onCopy() }
+                        Menu("Copy") {
+                            Button("Copy Image") { onCopyImage() }
+                            Button("Copy Text") { onCopyText() }
+                        }
+                        .fixedSize()
                         Button("Save…") { onSave() }
                         Button("Show in Finder") { onReveal() }
                         Button("Delete…") { onDelete() }
@@ -535,6 +544,14 @@ enum SnapshotActions {
         } else {
             NSSound.beep()
         }
+    }
+
+    static func copyText(snapshotId: Int64) {
+        let text = (try? DB.shared.textContent(snapshotId: snapshotId)) ?? ""
+        guard !text.isEmpty else { NSSound.beep(); return }
+        let pb = NSPasteboard.general
+        pb.clearContents()
+        pb.setString(text, forType: .string)
     }
 
     static func saveImageAs(from url: URL, fallbackImage: NSImage? = nil) {

@@ -71,16 +71,16 @@ final class VaultManager: ObservableObject {
     func unlock(presentingWindow: NSWindow? = nil) async {
         guard isVaultEnabled else { return }
         do {
-            _ = try await KeyStore.shared.requestPrivateKeyAccess(presentingWindow: presentingWindow)
-            // Unwrap DB key
-            let key = try? KeyStore.shared.unwrapDbKey()
+            let key = try await KeyStore.shared.authenticateAndUnwrapDbKey(presentingWindow: presentingWindow)
+            
             isUnlocked = true
             persistUnlocked(true)
-            if let key = key {
-                // Migrate existing plaintext DB (no-op if already encrypted)
-                SQLCipherBridge.shared.migratePlaintextIfNeeded(withKey: key)
-            }
-            SQLCipherBridge.shared.openWithUnwrappedKeySilently()
+            
+            // Migrate existing plaintext DB (no-op if already encrypted)
+            SQLCipherBridge.shared.migratePlaintextIfNeeded(withKey: key)
+            
+            SQLCipherBridge.shared.openWithKey(key)
+            
             // Notify usage tracker so it can retroactively create a pending session
             UsageTracker.shared.onVaultUnlocked()
             IngestQueue.shared.startIngestIfNeeded()
@@ -113,9 +113,13 @@ final class VaultManager: ObservableObject {
     }
 
     private func persistUnlocked(_ v: Bool) {
-        let d = UserDefaults.standard
-        d.set(v, forKey: "vault.isUnlocked")
-        d.synchronize()
+        // Write to both standard and App Group so UI and helper processes agree
+        let std = UserDefaults.standard
+        std.set(v, forKey: "vault.isUnlocked")
+        std.synchronize()
+        let grp = UserDefaults(suiteName: StoragePaths.appGroupID) ?? .standard
+        grp.set(v, forKey: "vault.isUnlocked")
+        grp.synchronize()
     }
 
     private func scheduleInactivityTimer() {

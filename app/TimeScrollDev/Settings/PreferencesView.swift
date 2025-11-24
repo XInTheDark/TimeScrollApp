@@ -14,6 +14,8 @@ struct PreferencesView: View {
                 .tabItem { Label("Security", systemImage: "lock") }
             SearchPane(settings: settings)
                 .tabItem { Label("Search", systemImage: "magnifyingglass") }
+            MCPSettingsPane()
+                .tabItem { Label("MCP", systemImage: "bolt.horizontal") }
             StoragePane(settings: settings)
                 .tabItem { Label("Storage", systemImage: "externaldrive") }
             UpdatesPane(settings: settings)
@@ -31,6 +33,8 @@ struct PreferencesView: View {
 
 private struct SecurityPane: View {
     @ObservedObject var settings: SettingsStore
+    @State private var availableOllamaModels: [String] = []
+    @State private var loadingModels: Bool = false
     @ObservedObject var vault = VaultManager.shared
     @State private var showVaultOnboarding: Bool = false
     @State private var pendingEnableVault: Bool = false
@@ -330,6 +334,10 @@ private struct SearchPane: View {
     @ObservedObject var settings: SettingsStore
     @State private var isInstallingModel = false
     @State private var installError: String?
+    @State private var availableOllamaModels: [String] = []
+    @State private var loadingModels: Bool = false
+    @State private var modelInstalled: Bool = false
+    @State private var checkingModelInstall: Bool = false
 
     var body: some View {
         Form {
@@ -365,36 +373,71 @@ private struct SearchPane: View {
                     .disabled(!settings.aiEmbeddingsEnabled)
                 }
 
-                if settings.embeddingProvider == "ollama-snowflake-33m" {
-                    if OllamaEmbeddingProvider.isModelInstalled("snowflake-arctic-embed:33m") {
+                if settings.embeddingProvider == "ollama" {
+                    VStack(alignment: .leading, spacing: 8) {
                         HStack {
-                            Image(systemName: "checkmark.circle.fill")
-                                .foregroundColor(.green)
-                            Text("Model installed")
-                                .font(.footnote)
-                                .foregroundColor(.secondary)
+                            Text("Model")
+                            Spacer()
                         }
-                    } else {
-                        VStack(alignment: .leading, spacing: 8) {
-                            HStack {
-                                Image(systemName: "exclamationmark.triangle.fill")
-                                    .foregroundColor(.orange)
-                                Text("Model not installed")
-                                    .font(.footnote)
-                                    .foregroundColor(.secondary)
+                        if loadingModels {
+                            HStack { ProgressView(); Text("Discovering models…").font(.footnote).foregroundColor(.secondary) }
+                        } else {
+                            Picker("", selection: $settings.embeddingModel) {
+                                ForEach(availableOllamaModels, id: \.self) { m in
+                                    Text(m).tag(m)
+                                }
                             }
-                            Button(isInstallingModel ? "Installing..." : "Install snowflake-arctic-embed:33m") {
-                                installOllamaModel()
-                            }
-                            .buttonStyle(.borderedProminent)
-                            .disabled(isInstallingModel)
+                            .labelsHidden()
+                            .pickerStyle(.menu)
+                            .frame(width: 280)
+                        }
 
-                            if let error = installError {
-                                Text(error)
-                                    .font(.footnote)
-                                    .foregroundColor(.red)
+                        if !settings.embeddingModel.isEmpty {
+                            if checkingModelInstall {
+                                HStack {
+                                    ProgressView()
+                                    Text("Checking install status…").font(.footnote).foregroundColor(.secondary)
+                                }
+                            } else if modelInstalled {
+                                HStack {
+                                    Image(systemName: "checkmark.circle.fill").foregroundColor(.green)
+                                    Text("Model installed").font(.footnote).foregroundColor(.secondary)
+                                }
+                            } else {
+                                VStack(alignment: .leading, spacing: 6) {
+                                    HStack(alignment: .center, spacing: 8) {
+                                        Image(systemName: "exclamationmark.triangle.fill").foregroundColor(.orange)
+                                        Text("Model not installed").font(.footnote).foregroundColor(.secondary)
+                                        Spacer()
+                                        Button(isInstallingModel ? "Installing..." : "Install") {
+                                            installOllamaModel()
+                                        }
+                                        .buttonStyle(.borderedProminent)
+                                        .disabled(isInstallingModel)
+                                    }
+                                    if let error = installError {
+                                        Text(error).font(.footnote).foregroundColor(.red)
+                                    }
+                                }
                             }
                         }
+                    }
+                    .onAppear {
+                        // Load available models lazily
+                        if availableOllamaModels.isEmpty {
+                            loadingModels = true
+                            DispatchQueue.global().async {
+                                let models = OllamaEmbeddingProvider.listModels()
+                                DispatchQueue.main.async {
+                                    availableOllamaModels = models.isEmpty ? ["snowflake-arctic-embed:33m"] : models
+                                    loadingModels = false
+                                }
+                            }
+                        }
+                        refreshModelInstallState()
+                    }
+                    .onChange(of: settings.embeddingModel) { _ in
+                        refreshModelInstallState()
                     }
                 }
 
@@ -402,7 +445,7 @@ private struct SearchPane: View {
                     .disabled(!settings.aiEmbeddingsEnabled)
                 LabeledContent("Similarity threshold") {
                     HStack {
-                        Slider(value: $settings.aiThreshold, in: 0.2...0.8, step: 0.05)
+                        Slider(value: $settings.aiThreshold, in: 0.0...0.8, step: 0.10)
                             .disabled(!settings.aiEmbeddingsEnabled)
                         Text(String(format: "%.2f", settings.aiThreshold))
                             .monospacedDigit()
@@ -420,6 +463,9 @@ private struct SearchPane: View {
             } header: { Text("AI Search") }
         }
         .formStyle(.grouped)
+        .onChange(of: settings.embeddingProvider) { _ in
+            refreshModelInstallState()
+        }
     }
 }
 
@@ -432,12 +478,31 @@ extension SearchPane {
         isInstallingModel = true
         installError = nil
 
-        OllamaEmbeddingProvider.pullModel("snowflake-arctic-embed:33m") { success, error in
+        let model = settings.embeddingModel.isEmpty ? "snowflake-arctic-embed:33m" : settings.embeddingModel
+        OllamaEmbeddingProvider.pullModel(model) { success, error in
             DispatchQueue.main.async {
                 isInstallingModel = false
-                if !success {
+                if success {
+                    refreshModelInstallState()
+                } else {
                     installError = error ?? "Failed to install model"
                 }
+            }
+        }
+    }
+
+    private func refreshModelInstallState() {
+        guard settings.embeddingProvider == "ollama", !settings.embeddingModel.isEmpty else {
+            checkingModelInstall = false
+            modelInstalled = false
+            return
+        }
+        checkingModelInstall = true
+        DispatchQueue.global(qos: .userInitiated).async {
+            let installed = OllamaEmbeddingProvider.isModelInstalled(settings.embeddingModel)
+            DispatchQueue.main.async {
+                modelInstalled = installed
+                checkingModelInstall = false
             }
         }
     }
@@ -449,6 +514,109 @@ private struct StatsPane: View {
         VStack(alignment: .leading, spacing: 12) {
             StatsView()
         }
+    }
+}
+
+private struct MCPSettingsPane: View {
+    @AppStorage("settings.mcpEnabled") private var persistedEnabled: Bool = false
+    @State private var showMigrationPrompt: Bool = false
+    @State private var migrating: Bool = false
+    @State private var migrationProgress: String = ""
+    @State private var pendingEnableAfterConfirm: Bool = false
+
+    var body: some View {
+        MCPPane(
+            mcpEnabled: toggleBinding,
+            migrating: migrating,
+            migrationProgress: migrationProgress
+        )
+        .sheet(isPresented: $showMigrationPrompt) {
+            MCPMigrationConfirmSheet(onCancel: {
+                pendingEnableAfterConfirm = false
+                showMigrationPrompt = false
+                persistedEnabled = false
+            }, onContinue: {
+                showMigrationPrompt = false
+                beginLegacyMigration()
+            })
+            .frame(minWidth: 520)
+        }
+    }
+
+    private var toggleBinding: Binding<Bool> {
+        Binding(
+            get: { persistedEnabled },
+            set: { newVal in
+                if newVal == persistedEnabled { return }
+                if newVal {
+                    handleEnableRequest()
+                } else {
+                    persistedEnabled = false
+                }
+            }
+        )
+    }
+
+    private func handleEnableRequest() {
+        if StoragePaths.needsLegacyMigrationForMCP() {
+            pendingEnableAfterConfirm = true
+            showMigrationPrompt = true
+            return
+        }
+        persistedEnabled = true
+    }
+
+    private func beginLegacyMigration() {
+        guard pendingEnableAfterConfirm else { return }
+        pendingEnableAfterConfirm = false
+        migrating = true
+        migrationProgress = "Preparing…"
+        let dest = StoragePaths.defaultRoot()
+        Task { @MainActor in
+            await StorageMigrationManager.shared.changeLocation(
+                to: dest,
+                moveExisting: true,
+                deleteOld: true
+            ) { msg in
+                Task { @MainActor in migrationProgress = msg }
+            }
+            migrating = false
+            migrationProgress = ""
+            persistedEnabled = true
+        }
+    }
+}
+
+private struct MCPMigrationConfirmSheet: View {
+    var onCancel: () -> Void
+    var onContinue: () -> Void
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(spacing: 8) {
+                Image(systemName: "externaldrive.fill.badge.checkmark").font(.system(size: 28))
+                Text("Migrate Data for MCP").font(.title3).bold()
+            }
+            Text("Enabling MCP requires TimeScroll to perform a one-time data migration.")
+                .font(.headline)
+            VStack(alignment: .leading, spacing: 8) {
+                Label("Snapshots, database, and vault files will be moved into a new folder.", systemImage: "arrow.right.doc.on.clipboard")
+                Label("The original copy will be deleted after the move.", systemImage: "trash")
+                Label("Capture will pause temporarily while the move runs.", systemImage: "pause")
+            }
+            Text("If you cancel, MCP will stay disabled and nothing will change.")
+                .font(.footnote)
+                .foregroundColor(.secondary)
+                .padding(.top, 4)
+            HStack {
+                Spacer()
+                Button("Cancel") { onCancel() }
+                Button("Migrate and Enable") {
+                    onContinue()
+                }
+                .keyboardShortcut(.defaultAction)
+            }
+        }
+        .padding(18)
     }
 }
 

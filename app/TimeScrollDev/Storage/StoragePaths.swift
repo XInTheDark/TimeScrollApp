@@ -7,16 +7,34 @@ import AppKit
 enum StoragePaths {
     // UserDefaults keys (also used by background workers)
     static let bookmarkKey = "settings.storageFolderBookmark"
-    static let displayPathKey = "settings.storageFolderPath"
+    static let storageDisplayPathKey = "settings.storageFolderPath"
+    // Helper-discoverable marker for active storage root
+    private static let markerFile: URL = {
+        return defaultRoot().appendingPathComponent(".storage-root-path.txt")
+    }()
     // Backup (external) storage keys
     static let backupBookmarkKey = "settings.backupFolderBookmark"
     static let backupDisplayPathKey = "settings.backupFolderPath"
 
+    // App Group for sharing preferences with the MCP helper
+    static let appGroupID = "group.com.muzhen.TimeScroll.shared"
+    static var sharedDefaults: UserDefaults = {
+        UserDefaults(suiteName: appGroupID) ?? .standard
+    }()
+    // Optional: marker in App Group for diagnostics (not a behavioral dependency)
+    private static let groupMarkerFile: URL? = {
+        if let container = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: appGroupID) {
+            let sharedDir = container.appendingPathComponent("Shared", isDirectory: true)
+            try? FileManager.default.createDirectory(at: sharedDir, withIntermediateDirectories: true)
+            return sharedDir.appendingPathComponent(".storage-root-path.txt")
+        }
+        return nil
+    }()
+
     /// Returns the current storage root URL. If a security-scoped bookmark is stored,
     /// this resolves it; otherwise returns ~/Library/Application Support/TimeScroll.
     static func currentRoot() -> URL {
-        let d = UserDefaults.standard
-        if let bd = d.data(forKey: bookmarkKey) {
+        if let bd = sharedDefaults.data(forKey: bookmarkKey) {
             var stale = false
             if let url = try? URL(resolvingBookmarkData: bd, options: [.withSecurityScope], relativeTo: nil, bookmarkDataIsStale: &stale) {
                 if stale {
@@ -26,13 +44,68 @@ enum StoragePaths {
                 return url
             }
         }
+        if let stored = normalizedStoredRootURL() {
+            return stored
+        }
+        // Note: We previously checked a marker file here. We now prefer defaultRoot() (App Group)
+        // to ensure sandboxed helpers can access the default storage.
         return defaultRoot()
     }
 
     /// Default root in Application Support.
     static func defaultRoot() -> URL {
+        // Prefer App Group container for shared access
+           if let container = appGroupContainerURL() {
+               fputs("[StoragePaths] Using App Group container: \(container.path)\n", stderr)
+               return container.appendingPathComponent("TimeScroll", isDirectory: true)
+           }
+           fputs("[StoragePaths] App Group container not found for \(appGroupID), falling back to sandbox\n", stderr)
         let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
         return base.appendingPathComponent("TimeScroll", isDirectory: true)
+    }
+    
+    /// Legacy default root in Application Support (for migration).
+    static func legacyDefaultRoot() -> URL {
+        let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+        return base.appendingPathComponent("TimeScroll", isDirectory: true)
+    }
+
+    private static func normalizedStoredRootURL() -> URL? {
+        guard let raw = sharedDefaults.string(forKey: storageDisplayPathKey) else { return nil }
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        let normalized = normalizeStoragePathIfNeeded(trimmed)
+        if normalized != trimmed {
+            sharedDefaults.set(normalized, forKey: storageDisplayPathKey)
+            sharedDefaults.synchronize()
+        }
+        return URL(fileURLWithPath: normalized, isDirectory: true)
+    }
+
+    private static func normalizeStoragePathIfNeeded(_ path: String) -> String {
+        guard !path.isEmpty else { return path }
+        if isLegacySandboxPath(path) {
+            return defaultRoot().path
+        }
+        return path
+    }
+
+    private static func isLegacySandboxPath(_ path: String) -> Bool {
+        let legacy = legacyDefaultRoot().path
+        if path == legacy { return true }
+        return path.contains("/Library/Containers/com.muzhen.TimeScroll/")
+    }
+
+    /// Returns true when legacy sandbox data exists and should be moved into the App Group for MCP.
+    static func needsLegacyMigrationForMCP() -> Bool {
+        let legacy = legacyDefaultRoot()
+        let shared = defaultRoot()
+        let current = currentRoot()
+        // Only migrate if we are *currently* still using the legacy sandbox root
+        guard current.standardizedFileURL == legacy.standardizedFileURL else { return false }
+        guard legacy.standardizedFileURL != shared.standardizedFileURL else { return false }
+        var isDir: ObjCBool = false
+        return FileManager.default.fileExists(atPath: legacy.path, isDirectory: &isDir) && isDir.boolValue
     }
 
     /// Returns the URL for the SQLite database file under the current root.
@@ -53,6 +126,28 @@ enum StoragePaths {
 
     /// Vault directory under the current root (keys and related state).
     static func vaultDir() -> URL { currentRoot().appendingPathComponent("Vault", isDirectory: true) }
+
+    /// Shared Vault directory in the App Group container.
+    /// This is the preferred location for keys to ensure accessibility by both the main app and extensions.
+    static func sharedVaultDir() -> URL {
+        if let container = appGroupContainerURL() {
+            return container.appendingPathComponent("Vault", isDirectory: true)
+        }
+        // Fallback to local vault if App Group is unavailable (should not happen in properly configured app)
+        return vaultDir()
+    }
+
+    private static func appGroupContainerURL() -> URL? {
+        if let url = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: appGroupID) {
+            return url
+        }
+        let manual = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Group Containers/\(appGroupID)", isDirectory: true)
+        if !FileManager.default.fileExists(atPath: manual.path) {
+            try? FileManager.default.createDirectory(at: manual, withIntermediateDirectories: true)
+        }
+        return manual
+    }
 
     // MARK: - Backup (external) storage helpers
     /// Returns the configured backup root if set; otherwise nil.
@@ -92,9 +187,8 @@ enum StoragePaths {
 
     /// Perform work with security scope active if the root uses a bookmark. Always stops access afterwards.
     static func withSecurityScope<T>(_ body: () throws -> T) rethrows -> T {
-        let d = UserDefaults.standard
         var started = false
-        if let bd = d.data(forKey: bookmarkKey) {
+        if let bd = sharedDefaults.data(forKey: bookmarkKey) {
             var stale = false
             if let url = try? URL(resolvingBookmarkData: bd, options: [.withSecurityScope], relativeTo: nil, bookmarkDataIsStale: &stale) {
                 if stale { _ = refreshBookmark(for: url) }
@@ -112,9 +206,8 @@ enum StoragePaths {
 
     /// Perform work with backup security scope active if the backup root uses a bookmark. Always stops access afterwards.
     static func withBackupSecurityScope<T>(_ body: () throws -> T) rethrows -> T {
-        let d = UserDefaults.standard
         var started = false
-        if let bd = d.data(forKey: backupBookmarkKey) {
+        if let bd = sharedDefaults.data(forKey: backupBookmarkKey) {
             var stale = false
             if let url = try? URL(resolvingBookmarkData: bd, options: [.withSecurityScope], relativeTo: nil, bookmarkDataIsStale: &stale) {
                 if stale { _ = refreshBackupBookmark(for: url) }
@@ -130,8 +223,7 @@ enum StoragePaths {
     }
 
     private static func stopAccess() {
-        let d = UserDefaults.standard
-        if let bd = d.data(forKey: bookmarkKey) {
+        if let bd = sharedDefaults.data(forKey: bookmarkKey) {
             var stale = false
             if let url = try? URL(resolvingBookmarkData: bd, options: [.withSecurityScope], relativeTo: nil, bookmarkDataIsStale: &stale) {
                 url.stopAccessingSecurityScopedResource()
@@ -140,8 +232,7 @@ enum StoragePaths {
     }
 
     private static func stopBackupAccess() {
-        let d = UserDefaults.standard
-        if let bd = d.data(forKey: backupBookmarkKey) {
+        if let bd = sharedDefaults.data(forKey: backupBookmarkKey) {
             var stale = false
             if let url = try? URL(resolvingBookmarkData: bd, options: [.withSecurityScope], relativeTo: nil, bookmarkDataIsStale: &stale) {
                 url.stopAccessingSecurityScopedResource()
@@ -155,44 +246,55 @@ enum StoragePaths {
     static func setStorageFolder(_ url: URL) {
         // Persist bookmark + display path
         if let data = try? url.bookmarkData(options: [.withSecurityScope], includingResourceValuesForKeys: nil, relativeTo: nil) {
-            let d = UserDefaults.standard
-            d.set(data, forKey: bookmarkKey)
-            d.set(url.path, forKey: displayPathKey)
-            d.synchronize()
+            sharedDefaults.set(data, forKey: bookmarkKey)
+            sharedDefaults.set(url.path, forKey: storageDisplayPathKey)
+            sharedDefaults.synchronize()
         }
+        // Write diagnostics marker in the App Group
+        if let m = groupMarkerFile {
+            let tmp = m.appendingPathExtension("tmp")
+            try? (url.path + "\n").write(to: tmp, atomically: true, encoding: .utf8)
+            let _ = try? FileManager.default.replaceItemAt(m, withItemAt: tmp)
+        }
+        // Best-effort: ensure default root exists and write a plaintext marker usable by helpers
+        try? FileManager.default.createDirectory(at: defaultRoot(), withIntermediateDirectories: true)
+        try? (url.path + "\n").write(to: markerFile, atomically: true, encoding: .utf8)
     }
 
     /// Update the selected backup folder, storing a security-scoped bookmark and user-visible path.
     @MainActor
     static func setBackupFolder(_ url: URL) {
         if let data = try? url.bookmarkData(options: [.withSecurityScope], includingResourceValuesForKeys: nil, relativeTo: nil) {
-            let d = UserDefaults.standard
-            d.set(data, forKey: backupBookmarkKey)
-            d.set(url.path, forKey: backupDisplayPathKey)
-            d.synchronize()
+            sharedDefaults.set(data, forKey: backupBookmarkKey)
+            sharedDefaults.set(url.path, forKey: backupDisplayPathKey)
+            sharedDefaults.synchronize()
         }
     }
 
     /// Clear backup folder configuration.
     @MainActor
     static func clearBackupFolder() {
-        let d = UserDefaults.standard
-        d.removeObject(forKey: backupBookmarkKey)
-        d.removeObject(forKey: backupDisplayPathKey)
-        d.synchronize()
+        sharedDefaults.removeObject(forKey: backupBookmarkKey)
+        sharedDefaults.removeObject(forKey: backupDisplayPathKey)
+        sharedDefaults.synchronize()
     }
 
     /// Returns a user-visible description of the current storage root.
     static func displayPath() -> String {
-        let d = UserDefaults.standard
-        if let s = d.string(forKey: displayPathKey), !s.isEmpty { return s }
+        if let s = sharedDefaults.string(forKey: storageDisplayPathKey), !s.isEmpty {
+            let normalized = normalizeStoragePathIfNeeded(s)
+            if normalized != s {
+                sharedDefaults.set(normalized, forKey: storageDisplayPathKey)
+                sharedDefaults.synchronize()
+            }
+            return normalized
+        }
         return currentRoot().path
     }
 
     /// Returns a user-visible description of the backup root.
     static func backupDisplayPath() -> String {
-        let d = UserDefaults.standard
-        if let s = d.string(forKey: backupDisplayPathKey), !s.isEmpty { return s }
+        if let s = sharedDefaults.string(forKey: backupDisplayPathKey), !s.isEmpty { return s }
         return "Not set"
     }
 
@@ -261,7 +363,7 @@ enum StoragePaths {
     @discardableResult
     private static func refreshBookmark(for url: URL) -> Bool {
         if let data = try? url.bookmarkData(options: [.withSecurityScope], includingResourceValuesForKeys: nil, relativeTo: nil) {
-            UserDefaults.standard.set(data, forKey: bookmarkKey)
+            sharedDefaults.set(data, forKey: bookmarkKey)
             return true
         }
         return false
@@ -270,9 +372,44 @@ enum StoragePaths {
     @discardableResult
     private static func refreshBackupBookmark(for url: URL) -> Bool {
         if let data = try? url.bookmarkData(options: [.withSecurityScope], includingResourceValuesForKeys: nil, relativeTo: nil) {
-            UserDefaults.standard.set(data, forKey: backupBookmarkKey)
+            sharedDefaults.set(data, forKey: backupBookmarkKey)
             return true
         }
         return false
+    }
+
+    // Synchronize per-app defaults into the shared App Group defaults so helpers see the same settings.
+    @MainActor
+    static func syncSharedDefaultsFromStandard() {
+        let std = UserDefaults.standard
+        if sharedDefaults.data(forKey: bookmarkKey) == nil, let bd = std.data(forKey: bookmarkKey) {
+            sharedDefaults.set(bd, forKey: bookmarkKey)
+        }
+        if sharedDefaults.string(forKey: storageDisplayPathKey) == nil, let s = std.string(forKey: storageDisplayPathKey) {
+            sharedDefaults.set(normalizeStoragePathIfNeeded(s), forKey: storageDisplayPathKey)
+        }
+        if sharedDefaults.data(forKey: backupBookmarkKey) == nil, let bd = std.data(forKey: backupBookmarkKey) {
+            sharedDefaults.set(bd, forKey: backupBookmarkKey)
+        }
+        if sharedDefaults.string(forKey: backupDisplayPathKey) == nil, let s = std.string(forKey: backupDisplayPathKey) {
+            sharedDefaults.set(s, forKey: backupDisplayPathKey)
+        }
+        sharedDefaults.synchronize()
+
+        // Also write the App Group marker for diagnostics
+        if let s = sharedDefaults.string(forKey: storageDisplayPathKey), let m = groupMarkerFile {
+            let tmp = m.appendingPathExtension("tmp")
+            try? (s + "\n").write(to: tmp, atomically: true, encoding: .utf8)
+            let _ = try? FileManager.default.replaceItemAt(m, withItemAt: tmp)
+        }
+    }
+
+    static func ensureStorageDisplayPathRecorded() {
+        let existing = sharedDefaults.string(forKey: storageDisplayPathKey)?.trimmingCharacters(in: .whitespacesAndNewlines)
+        if existing == nil || existing?.isEmpty == true {
+            let path = defaultRoot().path
+            sharedDefaults.set(path, forKey: storageDisplayPathKey)
+            sharedDefaults.synchronize()
+        }
     }
 }

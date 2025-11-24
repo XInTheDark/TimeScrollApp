@@ -5,6 +5,9 @@ struct DebugView: View {
     @State private var ftsCount: Int = 0
     @State private var rows: [DB.SnapshotRow] = []
     @State private var reindexing: Bool = false
+    @State private var showMigrationDialog: Bool = false
+    @State private var isMigrating: Bool = false
+    @State private var migrationResult: String? = nil
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -23,6 +26,11 @@ struct DebugView: View {
                     DispatchQueue.global(qos: .utility).async {
                         Compactor().compactOlderSnapshots()
                         DispatchQueue.main.async { refresh() }
+                    }
+                }
+                Menu("Migration fixes") {
+                    Button("Update DB snapshot paths to current root") {
+                        showMigrationDialog = true
                     }
                 }
             }
@@ -45,6 +53,25 @@ struct DebugView: View {
         }
         .padding()
         .onAppear { refresh() }
+        .confirmationDialog("Update DB snapshot paths to the current storage root? This will rewrite the path and thumb_path columns for snapshots which appear to point at a different root.", isPresented: $showMigrationDialog, titleVisibility: .visible) {
+            Button("Run", role: .destructive) {
+                isMigrating = true
+                DispatchQueue.global(qos: .utility).async {
+                    let updated = DB.shared.updateSnapshotPathsToCurrentRoot()
+                    DispatchQueue.main.async {
+                        isMigrating = false
+                        migrationResult = "Updated \(updated) path/thumb entries"
+                        refresh()
+                    }
+                }
+            }
+            Button("Cancel", role: .cancel) { }
+        }
+        .alert("Migration finished", isPresented: Binding(get: { migrationResult != nil }, set: { v in if !v { migrationResult = nil } })) {
+            Button("OK", role: .cancel) { migrationResult = nil }
+        } message: {
+            Text(migrationResult ?? "")
+        }
         .frame(minWidth: 700, minHeight: 400)
     }
 

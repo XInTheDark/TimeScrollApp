@@ -62,6 +62,8 @@ final class SettingsStore: ObservableObject {
     @Published var aiMaxCandidates: Int = 10000 { didSet { if !isLoading { save() } } }
     // Embedding provider selection
     @Published var embeddingProvider: String = "apple-nl" { didSet { if !isLoading { save() } } }
+    // When using providers that have multiple models (e.g. Ollama), the concrete model to use
+    @Published var embeddingModel: String = "snowflake-arctic-embed:33m" { didSet { if !isLoading { save() } } }
 
     // Privacy
     // List of bundle identifiers whose windows should be excluded from capture when visible
@@ -101,9 +103,9 @@ final class SettingsStore: ObservableObject {
         }
 
         if let raw = defaults.string(forKey: "settings.storageFormat"), let f = StorageFormat(rawValue: raw) { storageFormat = f }
-        if let p = defaults.string(forKey: StoragePaths.displayPathKey) { storageFolderPath = p }
+        if let p = (UserDefaults(suiteName: StoragePaths.appGroupID) ?? .standard).string(forKey: StoragePaths.storageDisplayPathKey) { storageFolderPath = p }
         if defaults.object(forKey: "settings.backupEnabled") != nil { backupEnabled = defaults.bool(forKey: "settings.backupEnabled") }
-        if let bp = defaults.string(forKey: StoragePaths.backupDisplayPathKey) { backupFolderPath = bp }
+        if let bp = (UserDefaults(suiteName: StoragePaths.appGroupID) ?? .standard).string(forKey: StoragePaths.backupDisplayPathKey) { backupFolderPath = bp }
         let mle = defaults.integer(forKey: "settings.maxLongEdge"); if mle >= 0 { maxLongEdge = mle }
         let q = defaults.double(forKey: "settings.lossyQuality"); if q > 0 { lossyQuality = q }
         if defaults.object(forKey: "settings.dedupEnabled") != nil { dedupEnabled = defaults.bool(forKey: "settings.dedupEnabled") }
@@ -141,7 +143,23 @@ final class SettingsStore: ObservableObject {
         }
         let aiThr = defaults.double(forKey: "settings.aiThreshold"); if aiThr > 0 { aiThreshold = min(1.0, max(0.0, aiThr)) }
         let aiMC = defaults.integer(forKey: "settings.aiMaxCandidates"); if aiMC > 0 { aiMaxCandidates = aiMC }
-        if let provider = defaults.string(forKey: "settings.embeddingProvider") { embeddingProvider = provider }
+        if let provider = defaults.string(forKey: "settings.embeddingProvider") {
+            // Migrate old style names like `ollama-snowflake-33m` into provider `ollama` + a model id
+            if provider.hasPrefix("ollama-") && provider != "ollama" {
+                embeddingProvider = "ollama"
+                // Best-effort mapping for previously supported composite name
+                if provider == "ollama-snowflake-33m" {
+                    embeddingModel = "snowflake-arctic-embed:33m"
+                } else {
+                    // fallback: keep previous value as model if it looks like the model id
+                    let candidate = String(provider.dropFirst("ollama-".count))
+                    embeddingModel = candidate.isEmpty ? embeddingModel : candidate
+                }
+            } else {
+                embeddingProvider = provider
+            }
+        }
+        if let model = defaults.string(forKey: "settings.embeddingModel") { embeddingModel = model }
 
         // Updates
         if defaults.object(forKey: "settings.updateChannelBeta") != nil {
@@ -210,13 +228,18 @@ final class SettingsStore: ObservableObject {
         defaults.set(aiThreshold, forKey: "settings.aiThreshold")
         defaults.set(aiMaxCandidates, forKey: "settings.aiMaxCandidates")
         defaults.set(embeddingProvider, forKey: "settings.embeddingProvider")
-        // Storage location display path (bookmark handled via StoragePaths.setStorageFolder)
-        defaults.set(storageFolderPath, forKey: StoragePaths.displayPathKey)
+        defaults.set(embeddingModel, forKey: "settings.embeddingModel")
+        // Apply settings to the embedding service singleton immediately
+        EmbeddingService.shared.reloadFromSettings()
+        // Storage location display path (bookmark handled via StoragePaths.setStorageFolder) — write to App Group
+        (UserDefaults(suiteName: StoragePaths.appGroupID) ?? .standard).set(storageFolderPath, forKey: StoragePaths.storageDisplayPathKey)
         // Backup settings
         defaults.set(backupEnabled, forKey: "settings.backupEnabled")
-        defaults.set(backupFolderPath, forKey: StoragePaths.backupDisplayPathKey)
+        (UserDefaults(suiteName: StoragePaths.appGroupID) ?? .standard).set(backupFolderPath, forKey: StoragePaths.backupDisplayPathKey)
     // Security
     defaults.set(vaultEnabled, forKey: "settings.vaultEnabled")
+    // Mirror vault flag into App Group so helper/DB agree immediately
+    (UserDefaults(suiteName: StoragePaths.appGroupID) ?? .standard).set(vaultEnabled, forKey: "settings.vaultEnabled")
     defaults.set(captureWhileLocked, forKey: "settings.captureWhileLocked")
     defaults.set(autoLockInactivityMinutes, forKey: "settings.autoLockInactivityMinutes")
     defaults.set(autoLockOnSleep, forKey: "settings.autoLockOnSleep")

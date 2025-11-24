@@ -17,6 +17,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var menuNeedsRefresh: Bool = true
     private var prefsWC: NSWindowController?
     private var mainWC: NSWindowController?
+    private var onboardingWC: NSWindowController?
     private var updateNotiTokens: [NSObjectProtocol] = []
     private var powerNotiTokens: [NSObjectProtocol] = []
     private var lastWakeRestartAt: TimeInterval = 0
@@ -64,7 +65,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self?.installWindowObservers()
             self?.installUpdateNotificationObservers()
             self?.installSleepWakeObservers()
-            self?.applyAutoStartCaptureIfNeeded()
+            // Show onboarding if permissions are missing; otherwise honor auto-start
+            if !Permissions.isScreenRecordingGranted() {
+                self?.showOnboardingWindow()
+            } else {
+                self?.applyAutoStartCaptureIfNeeded()
+            }
             // Prompt unlock if vault is enabled
             if SettingsStore.shared.vaultEnabled {
                 Task { await VaultManager.shared.unlock(presentingWindow: NSApp.keyWindow) }
@@ -209,6 +215,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         wc.window?.isReleasedWhenClosed = false
         self.mainWC = wc
         wc.showWindow(nil)
+    }
+
+    private func showOnboardingWindow() {
+        if onboardingWC == nil {
+            let root = OnboardingView().environmentObject(SettingsStore.shared)
+            let hosting = NSHostingController(rootView: root)
+            let win = NSWindow(contentViewController: hosting)
+            win.styleMask.insert([.titled, .closable])
+            win.title = "TimeScroll Setup"
+            win.setContentSize(NSSize(width: 640, height: 380))
+            win.isMovableByWindowBackground = true
+            win.center()
+            win.identifier = NSUserInterfaceItemIdentifier("OnboardingWindow")
+            let wc = NSWindowController(window: win)
+            wc.window?.isReleasedWhenClosed = false
+            onboardingWC = wc
+        }
+        NSApp.setActivationPolicy(.regular)
+        onboardingWC?.showWindow(nil)
+        onboardingWC?.window?.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
     }
 
     @objc private func openPreferences() {
@@ -380,6 +407,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let d = UserDefaults.standard
         let auto = d.object(forKey: "settings.startRecordingOnStart") != nil ? d.bool(forKey: "settings.startRecordingOnStart") : true
         guard auto else { return }
+        guard Permissions.isScreenRecordingGranted() else { return }
         Task { @MainActor in
             await AppState.shared.startCaptureIfNeeded()
             self.refreshMenu()

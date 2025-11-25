@@ -1,3 +1,9 @@
+# alpha.11.8 - 2025-11-25
+
+## New
+
+---
+
 # alpha.11 - 2025-11-24
 
 This update adds MCP support and QoL improvements.

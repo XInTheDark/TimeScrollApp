@@ -182,7 +182,7 @@ final class SearchService {
                                      endMs: endMs)
         }
         let svc = EmbeddingService.shared
-        let (qVec, known, total) = svc.embedWithStats(trimmed)
+        let (qVec, known, total) = svc.embedWithStats(trimmed, usage: .query)
         let maxC = svc.maxCandidates
         let thresh = Float(svc.threshold)
         let modelStats = (try? DB.shared.embeddingModelStats(requireDim: svc.dim, requireProvider: svc.providerID)) ?? []

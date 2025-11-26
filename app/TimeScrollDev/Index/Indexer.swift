@@ -69,7 +69,7 @@ final class Indexer {
                 svc.reloadFromSettings()
                 let provider = svc.providerID
                 let model = svc.modelID
-                let (vec, known, total) = svc.embedWithStats(result.text)
+                let (vec, known, total) = svc.embedWithStats(result.text, usage: .document)
                 let dim = vec.count
                 if !vec.isEmpty {
                     do {

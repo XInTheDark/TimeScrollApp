@@ -1,6 +1,6 @@
-# alpha.11.9 - 2025-11-25
+# alpha.11.10 - 2025-11-26
 
-Fix builds
+Fix app builds.
 
 ---
 

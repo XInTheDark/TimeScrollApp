@@ -21,6 +21,11 @@ final class EmbeddingService {
         }
     }
 
+    enum Usage {
+        case query
+        case document
+    }
+
     private init() {
         let d = UserDefaults.standard
         aiEnabled = (d.object(forKey: "settings.aiEmbeddingsEnabled") != nil) ? d.bool(forKey: "settings.aiEmbeddingsEnabled") : false
@@ -100,18 +105,18 @@ final class EmbeddingService {
     var providerID: String { selectedProvider.rawValue }
     var modelID: String { selectedModel ?? selectedProvider.rawValue }
 
-    func embed(_ text: String) -> [Float] {
-        return embedWithStats(text).vec
+    func embed(_ text: String, usage: Usage = .document) -> [Float] {
+        return embedWithStats(text, usage: usage).vec
     }
 
-    func embedWithStats(_ text: String) -> (vec: [Float], known: Int, total: Int) {
+    func embedWithStats(_ text: String, usage: Usage = .document) -> (vec: [Float], known: Int, total: Int) {
         // If text is very long, break into multiple chunks and average embeddings.
         let (raw, known, total): ([Float], Int, Int)
 
         // Use provider-agnostic long-text embedding util when text exceeds a threshold.
         let maxInput = 2_000
         if text.count > maxInput {
-            (raw, known, total) = Self.embedLongTextWithStats(text: text, maxInput: maxInput, maxChunks: 10, overlapPct: 0.10, provider: selectedProvider, nlProvider: nlProvider, ollamaProvider: ollamaProvider)
+            (raw, known, total) = Self.embedLongTextWithStats(text: text, maxInput: maxInput, maxChunks: 10, overlapPct: 0.10, provider: selectedProvider, nlProvider: nlProvider, ollamaProvider: ollamaProvider, usage: usage)
         } else {
             switch selectedProvider {
             case .appleNL:
@@ -119,7 +124,7 @@ final class EmbeddingService {
                 (raw, known, total) = p.embedWithStats(text: text)
             case .ollama:
                 guard let p = ollamaProvider else { return ([], 0, 0) }
-                (raw, known, total) = p.embedWithStats(text: text)
+                (raw, known, total) = p.embedWithStats(text: text, usage: usage)
             }
         }
 
@@ -198,7 +203,8 @@ extension EmbeddingService {
                                        overlapPct: Double = 0.10,
                                        provider: Provider,
                                        nlProvider: NLEmbeddingProvider?,
-                                       ollamaProvider: OllamaEmbeddingProvider?) -> ([Float], Int, Int) {
+                                       ollamaProvider: OllamaEmbeddingProvider?,
+                                       usage: Usage = .document) -> ([Float], Int, Int) {
         let windows = chunkText(text, maxInput: maxInput, overlapPct: overlapPct, maxChunks: maxChunks)
         guard !windows.isEmpty else { return ([], 0, 0) }
 
@@ -217,7 +223,7 @@ extension EmbeddingService {
                 }
             case .ollama:
                 if let p = ollamaProvider {
-                    let (v, k, t) = p.embedWithStats(text: w)
+                    let (v, k, t) = p.embedWithStats(text: w, usage: usage)
                     vecs.append(v)
                     knownSum += k
                     totalSum += t
@@ -312,10 +318,23 @@ final class OllamaEmbeddingProvider {
         }
     }
 
+    private func effectiveText(for text: String, usage: EmbeddingService.Usage) -> String {
+        let m = model.lowercased()
+        // embeddinggemma specific prefixes
+        if m.contains("gemma") && m.contains("embed") {
+             switch usage {
+             case .query: return "task: search result | query: \(text)"
+             case .document: return "title: none | text: \(text)"
+             }
+        }
+        return text
+    }
+
     func embed(text: String) -> [Float] { embedWithStats(text: text).0 }
 
-    func embedWithStats(text: String) -> ([Float], Int, Int) {
-        let tokens = text.split(separator: " ").count
+    func embedWithStats(text: String, usage: EmbeddingService.Usage = .document) -> ([Float], Int, Int) {
+        let textToEmbed = effectiveText(for: text, usage: usage)
+        let tokens = textToEmbed.split(separator: " ").count
 
         guard let url = URL(string: "\(baseURL)/api/embed") else {
             print("[Ollama] Invalid URL")
@@ -328,7 +347,7 @@ final class OllamaEmbeddingProvider {
 
         let payload: [String: Any] = [
             "model": model,
-            "input": text
+            "input": textToEmbed
         ]
 
         guard let jsonData = try? JSONSerialization.data(withJSONObject: payload) else {

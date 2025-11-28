@@ -29,7 +29,7 @@ final class Indexer {
     }
 
     @discardableResult
-    func insertStub(startedAtMs: Int64, savedURL: URL, extra: SnapshotExtraMeta, appBundleId: String?, appName: String?, thumbPath: String? = nil) -> Int64 {
+    func insertStub(startedAtMs: Int64, savedURL: URL, extra: SnapshotExtraMeta, appBundleId: String?, appName: String?, thumbPath: String? = nil, textRefId: Int64? = nil) -> Int64 {
         let id = (try? DB.shared.insertSnapshot(
             startedAtMs: startedAtMs,
             path: savedURL.path,
@@ -42,7 +42,8 @@ final class Indexer {
             height: extra.height,
             format: extra.format,
             hash64: extra.hash64,
-            thumbPath: thumbPath
+            thumbPath: thumbPath,
+            textRefId: textRefId
         )) ?? 0
         return id
     }

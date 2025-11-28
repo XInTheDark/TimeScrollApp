@@ -13,7 +13,13 @@ final class SettingsStore: ObservableObject {
     enum StorageFormat: String, CaseIterable, Identifiable { case hevc, heic, jpeg, png; var id: String { rawValue } }
     enum DisplayCaptureMode: String, CaseIterable, Identifiable { case first, all; var id: String { rawValue } }
 
-    @Published var ocrMode: OCRMode = .accurate { didSet { if !isLoading { save() } } }
+    enum TextProcessingMode: String, CaseIterable, Identifiable {
+        case ocr, accessibility, none
+        var id: String { rawValue }
+    }
+
+    @Published var textProcessingMode: TextProcessingMode = .ocr { didSet { if !isLoading { save() } } }
+    @Published var ocrMode: OCRMode = .fast { didSet { if !isLoading { save() } } }
     @Published var captureMinInterval: Double = 5.0 { didSet { if !isLoading { save() } } }
     @Published var fuzziness: Fuzziness = .low { didSet { if !isLoading { save() } } }
     @Published var retentionDays: Int = 30 { didSet { if !isLoading { save() } } }
@@ -48,6 +54,7 @@ final class SettingsStore: ObservableObject {
     @Published var showDockIcon: Bool = true { didSet { if !isLoading { save() } } }
     // Auto-start capture when app launches
     @Published var startRecordingOnStart: Bool = true { didSet { if !isLoading { save() } } }
+    @Published var onboardingCompleted: Bool = false { didSet { if !isLoading { save() } } }
 
     // Search behavior
     // When enabled, search tolerates common OCR character confusions (e.g., i↔l↔1, o↔0, rn↔m).
@@ -86,6 +93,13 @@ final class SettingsStore: ObservableObject {
     private func load() {
         logContext("load")
         isLoading = true
+        if let raw = defaults.string(forKey: "settings.textProcessingMode"),
+           let m = TextProcessingMode(rawValue: raw) {
+            textProcessingMode = m
+        } else {
+            textProcessingMode = .ocr
+        }
+        
         if let raw = defaults.string(forKey: "settings.ocrMode"), let v = OCRMode(rawValue: raw) { ocrMode = v }
         let interval = defaults.double(forKey: "settings.captureMinInterval")
         if interval > 0 { captureMinInterval = interval }
@@ -124,6 +138,7 @@ final class SettingsStore: ObservableObject {
         if defaults.object(forKey: "settings.startMinimized") != nil { startMinimized = defaults.bool(forKey: "settings.startMinimized") }
         if defaults.object(forKey: "settings.showDockIcon") != nil { showDockIcon = defaults.bool(forKey: "settings.showDockIcon") }
         if defaults.object(forKey: "settings.startRecordingOnStart") != nil { startRecordingOnStart = defaults.bool(forKey: "settings.startRecordingOnStart") }
+        if defaults.object(forKey: "settings.onboardingCompleted") != nil { onboardingCompleted = defaults.bool(forKey: "settings.onboardingCompleted") }
 
         // Privacy
         if let arr = defaults.array(forKey: "settings.blacklistBundleIds") as? [String] {
@@ -184,6 +199,7 @@ final class SettingsStore: ObservableObject {
 
     private func save() {
         print("[Prefs] Save invoked…")
+        defaults.set(textProcessingMode.rawValue, forKey: "settings.textProcessingMode")
         defaults.set(ocrMode.rawValue, forKey: "settings.ocrMode")
         defaults.set(captureMinInterval, forKey: "settings.captureMinInterval")
         defaults.set(fuzziness.rawValue, forKey: "settings.fuzziness")
@@ -211,6 +227,7 @@ final class SettingsStore: ObservableObject {
         defaults.set(startMinimized, forKey: "settings.startMinimized")
         defaults.set(showDockIcon, forKey: "settings.showDockIcon")
         defaults.set(startRecordingOnStart, forKey: "settings.startRecordingOnStart")
+        defaults.set(onboardingCompleted, forKey: "settings.onboardingCompleted")
 
         // Privacy
         defaults.set(blacklistBundleIds, forKey: "settings.blacklistBundleIds")

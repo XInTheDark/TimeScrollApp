@@ -155,6 +155,7 @@ final class FrameOutput: NSObject, SCStreamOutput {
     // Dedup/adaptive
     private var lastHash: UInt64?
     private var stableCount: Int = 0
+    private var lastCapturedText: (id: Int64, text: String)? // For accessibility text dedup
 
     // Thermal governance
     private var lastThermalState: ProcessInfo.ThermalState = .nominal
@@ -172,6 +173,26 @@ final class FrameOutput: NSObject, SCStreamOutput {
         case saved(url: URL, bytes: Int64, width: Int, height: Int, thumbPath: String?)
         case queuedWhileLocked
         case skippedWhileLocked
+    }
+
+    private func extractTextForSnapshot(pixelBuffer: CVPixelBuffer,
+                                        startedAtMs: Int64,
+                                        processing: SettingsStore.TextProcessingMode,
+                                        blacklistBundleIds: [String]) -> (text: String, boxes: [OCRLine]) {
+        switch processing {
+        case .ocr:
+            // Existing OCR path
+            if let result = try? self.runOCR(pixelBuffer) {
+                return (result.text, result.lines)
+            }
+            return ("", [])
+        case .accessibility:
+            let set = Set(blacklistBundleIds)
+            let text = AXTextExtractor.shared.collectText(blacklistBundleIds: set)
+            return (text, [])
+        case .none:
+            return ("", [])
+        }
     }
 
     private func persist(
@@ -196,7 +217,13 @@ final class FrameOutput: NSObject, SCStreamOutput {
                 HEVCVideoStore.shared.append(pixelBuffer: pixelBuffer, timestampMs: tsMs, encrypt: true)
                 let targetURL = HEVCVideoStore.shared.urlFor(timestampMs: tsMs, encrypt: true)
                 let bytes = (try? targetURL.resourceValues(forKeys: [.fileSizeKey]).fileSize).map { Int64($0) } ?? 0
-                let ocrResult = try self.runOCR(pixelBuffer)
+                let procRaw = UserDefaults.standard.string(forKey: "settings.textProcessingMode") ?? "ocr"
+                let proc = SettingsStore.TextProcessingMode(rawValue: procRaw) ?? .ocr
+                let blacklist = UserDefaults.standard.array(forKey: "settings.blacklistBundleIds") as? [String] ?? []
+                let extracted = extractTextForSnapshot(pixelBuffer: pixelBuffer,
+                                                       startedAtMs: tsMs,
+                                                       processing: proc,
+                                                       blacklistBundleIds: blacklist)
                 let thumb = self.makePosterThumbIfPossible(pixelBuffer: pixelBuffer, tsMs: tsMs, maxEdge: maxEdge, quality: quality, encrypt: true)
                 try IngestQueue.shared.enqueue(
                     path: targetURL,
@@ -208,8 +235,8 @@ final class FrameOutput: NSObject, SCStreamOutput {
                     height: height,
                     format: "hevc",
                     hash64: Int64(bitPattern: hash64),
-                    ocrText: ocrResult.text,
-                    ocrBoxes: ocrResult.lines,
+                    ocrText: extracted.text,
+                    ocrBoxes: extracted.boxes,
                     thumbPath: thumb
                 )
                 return .queuedWhileLocked
@@ -232,7 +259,13 @@ final class FrameOutput: NSObject, SCStreamOutput {
             if vaultOn && !unlocked {
                 guard allowWhileLocked else { return .skippedWhileLocked }
                 let encURL = try FileCrypter.shared.encryptSnapshot(encoded: encoded, timestampMs: tsMs)
-                let ocrResult = try self.runOCR(pixelBuffer)
+                let procRaw = UserDefaults.standard.string(forKey: "settings.textProcessingMode") ?? "ocr"
+                let proc = SettingsStore.TextProcessingMode(rawValue: procRaw) ?? .ocr
+                let blacklist = UserDefaults.standard.array(forKey: "settings.blacklistBundleIds") as? [String] ?? []
+                let extracted = extractTextForSnapshot(pixelBuffer: pixelBuffer,
+                                                       startedAtMs: tsMs,
+                                                       processing: proc,
+                                                       blacklistBundleIds: blacklist)
                 try IngestQueue.shared.enqueue(
                     path: encURL,
                     startedAtMs: tsMs,
@@ -243,8 +276,8 @@ final class FrameOutput: NSObject, SCStreamOutput {
                     height: encoded.height,
                     format: encoded.format,
                     hash64: Int64(bitPattern: hash64),
-                    ocrText: ocrResult.text,
-                    ocrBoxes: ocrResult.lines,
+                    ocrText: extracted.text,
+                    ocrBoxes: extracted.boxes,
                     thumbPath: nil
                 )
                 return .queuedWhileLocked
@@ -404,7 +437,58 @@ final class FrameOutput: NSObject, SCStreamOutput {
                     // Offload OCR to a dedicated serial queue; retain/release around the async call.
                     self.ocrQueue.async {
                         let pb2 = retainedPB.takeUnretainedValue()
-                        Indexer.shared.completeOCR(snapshotId: rowId, pixelBuffer: pb2)
+                        let modeRaw = UserDefaults.standard.string(forKey: "settings.textProcessingMode") ?? "ocr"
+                        let mode = SettingsStore.TextProcessingMode(rawValue: modeRaw) ?? .ocr
+                        switch mode {
+                        case .ocr:
+                            Indexer.shared.completeOCR(snapshotId: rowId, pixelBuffer: pb2)
+                        case .accessibility:
+                            let blacklist = UserDefaults.standard.array(forKey: "settings.blacklistBundleIds") as? [String] ?? []
+                            let text = AXTextExtractor.shared.collectText(blacklistBundleIds: Set(blacklist))
+                            
+                            // Dedup check
+                            var isDuplicate = false
+                            if let last = self.lastCapturedText {
+                                let sim = text.jaccardSimilarity(to: last.text)
+                                if sim > 0.9 {
+                                    if UserDefaults.standard.bool(forKey: "settings.debugMode") {
+                                        print("[Capture] Deduplicating text, similarity \(sim) > 0.9, refId=\(last.id)")
+                                    }
+                                    // Store reference to the ANCHOR snapshot
+                                    try? DB.shared.updateSnapshotTextRef(rowId: rowId, refId: last.id)
+                                    isDuplicate = true
+                                }
+                            }
+                            
+                            if !isDuplicate {
+                                // This is a new anchor
+                                self.lastCapturedText = (rowId, text)
+                                do {
+                                    try DB.shared.updateFTS(rowId: rowId, content: text)
+                                    // Produce embeddings if enabled (same as OCR)
+                                    let svc = EmbeddingService.shared
+                                    svc.reloadFromSettings()
+                                    let aiEnabled = UserDefaults.standard.bool(forKey: "settings.aiEmbeddingsEnabled")
+                                    if aiEnabled && svc.dim > 0 {
+                                        let (vec, known, total) = svc.embedWithStats(text, usage: .document)
+                                        if !vec.isEmpty {
+                                            try? DB.shared.upsertEmbedding(snapshotId: rowId,
+                                                                           dim: vec.count,
+                                                                           vec: vec,
+                                                                           provider: svc.providerID,
+                                                                           model: svc.modelID)
+                                            if UserDefaults.standard.bool(forKey: "settings.debugMode") {
+                                                print("[AI][Store] snapshotId=\(rowId) dim=\(vec.count) tokens=\(known)/\(total)")
+                                            }
+                                        }
+                                    }
+                                } catch {
+                                    // Swallow errors; debug log if needed
+                                }
+                            }
+                        case .none:
+                            break
+                        }
                         retainedPB.release()
                     }
                 }

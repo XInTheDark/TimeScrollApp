@@ -285,6 +285,9 @@ final class DB {
             if !columnExists("ts_snapshot", column: "thumb_path") {
                 _ = sqlite3_exec(db, "ALTER TABLE ts_snapshot ADD COLUMN thumb_path TEXT;", nil, nil, nil)
             }
+            if !columnExists("ts_snapshot", column: "text_ref_id") {
+                _ = sqlite3_exec(db, "ALTER TABLE ts_snapshot ADD COLUMN text_ref_id INTEGER;", nil, nil, nil)
+            }
         }
         if !tableExists("ts_ocr_boxes") {
             let sql = "CREATE TABLE ts_ocr_boxes (snapshot_id INTEGER NOT NULL, text TEXT NOT NULL, x REAL NOT NULL, y REAL NOT NULL, w REAL NOT NULL, h REAL NOT NULL);"
@@ -323,7 +326,8 @@ final class DB {
         height: Int? = nil,
         format: String? = nil,
         hash64: Int64? = nil,
-        thumbPath: String? = nil
+        thumbPath: String? = nil,
+        textRefId: Int64? = nil
     ) throws -> Int64 {
         try onQueueSync {
         try openIfNeeded()
@@ -331,8 +335,8 @@ final class DB {
         var stmt: OpaquePointer?
         defer { sqlite3_finalize(stmt) }
         let sql = """
-        INSERT INTO ts_snapshot(started_at_ms, path, app_bundle_id, app_name, bytes, width, height, format, hash64, thumb_path)
-        VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+        INSERT INTO ts_snapshot(started_at_ms, path, app_bundle_id, app_name, bytes, width, height, format, hash64, thumb_path, text_ref_id)
+        VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
         """
         if sqlite3_prepare_v2(db, sql, -1, &stmt, nil) != SQLITE_OK {
             throw NSError(domain: "TS.DB", code: 4)
@@ -347,6 +351,7 @@ final class DB {
         if let v = format { sqlite3_bind_text(stmt, 8, v, -1, SQLITE_TRANSIENT) } else { sqlite3_bind_null(stmt, 8) }
         if let v = hash64 { sqlite3_bind_int64(stmt, 9, v) } else { sqlite3_bind_null(stmt, 9) }
         if let v = thumbPath { sqlite3_bind_text(stmt, 10, v, -1, SQLITE_TRANSIENT) } else { sqlite3_bind_null(stmt, 10) }
+        if let v = textRefId { sqlite3_bind_int64(stmt, 11, v) } else { sqlite3_bind_null(stmt, 11) }
         if sqlite3_step(stmt) != SQLITE_DONE { throw NSError(domain: "TS.DB", code: 5) }
         let rowId = sqlite3_last_insert_rowid(db)
         var tstmt: OpaquePointer?
@@ -778,6 +783,37 @@ final class DB {
     func textContent(snapshotId: Int64) throws -> String? {
         try onQueueSync {
             try openIfNeeded(); guard let db = db else { return nil }
+            
+            // Check for reference first
+            var refStmt: OpaquePointer?
+            if sqlite3_prepare_v2(db, "SELECT text_ref_id FROM ts_snapshot WHERE id=? LIMIT 1;", -1, &refStmt, nil) == SQLITE_OK {
+                sqlite3_bind_int64(refStmt, 1, snapshotId)
+                if sqlite3_step(refStmt) == SQLITE_ROW {
+                    let refId = sqlite3_column_int64(refStmt, 0)
+                    if refId > 0 {
+                        sqlite3_finalize(refStmt)
+                        // Recursively fetch content from the referenced snapshot
+                        // Note: To avoid infinite recursion in case of cycles (though unlikely), we could limit depth,
+                        // but for now we assume DAG.
+                        // We can't easily recurse inside onQueueSync because it's not reentrant if we call public method.
+                        // But we are inside the closure, so we can't call `textContent` which calls `onQueueSync`.
+                        // We need a private helper or just duplicate logic.
+                        // Let's just fetch from ts_text for the refId here.
+                        var refTextStmt: OpaquePointer?
+                        defer { sqlite3_finalize(refTextStmt) }
+                        let sql = "SELECT content FROM ts_text WHERE rowid=? LIMIT 1;"
+                        if sqlite3_prepare_v2(db, sql, -1, &refTextStmt, nil) == SQLITE_OK {
+                            sqlite3_bind_int64(refTextStmt, 1, refId)
+                            if sqlite3_step(refTextStmt) == SQLITE_ROW, let c = sqlite3_column_text(refTextStmt, 0) {
+                                return String(cString: c)
+                            }
+                        }
+                        return nil
+                    }
+                }
+            }
+            sqlite3_finalize(refStmt)
+
             var stmt: OpaquePointer?; defer { sqlite3_finalize(stmt) }
             let sql = "SELECT content FROM ts_text WHERE rowid=? LIMIT 1;"
             guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return nil }
@@ -786,6 +822,20 @@ final class DB {
                 return String(cString: c)
             }
             return nil
+        }
+    }
+
+    func updateSnapshotTextRef(rowId: Int64, refId: Int64) throws {
+        try onQueueSync {
+            try openIfNeeded()
+            guard let db = db else { return }
+            var stmt: OpaquePointer?
+            defer { sqlite3_finalize(stmt) }
+            let sql = "UPDATE ts_snapshot SET text_ref_id=? WHERE id=?;"
+            if sqlite3_prepare_v2(db, sql, -1, &stmt, nil) != SQLITE_OK { throw NSError(domain: "TS.DB", code: 200) }
+            sqlite3_bind_int64(stmt, 1, refId)
+            sqlite3_bind_int64(stmt, 2, rowId)
+            if sqlite3_step(stmt) != SQLITE_DONE { throw NSError(domain: "TS.DB", code: 201) }
         }
     }
 
@@ -1180,6 +1230,31 @@ final class DB {
                     _ = sqlite3_step(upd)
                 }
             }
+        }
+    }
+
+    /// Close all open usage sessions using the last snapshot timestamp as the end time.
+    /// This provides accurate bounds: the session ran at least until the last captured snapshot.
+    /// If no snapshots exist for a session, end_s = start_s (0 duration, conservative).
+    func closeAllOpenUsageSessions() {
+        _ = try? onQueueSync {
+            try openIfNeeded(); guard let db = db else { return }
+            // Use a single UPDATE with a correlated subquery for efficiency:
+            // Set end_s to the latest snapshot time (in seconds) that occurred after session start,
+            // or fall back to start_s if no snapshots exist.
+            let sql = """
+            UPDATE ts_usage_session
+            SET end_s = COALESCE(
+                (SELECT MAX(started_at_ms) / 1000.0
+                 FROM ts_snapshot
+                 WHERE started_at_ms >= ts_usage_session.start_s * 1000),
+                start_s
+            )
+            WHERE end_s IS NULL;
+            """
+            var stmt: OpaquePointer?; defer { sqlite3_finalize(stmt) }
+            if sqlite3_prepare_v2(db, sql, -1, &stmt, nil) != SQLITE_OK { return }
+            _ = sqlite3_step(stmt)
         }
     }
 

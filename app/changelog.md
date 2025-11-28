@@ -1,3 +1,18 @@
+# alpha.13 - 2025-11-28
+
+## New
+- **Accessibility-based text capture mode** (optional). TimeScroll can now read on-screen text directly via macOS Accessibility, significantly reducing energy compared to OCR. Enable under Preferences → General → Text processing. When first enabled, grant Accessibility permission in System Settings → Privacy & Security → Accessibility.
+
+---
+
+# alpha.12 - 2025-11-26
+
+## Fixed
+- Fixed app builds
+- Fixed performance for EmbeddingGemma and other embedding models
+
+---
+
 # alpha.11.10 - 2025-11-26
 
 Fix app builds.

@@ -8,22 +8,24 @@ final class UsageTracker {
 
     private let lock = NSLock()
     private var currentSessionId: Int64?
-    private let maxOpenSeconds: TimeInterval = 12 * 3600
     // If capture starts while DB is unavailable (e.g. vault locked), defer creating a session
     // until the vault is unlocked so usage time is not lost.
     private var pendingStartTime: TimeInterval?
 
-    private func finalizeStaleOpenSessionsIfNeeded() {
-        if !staleFinalized {
-            DB.shared.finalizeStaleOpenUsageSessions(maxOpenSeconds: maxOpenSeconds, now: Date().timeIntervalSince1970)
-            staleFinalized = true
+    private func closeOrphanedSessionsIfNeeded() {
+        if !orphanedSessionsClosed {
+            // Close ALL open sessions from previous runs to prevent usage time inflation.
+            // Sessions left open (e.g., from crashes or force quits) would otherwise count
+            // time from their start all the way to now, even if the app wasn't running.
+            DB.shared.closeAllOpenUsageSessions()
+            orphanedSessionsClosed = true
         }
     }
-    private var staleFinalized: Bool = false
+    private var orphanedSessionsClosed: Bool = false
 
     // MARK: - Public API
     func captureStarted() {
-        finalizeStaleOpenSessionsIfNeeded()
+        closeOrphanedSessionsIfNeeded()
         lock.lock(); defer { lock.unlock() }
         if currentSessionId != nil { return }
         let now = Date().timeIntervalSince1970
@@ -51,12 +53,12 @@ final class UsageTracker {
     func appWillTerminate() { captureStopped() }
 
     func totalSeconds(now: TimeInterval = Date().timeIntervalSince1970) -> TimeInterval {
-        finalizeStaleOpenSessionsIfNeeded()
+        closeOrphanedSessionsIfNeeded()
         return (try? DB.shared.totalUsageSeconds(now: now)) ?? 0
     }
 
     func secondsLast24h(now: TimeInterval = Date().timeIntervalSince1970) -> TimeInterval {
-        finalizeStaleOpenSessionsIfNeeded()
+        closeOrphanedSessionsIfNeeded()
         let cutoff = now - 86400
         return (try? DB.shared.usageSecondsSince(cutoff: cutoff, now: now)) ?? 0
     }

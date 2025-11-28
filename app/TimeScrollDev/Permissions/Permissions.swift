@@ -1,17 +1,35 @@
 import Foundation
 import CoreGraphics
 import AppKit
+import ApplicationServices
 
 enum Permissions {
     enum PrivacyPane {
         case screenRecording
+        case accessibility
 
         var url: URL? {
             switch self {
             case .screenRecording:
                 return URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture")
+            case .accessibility:
+                return URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")
             }
         }
+    }
+
+    static func isAccessibilityGranted() -> Bool {
+        // Fast check (no prompt)
+        return AXIsProcessTrusted()
+    }
+
+    /// Triggers the system prompt to grant Accessibility access; also opens Settings.
+    static func requestAccessibility() {
+        let key = kAXTrustedCheckOptionPrompt.takeRetainedValue() as String
+        let opts: NSDictionary = [key: true] // prompt asynchronously
+        _ = AXIsProcessTrustedWithOptions(opts)
+        // Open pane to help user complete trust
+        _ = open(.accessibility)
     }
 
     static func isScreenRecordingGranted() -> Bool {

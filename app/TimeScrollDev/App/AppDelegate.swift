@@ -101,8 +101,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Use a square status item and a template-size symbol to avoid oversize frames
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         if let btn = item.button {
+            // Initial icon - will be updated by updateStatusItemIcon() when capture state is known
             let symbol = NSImage(systemSymbolName: "camera.aperture", accessibilityDescription: "TimeScroll")
-                ?? NSImage(systemSymbolName: "record.circle", accessibilityDescription: "TimeScroll")
             if let img = symbol {
                 img.isTemplate = true
                 btn.image = img
@@ -294,6 +294,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Rebuild the menu to refresh dynamic items
         statusItem?.menu = buildMenu()
         statusItem?.button?.appearsDisabled = false
+        updateStatusItemIcon()
+    }
+
+    private func updateStatusItemIcon() {
+        guard let btn = statusItem?.button else { return }
+        let isCapturing = AppState.shared.isCapturing
+        let symbolName = isCapturing ? "record.circle.fill" : "camera.aperture"
+        let symbol = NSImage(systemSymbolName: symbolName, accessibilityDescription: "TimeScroll")
+        if let img = symbol {
+            img.isTemplate = true
+            btn.image = img
+        }
     }
 
     // MARK: - Dock icon policy
@@ -370,7 +382,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             alert.runModal()
             #endif
         }
-        updateNotiTokens.append(contentsOf: [t1, t2])
+        let t3 = nc.addObserver(forName: NSNotification.Name("ShowOnboarding"), object: nil, queue: .main) { [weak self] _ in
+            Task { @MainActor in
+                self?.showOnboardingWindow()
+            }
+        }
+        updateNotiTokens.append(contentsOf: [t1, t2, t3])
     }
 
     // MARK: - Sleep/Wake handling

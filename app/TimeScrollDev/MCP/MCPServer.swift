@@ -150,19 +150,24 @@ final class MCPServer {
 
             // Build content[] with a per-row text item (stringified JSON) followed
             // optionally by an image item for that row.
+            // Helper to encode string to JSON literal (with quotes)
+            let enc = JSONEncoder()
+            func jsonStr(_ s: String) -> String {
+                guard let d = try? enc.encode(s) else { return "\"\"" }
+                return String(data: d, encoding: .utf8) ?? "\"\""
+            }
+
             var content: [AnyEncodable] = []
             for r in rows {
                 let willHaveImage = a.includeImages && (r.imagePNG != nil)
 
-                let rowObj: [String: Any] = [
-                    "time": r.timeISO8601,
-                    "app": r.app,
-                    "ocr_text": r.ocrText,
-                    "has_image": willHaveImage
-                ]
+                let t = jsonStr(r.timeISO8601)
+                let a = jsonStr(r.app)
+                let o = jsonStr(r.ocrText)
+                let i = willHaveImage ? "true" : "false"
 
-                let rowData = try JSONSerialization.data(withJSONObject: rowObj, options: [])
-                let rowJSON = String(data: rowData, encoding: .utf8) ?? "{}"
+                // Enforce order: time, app, ocr_text, has_image
+                let rowJSON = "{\"time\":\(t),\"app\":\(a),\"ocr_text\":\(o),\"has_image\":\(i)}"
 
                 // Text entry contains the stringified JSON for the row
                 content.append(AnyEncodable(["type": "text", "text": rowJSON]))
@@ -176,7 +181,7 @@ final class MCPServer {
                 }
             }
 
-            let resp = ToolCallResult(content: content.isEmpty ? nil : content, isError: nil)
+            let resp = ToolCallResult(content: content, isError: nil)
             sendJSON(RPCResponse(id: id, result: resp))
             MCPFileLogger.log("search done id=\(id) results=\(rows.count) time=\(dt)")
         } catch {

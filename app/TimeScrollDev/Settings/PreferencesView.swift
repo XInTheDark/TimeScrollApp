@@ -31,6 +31,7 @@ struct PreferencesView: View {
     }
 }
 
+@MainActor
 private struct SecurityPane: View {
     @ObservedObject var settings: SettingsStore
     @State private var availableOllamaModels: [String] = []
@@ -131,6 +132,7 @@ private struct SecurityPane: View {
     }
 }
 
+@MainActor
 private struct VaultOnboardingSheet: View {
     var onCancel: () -> Void
     var onContinue: (_ dontShowAgain: Bool) -> Void
@@ -172,6 +174,7 @@ private struct VaultOnboardingSheet: View {
     }
 }
 
+@MainActor
 private struct VaultDisableConfirmSheet: View {
     var onCancel: () -> Void
     var onContinue: () -> Void
@@ -198,14 +201,44 @@ private struct VaultDisableConfirmSheet: View {
                     .keyboardShortcut(.defaultAction)
             }
         }
+
+        .padding(18)
+        .frame(minWidth: 520)
+    }
+}
+
+@MainActor
+private struct AccessibilityPermissionSheet: View {
+    var onCancel: () -> Void
+    var onContinue: () -> Void
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(spacing: 8) {
+                Image(systemName: "hand.tap").font(.system(size: 28))
+                Text("Enable Accessibility Access").font(.title3).bold()
+            }
+            Text("TimeScroll can read on‑screen text via macOS Accessibility. This uses much less energy than OCR.")
+                .font(.headline)
+            VStack(alignment: .leading, spacing: 8) {
+                Label("Open System Settings → Privacy & Security → Accessibility and allow TimeScroll.", systemImage: "gearshape")
+                Label("After granting, click Recheck in Preferences or switch Processing mode again.", systemImage: "checkmark.circle")
+            }
+            HStack {
+                Spacer()
+                Button("Cancel") { onCancel() }
+                Button("Open Settings") { onContinue() }.keyboardShortcut(.defaultAction)
+            }
+        }
         .padding(18)
         .frame(minWidth: 520)
     }
 }
 
 
+@MainActor
 private struct GeneralPane: View {
     @ObservedObject var settings: SettingsStore
+    @State private var showAccessibilityPrompt = false
     var body: some View {
         Form {
             Section(header: Text("App")) {
@@ -219,21 +252,44 @@ private struct GeneralPane: View {
                         }
                     }
             }
-            Section(header: Text("OCR")) {
-                LabeledContent("Recognition mode") {
-                    Picker("", selection: $settings.ocrMode) {
-                        ForEach(SettingsStore.OCRMode.allCases) { m in
-                            Text(m.rawValue.capitalized).tag(m)
-                        }
+            Section(header: Text("Text processing")) {
+                LabeledContent("Text processing mode") {
+                    Picker("", selection: $settings.textProcessingMode) {
+                        Text("OCR").tag(SettingsStore.TextProcessingMode.ocr)
+                        Text("Accessibility").tag(SettingsStore.TextProcessingMode.accessibility)
+                        Text("None").tag(SettingsStore.TextProcessingMode.none)
                     }
                     .labelsHidden()
                     .pickerStyle(.segmented)
-                    .frame(maxWidth: 240)
+                    .frame(maxWidth: 300)
+                    .onChange(of: settings.textProcessingMode) { newVal in
+                        if newVal == .accessibility && !Permissions.isAccessibilityGranted() {
+                            // Present sheet prompting to grant Accessibility
+                            showAccessibilityPrompt = true
+                        }
+                    }
                 }
 
-                Text("OCR is used for text search. With Fast mode, the results will probably be messy.")
-                    .font(.footnote)
-                    .foregroundColor(.secondary)
+                if settings.textProcessingMode == .ocr {
+                    LabeledContent("OCR recognition mode") {
+                        Picker("", selection: $settings.ocrMode) {
+                            ForEach(SettingsStore.OCRMode.allCases) { m in
+                                Text(m.rawValue.capitalized).tag(m)
+                            }
+                        }
+                        .labelsHidden()
+                        .pickerStyle(.segmented)
+                        .frame(maxWidth: 240)
+                    }
+                }
+            }
+            .sheet(isPresented: $showAccessibilityPrompt) {
+                AccessibilityPermissionSheet(
+                    onCancel: { showAccessibilityPrompt = false; settings.textProcessingMode = .ocr },
+                    onContinue: {
+                        Permissions.requestAccessibility()
+                        showAccessibilityPrompt = false
+                    })
             }
             Section(header: Text("Capture")) {
                 LabeledContent("Min interval") {
@@ -284,6 +340,13 @@ private struct GeneralPane: View {
                     if settings.adaptiveMaxInterval < newVal { settings.adaptiveMaxInterval = newVal }
                 }
             }
+            Section(header: Text("Others")) {
+                Button("Show Onboarding") {
+                    settings.onboardingCompleted = false
+                    // Trigger the onboarding window via notification
+                    NotificationCenter.default.post(name: NSNotification.Name("ShowOnboarding"), object: nil)
+                }
+            }
         }
         .formStyle(.grouped)
     }
@@ -330,6 +393,7 @@ private struct GeneralPane: View {
     }
 }
 
+@MainActor
 private struct SearchPane: View {
     @ObservedObject var settings: SettingsStore
     @State private var isInstallingModel = false
@@ -509,6 +573,7 @@ extension SearchPane {
 }
 
 
+@MainActor
 private struct StatsPane: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -517,6 +582,7 @@ private struct StatsPane: View {
     }
 }
 
+@MainActor
 private struct MCPSettingsPane: View {
     @AppStorage("settings.mcpEnabled") private var persistedEnabled: Bool = false
     @State private var showMigrationPrompt: Bool = false
@@ -587,6 +653,7 @@ private struct MCPSettingsPane: View {
     }
 }
 
+@MainActor
 private struct MCPMigrationConfirmSheet: View {
     var onCancel: () -> Void
     var onContinue: () -> Void
@@ -620,6 +687,7 @@ private struct MCPMigrationConfirmSheet: View {
     }
 }
 
+@MainActor
 private struct StoragePane: View {
     @ObservedObject var settings: SettingsStore
     @State private var showResetConfirm: Bool = false

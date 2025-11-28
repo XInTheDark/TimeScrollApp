@@ -1,7 +1,28 @@
+# alpha.13.2 - 2025-11-28
+
+No functional change, fixed release script.
+
+---
+
+# alpha.13.1 - 2025-11-28
+
+Small fix in the release script, no functional change.
+
+---
+
 # alpha.13 - 2025-11-28
 
 ## New
-- **Accessibility-based text capture mode** (optional). TimeScroll can now read on-screen text directly via macOS Accessibility, significantly reducing energy compared to OCR. Enable under Preferences → General → Text processing. When first enabled, grant Accessibility permission in System Settings → Privacy & Security → Accessibility.
+- **Accessibility-based text capture mode**. TimeScroll can now read on-screen text directly via macOS Accessibility, significantly reducing energy usage compared to OCR. Enable it under Preferences → General → Text processing.
+- **New onboarding experience**. A fresh, redesigned onboarding flow to guide you through the setup process.
+
+## Improved
+- **Storage efficiency**. Added text deduplication to optimize database size.
+
+## Fixed
+- Fixed menu bar behavior.
+- Fixed accuracy of usage statistics.
+- General stability improvements.
 
 ---
 

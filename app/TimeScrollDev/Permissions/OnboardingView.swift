@@ -6,7 +6,7 @@ struct OnboardingView: View {
   @State private var currentStep = 0
 
   // Step 0: Capture mode
-  @State private var useDirectMode = false  // false = OCR (standard), true = AX (direct)
+  @State private var useDirectMode = true  // false = OCR (legacy), true = AX (direct)
 
   // Step 1: Vault
   @State private var enableVault = false
@@ -112,20 +112,20 @@ struct OnboardingView: View {
   private var captureModeStep: some View {
     VStack(spacing: 12) {
       OptionCard(
-        icon: "doc.text.viewfinder",
-        title: "Standard Mode",
-        description: "Uses OCR to extract text from screenshots. Works with all apps and content.",
-        isSelected: !useDirectMode
-      )
-      .onTapGesture { useDirectMode = false }
-
-      OptionCard(
         icon: "accessibility",
         title: "Direct Mode",
-        description: "(Experimental) Uses Accessibility API to read text directly. Much lower energy usage, but may not work with all apps.",
+        description: "Uses Accessibility API to read text directly. Much lower energy usage, but may rarely fail with some apps.",
         isSelected: useDirectMode
       )
       .onTapGesture { useDirectMode = true }
+
+      OptionCard(
+        icon: "doc.text.viewfinder",
+        title: "Legacy Mode",
+        description: "Uses OCR to extract text from screenshots. Works with all apps and content, but uses significant energy.",
+        isSelected: !useDirectMode
+      )
+      .onTapGesture { useDirectMode = false }
     }
   }
 

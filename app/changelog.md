@@ -1,3 +1,13 @@
+# alpha.14 - 2025-11-29
+
+## Improved
+- Improved contrast of navigation controls
+
+## Changed
+- Made Direct processing mode the default for new users
+
+---
+
 # alpha.13.2 - 2025-11-28
 
 No functional change, fixed release script.

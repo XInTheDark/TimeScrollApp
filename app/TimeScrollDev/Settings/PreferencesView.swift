@@ -255,8 +255,8 @@ private struct GeneralPane: View {
             Section(header: Text("Text processing")) {
                 LabeledContent("Text processing mode") {
                     Picker("", selection: $settings.textProcessingMode) {
-                        Text("OCR").tag(SettingsStore.TextProcessingMode.ocr)
-                        Text("Accessibility").tag(SettingsStore.TextProcessingMode.accessibility)
+                        Text("Direct").tag(SettingsStore.TextProcessingMode.accessibility)
+                        Text("Legacy (OCR)").tag(SettingsStore.TextProcessingMode.ocr)
                         Text("None").tag(SettingsStore.TextProcessingMode.none)
                     }
                     .labelsHidden()

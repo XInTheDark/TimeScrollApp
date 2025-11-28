@@ -46,7 +46,7 @@ struct SnapshotStageView: View {
 
             // Center overlay with prev/time/next
             if model.selected != nil {
-                CenterOverlay(model: model)
+                CenterOverlay(model: model, nsImage: nsImage)
                     .allowsHitTesting(true)
             }
 
@@ -412,39 +412,89 @@ private struct DebugOverlay: View {
 
 private struct CenterOverlay: View {
     @ObservedObject var model: TimelineModel
+    var nsImage: NSImage?
     @State private var dragStartX: Double = 0
     @State private var dragStartY: Double = 0
+
+    /// Computes average brightness of the center region of the image (0.0 = dark, 1.0 = bright)
+    private var centerBrightness: CGFloat {
+        guard let image = nsImage,
+              let cgImage = image.cgImage(forProposedRect: nil, context: nil, hints: nil) else {
+            return 0.5 // Default to middle brightness if no image
+        }
+        let w = cgImage.width
+        let h = cgImage.height
+        // Sample a central region (middle 30% of the image)
+        let sampleW = max(1, w / 3)
+        let sampleH = max(1, h / 6) // Just a strip in the vertical center
+        let sampleX = (w - sampleW) / 2
+        let sampleY = (h - sampleH) / 2
+        let sampleRect = CGRect(x: sampleX, y: sampleY, width: sampleW, height: sampleH)
+        guard let cropped = cgImage.cropping(to: sampleRect) else { return 0.5 }
+        // Create a small bitmap to sample
+        let pixelW = min(cropped.width, 100)
+        let pixelH = min(cropped.height, 50)
+        let bytesPerPixel = 4
+        let bytesPerRow = bytesPerPixel * pixelW
+        var pixelData = [UInt8](repeating: 0, count: bytesPerRow * pixelH)
+        guard let context = CGContext(
+            data: &pixelData,
+            width: pixelW,
+            height: pixelH,
+            bitsPerComponent: 8,
+            bytesPerRow: bytesPerRow,
+            space: CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+        ) else { return 0.5 }
+        context.draw(cropped, in: CGRect(x: 0, y: 0, width: pixelW, height: pixelH))
+        // Calculate average luminance
+        var totalLuminance: Double = 0
+        let pixelCount = pixelW * pixelH
+        for i in 0..<pixelCount {
+            let offset = i * bytesPerPixel
+            let r = Double(pixelData[offset]) / 255.0
+            let g = Double(pixelData[offset + 1]) / 255.0
+            let b = Double(pixelData[offset + 2]) / 255.0
+            // Relative luminance formula
+            totalLuminance += 0.299 * r + 0.587 * g + 0.114 * b
+        }
+        return CGFloat(totalLuminance / Double(pixelCount))
+    }
+
+    /// True if background is light (needs dark controls)
+    private var isLightBackground: Bool {
+        centerBrightness > 0.6
+    }
+
     var body: some View {
+        let containerBg: Color = isLightBackground ? Color.black.opacity(0.5) : Color.white.opacity(0.15)
+
         HStack(spacing: 12) {
             Button(action: { model.prev() }) {
                 Image(systemName: "chevron.left.circle.fill")
                     .font(.system(size: 28))
-                    .foregroundColor(.primary.opacity(model.selectedIndex + 1 < model.metas.count ? 0.95 : 0.35))
-                    .shadow(color: Color.black.opacity(0.2), radius: 2, x: 0, y: 1)
+                    .foregroundColor(.white.opacity(model.selectedIndex + 1 < model.metas.count ? 0.95 : 0.35))
             }
             .buttonStyle(.plain)
             .disabled(!(model.selectedIndex + 1 < model.metas.count))
 
             Text(model.selected.map { Self.df.string(from: Date(timeIntervalSince1970: TimeInterval($0.startedAtMs)/1000)) } ?? "")
                 .font(.system(size: 16, weight: .medium, design: .monospaced))
-                .padding(.horizontal, 8)
-                .padding(.vertical, 4)
-                .background(Color.black.opacity(0.25))
-                .cornerRadius(6)
                 .foregroundColor(.white)
-                .shadow(radius: 2)
 
             Button(action: { model.next() }) {
                 Image(systemName: "chevron.right.circle.fill")
                     .font(.system(size: 28))
-                    .foregroundColor(.primary.opacity(model.selectedIndex - 1 >= 0 ? 0.95 : 0.35))
-                    .shadow(color: Color.black.opacity(0.2), radius: 2, x: 0, y: 1)
+                    .foregroundColor(.white.opacity(model.selectedIndex - 1 >= 0 ? 0.95 : 0.35))
             }
             .buttonStyle(.plain)
             .disabled(!(model.selectedIndex - 1 >= 0))
         }
-        .padding(8)
-        .background(Color.clear)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .background(containerBg)
+        .cornerRadius(20)
+        .shadow(color: Color.black.opacity(0.3), radius: 4, x: 0, y: 2)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
         .offset(x: model.overlayOffsetX, y: model.overlayOffsetY)
         .gesture(DragGesture(minimumDistance: 0)

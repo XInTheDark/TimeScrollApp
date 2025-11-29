@@ -1,3 +1,9 @@
+# alpha.16.2 - 2025-11-29
+
+Fix app signing again
+
+---
+
 # alpha.16 - 2025-11-29
 
 ## Fixed

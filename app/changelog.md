@@ -1,13 +1,6 @@
-# alpha.16.2 - 2025-11-29
+# alpha.16.3 - 2025-11-29
 
-Fix app signing again
-
----
-
-# alpha.16 - 2025-11-29
-
-## Fixed
-Fixed the app not launching. It was caused by a code signing issue in the build script.
+Hopefully fixed app not launching
 
 ---
 

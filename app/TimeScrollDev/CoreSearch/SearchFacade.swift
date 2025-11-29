@@ -129,24 +129,25 @@ public final class SearchFacade {
 
         // Resolve fuzziness enum (default .low)
         let fuzz: SettingsStore.Fuzziness = SettingsStore.Fuzziness(rawValue: prefs.fuzzinessRaw) ?? .low
+        let ia = prefs.intelligentAccuracy
 
-        // Fetch using main-actor isolated SearchService
-        let rows: [SearchResult] = await MainActor.run { () -> [SearchResult] in
-            let search = SearchService()
-            if trimmed.isEmpty {
-                return search.latestWithContent(limit: limit, offset: 0,
-                                                appBundleIds: appIds,
-                                                startMs: a.startMs, endMs: a.endMs)
-            } else if !a.textOnly, prefs.aiEmbeddingsEnabled, EmbeddingService.shared.dim > 0 {
-                return search.searchAI(trimmed, appBundleIds: appIds,
-                                       startMs: a.startMs, endMs: a.endMs,
-                                       limit: limit, offset: 0)
-            } else {
-                return search.searchWithContent(trimmed, fuzziness: fuzz,
-                                                appBundleIds: appIds,
-                                                startMs: a.startMs, endMs: a.endMs,
-                                                limit: limit, offset: 0)
-            }
+        // Fetch using SearchService (can run on any thread)
+        let search = SearchService()
+        let rows: [SearchResult]
+        if trimmed.isEmpty {
+            rows = search.latestWithContent(limit: limit, offset: 0,
+                                            appBundleIds: appIds,
+                                            startMs: a.startMs, endMs: a.endMs)
+        } else if !a.textOnly, prefs.aiEmbeddingsEnabled, EmbeddingService.shared.dim > 0 {
+            rows = search.searchAI(trimmed, appBundleIds: appIds,
+                                   startMs: a.startMs, endMs: a.endMs,
+                                   limit: limit, offset: 0)
+        } else {
+            rows = search.searchWithContent(trimmed, fuzziness: fuzz,
+                                            intelligentAccuracy: ia,
+                                            appBundleIds: appIds,
+                                            startMs: a.startMs, endMs: a.endMs,
+                                            limit: limit, offset: 0)
         }
 
         return rows.map { r in

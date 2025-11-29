@@ -1,3 +1,12 @@
+# alpha.15 - 2025-11-29
+
+## Fixed
+- Fixed the app freezing when searching
+- Fixed some image thumbnails not loading in search
+- Fixed some navigation issues
+
+---
+
 # alpha.14 - 2025-11-29
 
 ## Improved

@@ -1,6 +1,5 @@
 import Foundation
 
-@MainActor
 final class SearchService {
     // Build per-part FTS query fragments from a user query. Each returned string is intended
     // to be bound to an individual "t.content MATCH ?" and AND-combined at the SQL level.
@@ -71,21 +70,20 @@ final class SearchService {
 
     // Build a legacy single-string preview honoring fuzziness & phrase rules.
     // Note: the actual DB layer uses per-part MATCH bindings; this joined string is for tests/logging.
-    func ftsQuery(for query: String, fuzziness: SettingsStore.Fuzziness) -> String {
-        let ia = SettingsStore.shared.intelligentAccuracy
-        let parts = ftsParts(for: query, fuzziness: fuzziness, intelligentAccuracy: ia)
+    func ftsQuery(for query: String, fuzziness: SettingsStore.Fuzziness, intelligentAccuracy: Bool) -> String {
+        let parts = ftsParts(for: query, fuzziness: fuzziness, intelligentAccuracy: intelligentAccuracy)
         return parts.joined(separator: " AND ")
     }
 
     func searchMetas(_ query: String,
                      fuzziness: SettingsStore.Fuzziness,
+                     intelligentAccuracy: Bool,
                      appBundleIds: [String]? = nil,
                      startMs: Int64? = nil,
                      endMs: Int64? = nil,
                      limit: Int = 1000,
                      offset: Int = 0) -> [SnapshotMeta] {
-        let ia = SettingsStore.shared.intelligentAccuracy
-        let parts = ftsParts(for: query, fuzziness: fuzziness, intelligentAccuracy: ia)
+        let parts = ftsParts(for: query, fuzziness: fuzziness, intelligentAccuracy: intelligentAccuracy)
         return (try? DB.shared.searchMetas(parts,
                                            appBundleIds: appBundleIds,
                                            startMs: startMs,
@@ -109,13 +107,13 @@ final class SearchService {
 
     func searchWithContent(_ query: String,
                            fuzziness: SettingsStore.Fuzziness,
+                           intelligentAccuracy: Bool,
                            appBundleIds: [String]?,
                            startMs: Int64?,
                            endMs: Int64?,
                            limit: Int,
                            offset: Int) -> [SearchResult] {
-        let ia = SettingsStore.shared.intelligentAccuracy
-        let parts = ftsParts(for: query, fuzziness: fuzziness, intelligentAccuracy: ia)
+        let parts = ftsParts(for: query, fuzziness: fuzziness, intelligentAccuracy: intelligentAccuracy)
         // Delegate to DB's unified implementation via its content variant wrapper
         return (try? DB.shared.searchWithContent(parts,
                                                  appBundleIds: appBundleIds,

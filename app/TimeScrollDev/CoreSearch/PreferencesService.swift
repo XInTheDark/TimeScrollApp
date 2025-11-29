@@ -13,4 +13,8 @@ public final class PreferencesService {
     public var fuzzinessRaw: String {
         return d.string(forKey: "settings.fuzziness") ?? "low"
     }
+
+    public var intelligentAccuracy: Bool {
+        return (d.object(forKey: "settings.intelligentAccuracy") != nil) ? d.bool(forKey: "settings.intelligentAccuracy") : true
+    }
 }

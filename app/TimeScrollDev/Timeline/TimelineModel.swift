@@ -28,7 +28,6 @@ final class TimelineModel: ObservableObject {
     // Loading state for timeline fetch
     @Published var isLoading: Bool = false
 
-    private let search = SearchService()
     private var timesAsc: [Int64] = []
 
     var minTimeMs: Int64 { metas.last?.startedAtMs ?? 0 }
@@ -47,41 +46,60 @@ final class TimelineModel: ObservableObject {
         // Allow UI to update and show the spinner
         Task { @MainActor in await Task.yield() }
 
+        // Capture inputs on the main actor; background work must not touch main-actor singletons.
         let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        let previousSelectedId = selected?.id
         let settings = SettingsStore.shared
         let useAI = settings.aiEmbeddingsEnabled && settings.aiModeOn && EmbeddingService.shared.dim > 0
+        let ia = settings.intelligentAccuracy
         let fuzz = settings.fuzziness
         let appIds = selectedAppBundleIds.isEmpty ? nil : Array(selectedAppBundleIds)
+        let start = startMs
+        let end = endMs
+        DispatchQueue.global(qos: .userInitiated).async { [limit, trimmed, appIds, start, end, useAI, fuzz, ia] in
+            let searchSvc = SearchService()
+            let list: [SnapshotMeta]
+            if trimmed.isEmpty {
+                list = searchSvc.latestMetas(limit: limit,
+                                             appBundleIds: appIds,
+                                             startMs: start,
+                                             endMs: end)
+            } else if useAI {
+                list = searchSvc.searchAIMetas(trimmed,
+                                               appBundleIds: appIds,
+                                               startMs: start,
+                                               endMs: end,
+                                               limit: limit)
+            } else {
+                list = searchSvc.searchMetas(trimmed,
+                                             fuzziness: fuzz,
+                                             intelligentAccuracy: ia,
+                                             appBundleIds: appIds,
+                                             startMs: start,
+                                             endMs: end,
+                                             limit: limit)
+            }
 
-        let list: [SnapshotMeta]
-        if trimmed.isEmpty {
-            list = search.latestMetas(limit: limit,
-                                      appBundleIds: appIds,
-                                      startMs: startMs,
-                                      endMs: endMs)
-        } else if useAI {
-            list = search.searchAIMetas(trimmed,
-                                        appBundleIds: appIds,
-                                        startMs: startMs,
-                                        endMs: endMs,
-                                        limit: limit)
-        } else {
-            list = search.searchMetas(trimmed,
-                                      fuzziness: fuzz,
-                                      appBundleIds: appIds,
-                                      startMs: startMs,
-                                      endMs: endMs,
-                                      limit: limit)
+            let sorted = list.sorted { $0.startedAtMs > $1.startedAtMs }
+            DispatchQueue.main.async { [weak self] in
+                guard let self = self else { return }
+                self.metas = sorted
+                if self.followLatest {
+                    self.selectedIndex = self.metas.isEmpty ? -1 : 0
+                } else if let prev = previousSelectedId,
+                          let idx = self.metas.firstIndex(where: { $0.id == prev }) {
+                    self.selectedIndex = idx
+                } else {
+                    self.selectedIndex = self.metas.isEmpty ? -1 : 0
+                }
+                self.rebuildAscCache()
+                self.refreshSegments()
+                if !self.msPerPoint.isFinite || self.msPerPoint <= 0 {
+                    self.msPerPoint = self.defaultMsPerPoint()
+                }
+                self.isLoading = false
+            }
         }
-
-        metas = list.sorted { $0.startedAtMs > $1.startedAtMs }
-        selectedIndex = metas.isEmpty ? -1 : 0
-        rebuildAscCache()
-        refreshSegments()
-        if !msPerPoint.isFinite || msPerPoint <= 0 {
-            msPerPoint = defaultMsPerPoint()
-        }
-        isLoading = false
     }
 
     func refreshSegments() {
@@ -180,6 +198,8 @@ final class TimelineModel: ObservableObject {
 
     // Open a specific snapshot by id by loading a time window around it and selecting it.
     func openSnapshot(id: Int64, spanMs: Int64 = 6 * 60 * 60 * 1000) {
+        // User-initiated navigation should pause live-follow so the view doesn't snap back.
+        followLatest = false
         // Fetch anchor meta to know its timestamp
         guard let anchor = try? DB.shared.snapshotMetaById(id) else { return }
         let s = max(0, anchor.startedAtMs - spanMs)

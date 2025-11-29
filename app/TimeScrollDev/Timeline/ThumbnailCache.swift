@@ -6,6 +6,19 @@ final class ThumbnailCache {
     static let shared = ThumbnailCache()
     private let cache = NSCache<NSString, NSImage>()
     private let hevcCache = NSCache<NSString, NSImage>()
+    // Throttle concurrent HEVC extractions to avoid overwhelming CPU
+    private let hevcQueue: OperationQueue = {
+        let q = OperationQueue()
+        q.maxConcurrentOperationCount = 3
+        q.qualityOfService = .userInitiated
+        return q
+    }()
+    // Track in-flight requests to avoid duplicate work
+    private var hevcInFlight = Set<String>()
+    private var hevcWaiters: [String: [(NSImage?) -> Void]] = [:]
+    private var imageWaiters: [String: [(NSImage?) -> Void]] = [:]
+    private let lock = NSLock()
+
     private init() {
         cache.countLimit = 500
         hevcCache.countLimit = 500
@@ -62,11 +75,59 @@ final class ThumbnailCache {
     // Asynchronous HEVC thumbnail fetch with in-memory cache
     func hevcThumbnail(for url: URL, startedAtMs: Int64, maxPixel: CGFloat = 320, completion: @escaping (NSImage?) -> Void) {
         let key = "\(url.path)#\(startedAtMs)#\(Int(maxPixel))" as NSString
+        let keyStr = key as String
+        // Return cached immediately
         if let img = hevcCache.object(forKey: key) { completion(img); return }
-        DispatchQueue.global(qos: .userInitiated).async {
+        // Coalesce concurrent requests and avoid duplicate extraction work
+        lock.lock()
+        if hevcInFlight.contains(keyStr) {
+            hevcWaiters[keyStr, default: []].append(completion)
+            lock.unlock()
+            return
+        }
+        hevcInFlight.insert(keyStr)
+        hevcWaiters[keyStr] = [completion]
+        lock.unlock()
+
+        hevcQueue.addOperation {
             let img = HEVCFrameExtractor.image(forPath: url, startedAtMs: startedAtMs, format: "hevc", maxPixel: maxPixel)
             if let img = img { self.hevcCache.setObject(img, forKey: key) }
-            DispatchQueue.main.async { completion(img) }
+            self.lock.lock()
+            let callbacks = self.hevcWaiters.removeValue(forKey: keyStr) ?? []
+            self.hevcInFlight.remove(keyStr)
+            self.lock.unlock()
+            DispatchQueue.main.async {
+                callbacks.forEach { $0(img) }
+            }
+        }
+    }
+
+    // Asynchronous image thumbnail fetch (for HEIC, JPEG, PNG, etc.)
+    func thumbnailAsync(for url: URL, maxPixel: CGFloat = 320, completion: @escaping (NSImage?) -> Void) {
+        let key = url.path as NSString
+        let keyStr = key as String
+        // Return cached immediately
+        if let img = cache.object(forKey: key) { completion(img); return }
+        // Coalesce concurrent requests and avoid duplicate work
+        lock.lock()
+        if hevcInFlight.contains(keyStr) {
+            imageWaiters[keyStr, default: []].append(completion)
+            lock.unlock()
+            return
+        }
+        hevcInFlight.insert(keyStr)
+        imageWaiters[keyStr] = [completion]
+        lock.unlock()
+
+        hevcQueue.addOperation {
+            let img = self.thumbnail(for: url, maxPixel: maxPixel)
+            self.lock.lock()
+            let callbacks = self.imageWaiters.removeValue(forKey: keyStr) ?? []
+            self.hevcInFlight.remove(keyStr)
+            self.lock.unlock()
+            DispatchQueue.main.async {
+                callbacks.forEach { $0(img) }
+            }
         }
     }
 }

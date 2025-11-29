@@ -16,6 +16,7 @@ struct SearchResultsView: View {
     @State private var hasNext: Bool = false
     @State private var useAI: Bool = false
     @State private var viewMode: ViewMode = ViewMode(rawValue: UserDefaults.standard.string(forKey: "settings.searchViewMode") ?? "list") ?? .list
+    @State private var requestToken: Int = 0
 
     private let pageSize: Int = 50
 
@@ -153,53 +154,69 @@ struct SearchResultsView: View {
 
     private func loadPage(_ p: Int) {
         guard p >= 0 else { return }
+        // Bump token to invalidate any in-flight searches; only the latest response is applied.
+        requestToken &+= 1
+        let token = requestToken
         isLoading = true
-        // Let the UI update to show the spinner before the synchronous fetch
-        Task { @MainActor in await Task.yield() }
         let offset = p * pageSize
-        let limit = pageSize + 1 // fetch one extra to detect next page
+        let limit = pageSize + 1
         let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
         let fuzz = settings.fuzziness
-        let fetched: [SearchResult]
-        if trimmed.isEmpty {
-            fetched = search.latestWithContent(limit: limit,
-                                               offset: offset,
-                                               appBundleIds: appBundleIds,
-                                               startMs: startMs,
-                                               endMs: endMs)
-        } else if useAI && settings.aiEmbeddingsEnabled {
-            fetched = search.searchAI(trimmed,
-                                      appBundleIds: appBundleIds,
-                                      startMs: startMs,
-                                      endMs: endMs,
-                                      limit: limit,
-                                      offset: offset)
-        } else {
-            fetched = search.searchWithContent(trimmed,
-                                               fuzziness: fuzz,
-                                               appBundleIds: appBundleIds,
-                                               startMs: startMs,
-                                               endMs: endMs,
-                                               limit: limit,
-                                               offset: offset)
+        let ia = settings.intelligentAccuracy
+        let aiEnabled = useAI && settings.aiEmbeddingsEnabled
+        let apps = appBundleIds
+        let start = startMs
+        let end = endMs
+        let searchSvc = search
+
+        // All searches run on background thread
+        DispatchQueue.global(qos: .userInitiated).async {
+            let fetched: [SearchResult]
+            if trimmed.isEmpty {
+                fetched = searchSvc.latestWithContent(limit: limit,
+                                                       offset: offset,
+                                                       appBundleIds: apps,
+                                                       startMs: start,
+                                                       endMs: end)
+            } else if aiEnabled {
+                fetched = searchSvc.searchAI(trimmed,
+                                              appBundleIds: apps,
+                                              startMs: start,
+                                              endMs: end,
+                                              limit: limit,
+                                              offset: offset)
+            } else {
+                fetched = searchSvc.searchWithContent(trimmed,
+                                                       fuzziness: fuzz,
+                                                       intelligentAccuracy: ia,
+                                                       appBundleIds: apps,
+                                                       startMs: start,
+                                                       endMs: end,
+                                                       limit: limit,
+                                                       offset: offset)
+            }
+            DispatchQueue.main.async {
+                // Ignore stale responses from superseded searches
+                guard token == requestToken else { return }
+                if p > 0 && fetched.isEmpty {
+                    self.hasNext = false
+                    self.isLoading = false
+                    return
+                }
+                self.hasNext = fetched.count > self.pageSize
+                self.rows = Array(fetched.prefix(self.pageSize))
+                self.page = p
+                self.isLoading = false
+            }
         }
-        // If navigating forward yielded an empty page, stay on the current page
-        if p > 0 && fetched.isEmpty {
-            hasNext = false
-            isLoading = false
-            return
-        }
-        hasNext = fetched.count > pageSize
-        rows = Array(fetched.prefix(pageSize))
-        page = p
-        isLoading = false
     }
 }
 
 private struct SearchRowView: View {
     let row: SearchResult
     let query: String
-    @State private var hevcThumb: NSImage? = nil
+    @State private var loadedThumb: NSImage? = nil
+    @State private var loadStarted: Bool = false
 
     var body: some View {
         HStack(alignment: .top, spacing: 10) {
@@ -214,28 +231,53 @@ private struct SearchRowView: View {
     }
 
     private var thumb: some View {
-        let url = URL(fileURLWithPath: row.path)
-        let ext = url.pathExtension.lowercased()
-        // Prefer poster thumbnail if available
-        if let t = row.thumbPath,
-           let img = ThumbnailCache.shared.thumbnail(for: URL(fileURLWithPath: t), maxPixel: 140) {
+        // Return loaded thumbnail
+        if let img = loadedThumb {
             return AnyView(Image(nsImage: img).resizable().aspectRatio(contentMode: .fit).frame(width: 120, height: 72).cornerRadius(6))
         }
-        if ["mov","mp4","tse"].contains(ext) {
-            if let img = hevcThumb {
-                return AnyView(Image(nsImage: img).resizable().aspectRatio(contentMode: .fit).frame(width: 120, height: 72).cornerRadius(6))
-            }
+        // Start async load if not started
+        if !loadStarted {
             DispatchQueue.main.async {
-                ThumbnailCache.shared.hevcThumbnail(for: url, startedAtMs: row.startedAtMs, maxPixel: 140) { img in
-                    self.hevcThumb = img
+                guard !loadStarted else { return }
+                loadStarted = true
+                let url = URL(fileURLWithPath: row.path)
+                let ext = url.pathExtension.lowercased()
+                func loadMainImage() {
+                    ThumbnailCache.shared.thumbnailAsync(for: url, maxPixel: 140) { img in
+                        if let img = img { self.loadedThumb = img }
+                    }
                 }
+                func loadVideoFrame() {
+                    ThumbnailCache.shared.hevcThumbnail(for: url, startedAtMs: row.startedAtMs, maxPixel: 140) { img in
+                        if let img = img { self.loadedThumb = img; return }
+                        // Fallback to still image if HEVC frame failed
+                        loadMainImage()
+                    }
+                }
+                // Prefer poster thumbnail
+                if let t = row.thumbPath {
+                    ThumbnailCache.shared.thumbnailAsync(for: URL(fileURLWithPath: t), maxPixel: 140) { img in
+                        if let img = img { self.loadedThumb = img; return }
+                        // Poster missing; fall back to source
+                        if ["mov","mp4","tse"].contains(ext) {
+                            loadVideoFrame()
+                        } else {
+                            loadMainImage()
+                        }
+                    }
+                    return
+                }
+                // Video: use HEVC extractor
+                if ["mov","mp4","tse"].contains(ext) {
+                    loadVideoFrame()
+                    return
+                }
+                // Image: use async thumbnail
+                loadMainImage()
             }
-            return AnyView(Rectangle().fill(Color.gray.opacity(0.08)).overlay{ ProgressView().scaleEffect(0.6) }.frame(width: 120, height: 72).cornerRadius(6))
         }
-        if let img = ThumbnailCache.shared.thumbnail(for: url, maxPixel: 140) {
-            return AnyView(Image(nsImage: img).resizable().aspectRatio(contentMode: .fit).frame(width: 120, height: 72).cornerRadius(6))
-        }
-        return AnyView(Rectangle().fill(Color.secondary.opacity(0.2)).frame(width: 120, height: 72).cornerRadius(6))
+        // Placeholder while loading
+        return AnyView(Rectangle().fill(Color.gray.opacity(0.08)).overlay{ ProgressView().scaleEffect(0.6) }.frame(width: 120, height: 72).cornerRadius(6))
     }
 
     private var title: some View {
@@ -380,7 +422,8 @@ private struct SearchRowView: View {
 
 private struct SearchTileView: View {
     let row: SearchResult
-    @State private var hevcThumb: NSImage? = nil
+    @State private var loadedThumb: NSImage? = nil
+    @State private var loadStarted: Bool = false
 
     var body: some View {
         VStack(spacing: 8) {
@@ -404,27 +447,52 @@ private struct SearchTileView: View {
     }
 
     private var thumb: some View {
-        let url = URL(fileURLWithPath: row.path)
-        let ext = url.pathExtension.lowercased()
-        if let t = row.thumbPath,
-           let img = ThumbnailCache.shared.thumbnail(for: URL(fileURLWithPath: t), maxPixel: 400) {
+        // Return loaded thumbnail
+        if let img = loadedThumb {
             return AnyView(Image(nsImage: img).resizable().aspectRatio(contentMode: .fit).cornerRadius(6))
         }
-        if ["mov","mp4","tse"].contains(ext) {
-            if let img = hevcThumb {
-                return AnyView(Image(nsImage: img).resizable().aspectRatio(contentMode: .fit).cornerRadius(6))
-            }
+        // Start async load if not started
+        if !loadStarted {
             DispatchQueue.main.async {
-                ThumbnailCache.shared.hevcThumbnail(for: url, startedAtMs: row.startedAtMs, maxPixel: 400) { img in
-                    self.hevcThumb = img
+                guard !loadStarted else { return }
+                loadStarted = true
+                let url = URL(fileURLWithPath: row.path)
+                let ext = url.pathExtension.lowercased()
+                func loadMainImage() {
+                    ThumbnailCache.shared.thumbnailAsync(for: url, maxPixel: 400) { img in
+                        if let img = img { self.loadedThumb = img }
+                    }
                 }
+                func loadVideoFrame() {
+                    ThumbnailCache.shared.hevcThumbnail(for: url, startedAtMs: row.startedAtMs, maxPixel: 400) { img in
+                        if let img = img { self.loadedThumb = img; return }
+                        loadMainImage()
+                    }
+                }
+                // Prefer poster thumbnail
+                if let t = row.thumbPath {
+                    ThumbnailCache.shared.thumbnailAsync(for: URL(fileURLWithPath: t), maxPixel: 400) { img in
+                        if let img = img { self.loadedThumb = img; return }
+                        // Poster missing; fall back to source
+                        if ["mov","mp4","tse"].contains(ext) {
+                            loadVideoFrame()
+                        } else {
+                            loadMainImage()
+                        }
+                    }
+                    return
+                }
+                // Video: use HEVC extractor
+                if ["mov","mp4","tse"].contains(ext) {
+                    loadVideoFrame()
+                    return
+                }
+                // Image: use async thumbnail
+                loadMainImage()
             }
-            return AnyView(Rectangle().fill(Color.gray.opacity(0.08)).overlay{ ProgressView().scaleEffect(0.7) }.aspectRatio(16/10, contentMode: .fit).cornerRadius(6))
         }
-        if let img = ThumbnailCache.shared.thumbnail(for: url, maxPixel: 400) {
-            return AnyView(Image(nsImage: img).resizable().aspectRatio(contentMode: .fit).cornerRadius(6))
-        }
-        return AnyView(Rectangle().fill(Color.secondary.opacity(0.2)).aspectRatio(16/10, contentMode: .fit).cornerRadius(6))
+        // Placeholder while loading
+        return AnyView(Rectangle().fill(Color.gray.opacity(0.08)).overlay{ ProgressView().scaleEffect(0.7) }.aspectRatio(16/10, contentMode: .fit).cornerRadius(6))
     }
 
     private func dateString(ms: Int64) -> String {

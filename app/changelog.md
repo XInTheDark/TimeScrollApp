@@ -1,3 +1,10 @@
+# alpha.16 - 2025-11-29
+
+## Fixed
+Fixed the app not launching. It was caused by a code signing issue in the build script.
+
+---
+
 # alpha.15 - 2025-11-29
 
 ## Fixed
@@ -182,128 +189,3 @@ The app is now fully [open source](https://github.com/XInTheDark/TimeScrollApp).
 The first public release of the app!
 
 Website: https://timescroll.muzhen.org/
-
----
-
-# 1.0-alpha.9 - 2025-09-22
-
-lowkey getting close to release, will switch to new naming scheme soon
-
----
-
-# 1.0-alpha.8 - 2025-09-22
-
-one of the last releases before official
-
----
-
-# 1.0-alpha-7-3 - 2025-09-21
-
-
-
----
-
-# 1.0-alpha-7-2 - 2025-09-21
-
-
-
----
-
-# 1.0-alpha.7 - 2025-09-21
-
-
-
----
-
-# 1.0-alpha.6-6 - 2025-09-21
-
-
-
----
-
-# 1.0-alpha.6-5 - 2025-09-21
-
-
-
----
-
-# 1.0-alpha.6-4 - 2025-09-21
-
-
-
----
-
-# 1.0-alpha.6-3 - 2025-09-21
-
-
-
----
-
-# 1.0-alpha.6-2 - 2025-09-21
-
-
-
----
-
-# 1.0-alpha.6 - 2025-09-21
-
-in preparation for beta
-
----
-
-# 1.0-alpha.5-rc1 - 2025-09-21
-
-
-
----
-
-# 1.0-alpha.4-rc1 - 2025-09-21
-
-Release candidate 1
-
----
-
-# test-4 - 2025-09-20
-
-# Test release 4
-
-## test markdown renderer
-
-- 1
-- 2
-
----
-
-# test-3 - 2025-09-20
-
-# Test release 3
-
-## test markdown renderer
-
-- 1
-- 2
-
----
-
-# test-2 - 2025-09-20
-
-# Test release 2
-
-## test markdown renderer
-
-- 1
-- 2
-
----
-
-# test-1 - 2025-09-20
-
-# Test release.
-
-## test markdown renderer
-
-- 1
-- 2
-
----
-

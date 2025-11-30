@@ -5,6 +5,23 @@ import SwiftUI
 import Sparkle
 #endif
 
+// Windows: helper to ignore the status bar host window when deciding whether
+// the app currently has a user-facing window. The status item always keeps an
+// NSStatusBarWindow alive and visible, which would otherwise prevent us from
+// hiding the Dock icon.
+extension NSApplication {
+    var ts_hasVisibleUserWindow: Bool {
+        let statusBarWindowClass: AnyClass? = NSClassFromString("NSStatusBarWindow")
+        return windows.contains { window in
+            guard window.isVisible else { return false }
+            // Exclude the system status bar host window and any other status-bar-level windows
+            if let cls = statusBarWindowClass, window.isKind(of: cls) { return false }
+            if window.level == .statusBar { return false }
+            return true
+        }
+    }
+}
+
 extension Notification.Name {
     static let TimeScrollCheckForUpdates = Notification.Name("TimeScroll.CheckForUpdates")
     static let TimeScrollApplyUpdatePrefs = Notification.Name("TimeScroll.ApplyUpdatePrefs")
@@ -410,7 +427,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func updateActivationPolicy() {
-        let anyVisible = NSApp.windows.contains { $0.isVisible }
+        let anyVisible = NSApp.ts_hasVisibleUserWindow
         if anyVisible {
             NSApp.setActivationPolicy(.regular)
             return

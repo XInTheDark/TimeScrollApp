@@ -1,3 +1,21 @@
+# alpha.17 - 2025-11-30
+
+## Fixed
+- Fixed "Show dock icon when no window" option
+- Fixed repeated permission popup on startup
+
+## Changed
+- Add warning that encrypted vault and MCP are not working on public builds
+
+---
+
+# alpha.16.4 - 2025-11-30
+
+## Fixed
+- Fixed thumbnail preview flicking
+
+---
+
 # alpha.16.3 - 2025-11-29
 
 Hopefully fixed app not launching

@@ -117,6 +117,11 @@ final class TimelineBarNSView: NSView {
     private let popover = NSPopover()
     private var lastPreviewIndex: Int? = nil
     private var hoverThrottle: Date = .distantPast
+    private var loadingTimer: DispatchWorkItem?
+    private var isLoadingPreview: Bool = true
+    private var previewDebounce: DispatchWorkItem?
+    private var pendingPreviewIndex: Int? = nil
+    private var previewViewModel = HoverPreviewViewModel()
 
     override var isFlipped: Bool { true }
 
@@ -245,21 +250,42 @@ final class TimelineBarNSView: NSView {
         let p = convert(event.locationInWindow, from: nil)
         let t = timeAt(x: p.x, m: m)
         onHover?(t)
-        // Throttle updates a bit
+
+        // Throttle popover repositioning
         let now = Date()
-        if now.timeIntervalSince(hoverThrottle) < 0.08 { return }
-        hoverThrottle = now
+        let shouldReposition = now.timeIntervalSince(hoverThrottle) >= 0.05
+
         if let idx = m.indexNearest(to: t), m.metas.indices.contains(idx) {
-            if lastPreviewIndex != idx {
-                lastPreviewIndex = idx
-                showPreview(for: idx, at: p)
-            } else {
-                // Move popover to track pointer horizontally
-                if popover.isShown { popover.performClose(nil); showPreview(for: idx, at: p) }
+            // Show or reposition popover at mouse location
+            if !popover.isShown {
+                showPopover(at: p)
+                hoverThrottle = now
+            } else if shouldReposition {
+                popover.performClose(nil)
+                showPopover(at: p)
+                hoverThrottle = now
+            }
+
+            // Debounce switching to new preview index
+            if pendingPreviewIndex != idx {
+                pendingPreviewIndex = idx
+                previewDebounce?.cancel()
+                let work = DispatchWorkItem { [weak self] in
+                    guard let self = self else { return }
+                    guard self.pendingPreviewIndex == idx else { return }
+                    self.lastPreviewIndex = idx
+                    self.loadPreview(for: idx)
+                }
+                previewDebounce = work
+                // If this is the first preview, show immediately; otherwise debounce
+                let delay: Double = lastPreviewIndex == nil ? 0 : 0.12
+                DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
             }
         } else {
+            previewDebounce?.cancel()
             popover.performClose(nil)
             lastPreviewIndex = nil
+            pendingPreviewIndex = nil
         }
     }
 
@@ -267,6 +293,11 @@ final class TimelineBarNSView: NSView {
         onHoverExit?()
         popover.performClose(nil)
         lastPreviewIndex = nil
+        pendingPreviewIndex = nil
+        loadingTimer?.cancel()
+        loadingTimer = nil
+        previewDebounce?.cancel()
+        previewDebounce = nil
     }
 
     override func mouseDown(with event: NSEvent) {
@@ -296,79 +327,153 @@ final class TimelineBarNSView: NSView {
         return m.minTimeMs + offsetMs
     }
 
-    private func showPreview(for index: Int, at point: NSPoint) {
-        guard let m = model else { return }
-        let meta = m.metas[index]
-        let url = URL(fileURLWithPath: meta.path)
-        var img: NSImage? = nil
-        if ["mov","mp4","tse"].contains(url.pathExtension.lowercased()) {
-            // Prefer poster; heavy extraction deferred asynchronously
-            if let t = meta.thumbPath {
-                let tu = URL(fileURLWithPath: t)
-                img = ThumbnailCache.shared.thumbnail(for: tu, maxPixel: 220)
-            }
-            if img == nil {
-                // Kick off async extraction; update popover when ready if we're still on same index
-                ThumbnailCache.shared.hevcThumbnail(for: url, startedAtMs: meta.startedAtMs, maxPixel: 220) { [weak self] fetched in
-                    guard let self = self else { return }
-                    guard self.lastPreviewIndex == index else { return }
-                    self.updatePopover(with: fetched, meta: meta, at: point)
-                }
-            }
-        }
-        if img == nil {
-            img = ThumbnailCache.shared.thumbnail(for: url, maxPixel: 220)
-        }
-        // Initial (possibly placeholder) popover content
-        updatePopover(with: img, meta: meta, at: point)
-    }
-
-    private func updatePopover(with image: NSImage?, meta: SnapshotMeta, at point: NSPoint) {
-        let appIcon: NSImage? = meta.appBundleId.flatMap { AppIconCache.shared.icon(for: $0) }
-        let date = Date(timeIntervalSince1970: TimeInterval(meta.startedAtMs)/1000)
-        let content = HoverPreviewView(thumbnail: image, appIcon: appIcon, appName: meta.appName ?? (meta.appBundleId ?? "Unknown"), date: date)
+    private func showPopover(at point: NSPoint) {
+        let content = HoverPreviewView(viewModel: previewViewModel)
         let host = NSHostingView(rootView: content)
         host.frame = NSRect(x: 0, y: 0, width: 260, height: 220)
         if popover.contentViewController == nil { popover.contentViewController = NSViewController() }
         popover.contentViewController?.view = host
         popover.behavior = .transient
         popover.animates = false
-        // Anchor to the top edge of the timeline bar so the popover appears just above it
         let clampedX = max(0, min(bounds.width - 1, point.x))
         let anchor = NSRect(x: clampedX, y: 0, width: 1, height: 1)
-        if !popover.isShown {
-            popover.show(relativeTo: anchor, of: self, preferredEdge: .maxY)
+        popover.show(relativeTo: anchor, of: self, preferredEdge: .maxY)
+    }
+
+    private func loadPreview(for index: Int) {
+        guard let m = model else { return }
+        let meta = m.metas[index]
+        let url = URL(fileURLWithPath: meta.path)
+        let ext = url.pathExtension.lowercased()
+
+        // Cancel any pending loading timer
+        loadingTimer?.cancel()
+        loadingTimer = nil
+
+        // Update metadata immediately with fade
+        let appIcon: NSImage? = meta.appBundleId.flatMap { AppIconCache.shared.icon(for: $0) }
+        let date = Date(timeIntervalSince1970: TimeInterval(meta.startedAtMs)/1000)
+        previewViewModel.update(
+            thumbnail: nil,
+            appIcon: appIcon,
+            appName: meta.appName ?? (meta.appBundleId ?? "Unknown"),
+            date: date,
+            isLoading: true
+        )
+
+        // After 500ms, if still no image, show "No preview"
+        let timer = DispatchWorkItem { [weak self] in
+            guard let self = self, self.lastPreviewIndex == index else { return }
+            self.previewViewModel.setLoading(false)
+        }
+        loadingTimer = timer
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5, execute: timer)
+
+        func loadMainImage() {
+            ThumbnailCache.shared.thumbnailAsync(for: url, maxPixel: 220) { [weak self] img in
+                guard let self = self, self.lastPreviewIndex == index else { return }
+                self.loadingTimer?.cancel()
+                self.previewViewModel.setThumbnail(img)
+            }
+        }
+
+        func loadVideoFrame() {
+            ThumbnailCache.shared.hevcThumbnail(for: url, startedAtMs: meta.startedAtMs, maxPixel: 220) { [weak self] img in
+                guard let self = self, self.lastPreviewIndex == index else { return }
+                if let img = img {
+                    self.loadingTimer?.cancel()
+                    self.previewViewModel.setThumbnail(img)
+                } else {
+                    loadMainImage()
+                }
+            }
+        }
+
+        // Prefer poster thumbnail
+        if let t = meta.thumbPath {
+            ThumbnailCache.shared.thumbnailAsync(for: URL(fileURLWithPath: t), maxPixel: 220) { [weak self] img in
+                guard let self = self, self.lastPreviewIndex == index else { return }
+                if let img = img {
+                    self.loadingTimer?.cancel()
+                    self.previewViewModel.setThumbnail(img)
+                } else if ["mov","mp4","tse"].contains(ext) {
+                    loadVideoFrame()
+                } else {
+                    loadMainImage()
+                }
+            }
+            return
+        }
+
+        // Video: use HEVC extractor
+        if ["mov","mp4","tse"].contains(ext) {
+            loadVideoFrame()
+            return
+        }
+
+        // Image: use async thumbnail
+        loadMainImage()
+    }
+}
+
+private class HoverPreviewViewModel: ObservableObject {
+    @Published var thumbnail: NSImage? = nil
+    @Published var appIcon: NSImage? = nil
+    @Published var appName: String = ""
+    @Published var date: Date = Date()
+    @Published var isLoading: Bool = true
+
+    func update(thumbnail: NSImage?, appIcon: NSImage?, appName: String, date: Date, isLoading: Bool) {
+        withAnimation(.easeInOut(duration: 0.15)) {
+            self.thumbnail = thumbnail
+            self.appIcon = appIcon
+            self.appName = appName
+            self.date = date
+            self.isLoading = isLoading
+        }
+    }
+
+    func setThumbnail(_ img: NSImage?) {
+        withAnimation(.easeInOut(duration: 0.15)) {
+            self.thumbnail = img
+            self.isLoading = false
+        }
+    }
+
+    func setLoading(_ loading: Bool) {
+        withAnimation(.easeInOut(duration: 0.15)) {
+            self.isLoading = loading
         }
     }
 }
 
 private struct HoverPreviewView: View {
-    let thumbnail: NSImage?
-    let appIcon: NSImage?
-    let appName: String
-    let date: Date
+    @ObservedObject var viewModel: HoverPreviewViewModel
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
-            if let img = thumbnail {
-                Image(nsImage: img)
-                    .resizable()
-                    .aspectRatio(contentMode: .fit)
-                    .frame(maxWidth: 240, maxHeight: 160)
-                    .cornerRadius(6)
-            } else {
+            ZStack {
                 Rectangle().fill(Color.secondary.opacity(0.15))
                     .frame(width: 240, height: 160)
-                    .overlay(Text("No preview").foregroundColor(.secondary))
                     .cornerRadius(6)
+
+                if let img = viewModel.thumbnail {
+                    Image(nsImage: img)
+                        .resizable()
+                        .aspectRatio(contentMode: .fit)
+                        .frame(maxWidth: 240, maxHeight: 160)
+                        .cornerRadius(6)
+                } else if !viewModel.isLoading {
+                    Text("No preview").foregroundColor(.secondary)
+                }
             }
             HStack(spacing: 6) {
-                if let icon = appIcon {
+                if let icon = viewModel.appIcon {
                     Image(nsImage: icon).resizable().frame(width: 16, height: 16).cornerRadius(3)
                 }
-                Text(appName).font(.caption)
+                Text(viewModel.appName).font(.caption)
                 Spacer()
-                Text(Self.df.string(from: date)).font(.caption2).foregroundColor(.secondary)
+                Text(Self.df.string(from: viewModel.date)).font(.caption2).foregroundColor(.secondary)
             }
         }
         .padding(8)

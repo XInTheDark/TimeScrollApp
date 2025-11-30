@@ -1,5 +1,6 @@
 import Foundation
 import AppKit
+import Security
 
 /// Centralized file locations for DB, snapshots, vault and queues.
 /// Resolves to a user-selected folder if configured (via security-scoped bookmark),
@@ -138,6 +139,12 @@ enum StoragePaths {
     }
 
     private static func appGroupContainerURL() -> URL? {
+        // Only use Group Containers if the app is properly signed with a Team ID.
+        // Ad-hoc signed apps will trigger the "access data from other apps" TCC prompt
+        // on every launch because TCC permissions don't persist for ad-hoc signed apps.
+        guard hasValidTeamIdentifier() else {
+            return nil
+        }
         if let url = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: appGroupID) {
             return url
         }
@@ -147,6 +154,25 @@ enum StoragePaths {
             try? FileManager.default.createDirectory(at: manual, withIntermediateDirectories: true)
         }
         return manual
+    }
+
+    /// Check if the app is signed with a valid Team Identifier.
+    /// Ad-hoc signed apps have no Team ID and can't persist TCC permissions.
+    private static func hasValidTeamIdentifier() -> Bool {
+        guard let bundleURL = Bundle.main.bundleURL as CFURL? else { return false }
+        var code: SecStaticCode?
+        guard SecStaticCodeCreateWithPath(bundleURL, [], &code) == errSecSuccess,
+              let staticCode = code else { return false }
+
+        var info: CFDictionary?
+        guard SecCodeCopySigningInformation(staticCode, SecCSFlags(rawValue: kSecCSSigningInformation), &info) == errSecSuccess,
+              let signingInfo = info as? [String: Any] else { return false }
+
+        // Check for Team Identifier - ad-hoc signed apps won't have one
+        if let teamID = signingInfo[kSecCodeInfoTeamIdentifier as String] as? String, !teamID.isEmpty {
+            return true
+        }
+        return false
     }
 
     // MARK: - Backup (external) storage helpers

@@ -38,6 +38,7 @@ private struct SecurityPane: View {
     @State private var loadingModels: Bool = false
     @ObservedObject var vault = VaultManager.shared
     @State private var showVaultOnboarding: Bool = false
+    @State private var showVaultEntitlementWarning: Bool = false
     @State private var pendingEnableVault: Bool = false
     @State private var showVaultDisableSheet: Bool = false
     @State private var pendingDisableVault: Bool = false
@@ -46,16 +47,15 @@ private struct SecurityPane: View {
             Section(header: Text("Encrypted Vault")) {
                 Toggle("Enable encrypted vault", isOn: Binding(get: { settings.vaultEnabled }, set: { newVal in
                     if newVal {
+                        pendingEnableVault = true
                         // Show onboarding/confirmation the first time (or if user hasn't opted out)
                         let seen = UserDefaults.standard.bool(forKey: "vault.onboardingShown")
                         if !seen {
-                            pendingEnableVault = true
                             showVaultOnboarding = true
                             return
                         }
-                        // Direct enable
-                        settings.vaultEnabled = true
-                        Task { @MainActor in VaultManager.shared.setVaultEnabled(true) }
+                        // Secondary warning about current limitations
+                        showVaultEntitlementWarning = true
                         return
                     } else {
                         // Intercept turning off to confirm. Keep toggle ON until confirmed.
@@ -106,10 +106,8 @@ private struct SecurityPane: View {
                 if dontShowAgain {
                     UserDefaults.standard.set(true, forKey: "vault.onboardingShown")
                 }
-                settings.vaultEnabled = true
-                Task { @MainActor in VaultManager.shared.setVaultEnabled(true) }
-                pendingEnableVault = false
                 showVaultOnboarding = false
+                showVaultEntitlementWarning = true
             })
         }
         .sheet(isPresented: $showVaultDisableSheet) {
@@ -124,6 +122,28 @@ private struct SecurityPane: View {
                 pendingDisableVault = false
                 showVaultDisableSheet = false
             })
+        }
+        .sheet(isPresented: $showVaultEntitlementWarning) {
+            EntitlementWarningSheet(
+                title: "Encrypted Vault Unstable",
+                lead: "Due to issues with app entitlements, encrypted vault is NOT working as expected right now.",
+                bullets: [
+                    "This is work in progress and may fail to store or unlock snapshots.",
+                    "Enable at your own risk while we finish entitlement fixes."
+                ],
+                continueLabel: "Enable Anyway",
+                onCancel: {
+                    settings.vaultEnabled = false
+                    pendingEnableVault = false
+                    showVaultEntitlementWarning = false
+                },
+                onContinue: {
+                    settings.vaultEnabled = true
+                    Task { @MainActor in VaultManager.shared.setVaultEnabled(true) }
+                    pendingEnableVault = false
+                    showVaultEntitlementWarning = false
+                }
+            )
         }
     }
 
@@ -208,6 +228,46 @@ private struct VaultDisableConfirmSheet: View {
 }
 
 @MainActor
+private struct EntitlementWarningSheet: View {
+    var title: String
+    var lead: String
+    var bullets: [String]
+    var continueLabel: String
+    var onCancel: () -> Void
+    var onContinue: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(spacing: 8) {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .font(.system(size: 28))
+                    .foregroundColor(.yellow)
+                Text(title).font(.title3).bold()
+            }
+            Text(lead)
+                .font(.headline)
+            VStack(alignment: .leading, spacing: 8) {
+                ForEach(Array(bullets.enumerated()), id: \.offset) { _, item in
+                    HStack(alignment: .top, spacing: 8) {
+                        Image(systemName: "bolt.slash")
+                            .foregroundColor(.secondary)
+                        Text(item)
+                    }
+                }
+            }
+            HStack {
+                Spacer()
+                Button("Cancel") { onCancel() }
+                Button(continueLabel) { onContinue() }
+                    .keyboardShortcut(.defaultAction)
+            }
+        }
+        .padding(18)
+        .frame(minWidth: 520)
+    }
+}
+
+@MainActor
 private struct AccessibilityPermissionSheet: View {
     var onCancel: () -> Void
     var onContinue: () -> Void
@@ -246,8 +306,8 @@ private struct GeneralPane: View {
                 Toggle("Start recording on launch", isOn: $settings.startRecordingOnStart)
                 Toggle("Show Dock icon when no window", isOn: $settings.showDockIcon)
                     .onChange(of: settings.showDockIcon) { newVal in
-                        let anyVisible = NSApplication.shared.windows.contains { $0.isVisible }
-                        if !anyVisible {
+                        let hasUserWindow = NSApplication.shared.ts_hasVisibleUserWindow
+                        if !hasUserWindow {
                             NSApplication.shared.setActivationPolicy(newVal ? .regular : .accessory)
                         }
                     }
@@ -586,9 +646,11 @@ private struct StatsPane: View {
 private struct MCPSettingsPane: View {
     @AppStorage("settings.mcpEnabled") private var persistedEnabled: Bool = false
     @State private var showMigrationPrompt: Bool = false
+    @State private var showEntitlementWarning: Bool = false
     @State private var migrating: Bool = false
     @State private var migrationProgress: String = ""
-    @State private var pendingEnableAfterConfirm: Bool = false
+    @State private var pendingEnableAfterWarning: Bool = false
+    @State private var pendingEnableRequiresMigration: Bool = false
 
     var body: some View {
         MCPPane(
@@ -598,14 +660,37 @@ private struct MCPSettingsPane: View {
         )
         .sheet(isPresented: $showMigrationPrompt) {
             MCPMigrationConfirmSheet(onCancel: {
-                pendingEnableAfterConfirm = false
+                pendingEnableRequiresMigration = false
                 showMigrationPrompt = false
                 persistedEnabled = false
+                pendingEnableAfterWarning = false
+                pendingEnableRequiresMigration = false
             }, onContinue: {
                 showMigrationPrompt = false
-                beginLegacyMigration()
+                showEntitlementWarning = true
             })
             .frame(minWidth: 520)
+        }
+        .sheet(isPresented: $showEntitlementWarning) {
+            EntitlementWarningSheet(
+                title: "MCP is Unstable",
+                lead: "Due to issues with app entitlements, MCP is NOT working as expected right now.",
+                bullets: [
+                    "Work in progress — requests may fail or return incomplete data.",
+                    "Enable at your own risk until entitlement fixes ship."
+                ],
+                continueLabel: "Enable Anyway",
+                onCancel: {
+                    showEntitlementWarning = false
+                    pendingEnableAfterWarning = false
+                    pendingEnableRequiresMigration = false
+                    persistedEnabled = false
+                },
+                onContinue: {
+                    showEntitlementWarning = false
+                    proceedEnableMCP()
+                }
+            )
         }
     }
 
@@ -618,23 +703,26 @@ private struct MCPSettingsPane: View {
                     handleEnableRequest()
                 } else {
                     persistedEnabled = false
+                    pendingEnableAfterWarning = false
+                    pendingEnableRequiresMigration = false
                 }
             }
         )
     }
 
     private func handleEnableRequest() {
-        if StoragePaths.needsLegacyMigrationForMCP() {
-            pendingEnableAfterConfirm = true
+        pendingEnableAfterWarning = true
+        pendingEnableRequiresMigration = StoragePaths.needsLegacyMigrationForMCP()
+        if pendingEnableRequiresMigration {
             showMigrationPrompt = true
             return
         }
-        persistedEnabled = true
+        showEntitlementWarning = true
     }
 
     private func beginLegacyMigration() {
-        guard pendingEnableAfterConfirm else { return }
-        pendingEnableAfterConfirm = false
+        guard pendingEnableAfterWarning else { return }
+        pendingEnableRequiresMigration = false
         migrating = true
         migrationProgress = "Preparing…"
         let dest = StoragePaths.defaultRoot()
@@ -649,6 +737,16 @@ private struct MCPSettingsPane: View {
             migrating = false
             migrationProgress = ""
             persistedEnabled = true
+            pendingEnableAfterWarning = false
+        }
+    }
+
+    private func proceedEnableMCP() {
+        if pendingEnableRequiresMigration {
+            beginLegacyMigration()
+        } else {
+            persistedEnabled = true
+            pendingEnableAfterWarning = false
         }
     }
 }

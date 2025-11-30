@@ -72,20 +72,21 @@ final class VaultManager: ObservableObject {
         guard isVaultEnabled else { return }
         do {
             let key = try await KeyStore.shared.authenticateAndUnwrapDbKey(presentingWindow: presentingWindow)
-            
+
             isUnlocked = true
             persistUnlocked(true)
-            
+
             // Migrate existing plaintext DB (no-op if already encrypted)
             SQLCipherBridge.shared.migratePlaintextIfNeeded(withKey: key)
-            
+
             SQLCipherBridge.shared.openWithKey(key)
-            
+
             // Notify usage tracker so it can retroactively create a pending session
             UsageTracker.shared.onVaultUnlocked()
             IngestQueue.shared.startIngestIfNeeded()
             scheduleInactivityTimer()
         } catch {
+            fputs("[VaultManager] unlock failed: \(error.localizedDescription)\n", stderr)
             // Keep locked
         }
     }

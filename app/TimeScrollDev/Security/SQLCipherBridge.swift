@@ -11,8 +11,9 @@ final class SQLCipherBridge {
 
     func openWithUnwrappedKeySilently() {
         // If vault is enabled, do NOT fall back to plaintext open.
-        let d = UserDefaults(suiteName: StoragePaths.appGroupID) ?? .standard
-        let vaultOn = (d.object(forKey: "settings.vaultEnabled") != nil) ? d.bool(forKey: "settings.vaultEnabled") : false
+        let vaultOn = (StoragePaths.sharedObject(forKey: "settings.vaultEnabled") != nil)
+            ? StoragePaths.sharedBool(forKey: "settings.vaultEnabled")
+            : false
         if let key = try? KeyStore.shared.unwrapDbKey() {
             openWithKey(key)
             return
@@ -27,8 +28,9 @@ final class SQLCipherBridge {
     }
     
     func openWithUnwrappedKeyOrThrow() throws {
-        let d = UserDefaults(suiteName: StoragePaths.appGroupID) ?? .standard
-        let vaultOn = (d.object(forKey: "settings.vaultEnabled") != nil) ? d.bool(forKey: "settings.vaultEnabled") : false
+        let vaultOn = (StoragePaths.sharedObject(forKey: "settings.vaultEnabled") != nil)
+            ? StoragePaths.sharedBool(forKey: "settings.vaultEnabled")
+            : false
         
         if vaultOn {
             let key = try KeyStore.shared.unwrapDbKey()

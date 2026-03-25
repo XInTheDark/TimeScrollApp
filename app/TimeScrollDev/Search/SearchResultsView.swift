@@ -11,7 +11,7 @@ struct SearchResultsView: View {
 
     @EnvironmentObject var settings: SettingsStore
     @State private var page: Int = 0
-    @State private var rows: [SearchResult] = []
+    @State private var rows: [SearchResultDisplayRow] = []
     @State private var isLoading: Bool = false
     @State private var hasNext: Bool = false
     @State private var useAI: Bool = false
@@ -23,18 +23,22 @@ struct SearchResultsView: View {
     enum ViewMode: String {
         case list, tiles
     }
+
     private let search = SearchService()
+
+    private var trimmedQuery: String {
+        query.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
 
     var body: some View {
         VStack(spacing: 0) {
             header
             Divider()
-            list
+            resultsBody
             Divider()
             pager
         }
         .onAppear {
-            // Initialize AI toggle from settings (optional feature)
             useAI = settings.aiEmbeddingsEnabled && settings.aiModeOn
             loadPage(0)
         }
@@ -45,106 +49,140 @@ struct SearchResultsView: View {
     }
 
     private var header: some View {
-        HStack(spacing: 12) {
-            Text(query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "Latest Snapshots" : "Results for \"\(query)\"")
-                .font(.headline)
-            Spacer()
-            Picker("View", selection: Binding(get: { viewMode }, set: { mode in
-                viewMode = mode
-                UserDefaults.standard.set(mode.rawValue, forKey: "settings.searchViewMode")
-            })) {
-                Text("List").tag(ViewMode.list)
-                Text("Tiles").tag(ViewMode.tiles)
+        HStack(alignment: .top, spacing: 16) {
+            VStack(alignment: .leading, spacing: 4) {
+                Text(trimmedQuery.isEmpty ? "Latest Snapshots" : "Search Results")
+                    .font(.title3.weight(.semibold))
             }
-            .pickerStyle(.segmented)
-            .frame(width: 120)
-            Toggle("AI mode", isOn: Binding(get: { useAI }, set: { v in
-                useAI = v
-                UserDefaults.standard.set(v, forKey: "settings.aiModeOn")
-                resetAndReload()
-            }))
-            .disabled(!settings.aiEmbeddingsEnabled || EmbeddingService.shared.dim == 0)
-            .help((settings.aiEmbeddingsEnabled && EmbeddingService.shared.dim > 0) ? "Use local embeddings for relevance" : "Enable in Preferences or ensure NL embeddings available")
-            Button("Close") { onClose() }
+
+            Spacer(minLength: 16)
+
+            HStack(spacing: 10) {
+                Picker("View", selection: Binding(get: { viewMode }, set: { mode in
+                    viewMode = mode
+                    UserDefaults.standard.set(mode.rawValue, forKey: "settings.searchViewMode")
+                })) {
+                    Text("List").tag(ViewMode.list)
+                    Text("Tiles").tag(ViewMode.tiles)
+                }
+                .pickerStyle(.segmented)
+                .frame(width: 130)
+
+                Toggle("AI", isOn: Binding(get: { useAI }, set: { enabled in
+                    useAI = enabled
+                    UserDefaults.standard.set(enabled, forKey: "settings.aiModeOn")
+                    resetAndReload()
+                }))
+                .toggleStyle(.switch)
+                .disabled(!settings.aiEmbeddingsEnabled || EmbeddingService.shared.dim == 0)
+                .help((settings.aiEmbeddingsEnabled && EmbeddingService.shared.dim > 0) ? "Use local embeddings for relevance" : "Enable AI search in Preferences first")
+
+                Button {
+                    onClose()
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .font(.system(size: 16, weight: .semibold))
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(.secondary)
+                .help("Close results")
+                .accessibilityLabel("Close results")
+            }
+            .controlSize(.regular)
         }
-        .padding(8)
+        .padding(.horizontal, 16)
+        .padding(.vertical, 14)
     }
 
-    private var list: some View {
+    private var resultsBody: some View {
         ZStack {
-            ScrollView {
-                if viewMode == .list {
-                    LazyVStack(alignment: .leading, spacing: 8) {
-                        if rows.isEmpty && !isLoading {
-                            // Friendly placeholder instead of an empty pane
-                            Text("No results")
-                                .foregroundColor(.secondary)
-                                .padding()
-                        }
-                        // Use stable row identity so SwiftUI doesn't reuse previous-page state
-                        ForEach(Array(rows.enumerated()), id: \.1.id) { (idx, row) in
-                            Button(action: {
-                                let absIndex = page * pageSize + idx
-                                onOpen(row, absIndex)
-                            }) {
-                                SearchRowView(row: row, query: query)
-                                    .padding(.horizontal, 8)
-                                    .padding(.vertical, 6)
-                                    .background(Color(NSColor.textBackgroundColor))
-                                    .cornerRadius(8)
+            if rows.isEmpty && !isLoading {
+                SearchEmptyStateView(query: trimmedQuery, useAI: useAI)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .padding(24)
+            } else {
+                ScrollView {
+                    if viewMode == .list {
+                        LazyVStack(alignment: .leading, spacing: 12) {
+                            ForEach(Array(rows.enumerated()), id: \.1.id) { idx, row in
+                                Button {
+                                    let absIndex = page * pageSize + idx
+                                    onOpen(row.result, absIndex)
+                                } label: {
+                                    SearchRowView(row: row)
+                                }
+                                .buttonStyle(.plain)
                             }
-                            .buttonStyle(.plain)
-                            .padding(.horizontal, 8)
                         }
-                    }
-                    .padding(.vertical, 8)
-                } else {
-                    LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible()), GridItem(.flexible())], spacing: 16) {
-                        if rows.isEmpty && !isLoading {
-                            Text("No results")
-                                .foregroundColor(.secondary)
-                                .padding()
-                        }
-                        // Use stable row identity so SwiftUI doesn't reuse previous-page state
-                        ForEach(Array(rows.enumerated()), id: \.1.id) { (idx, row) in
-                            Button(action: {
-                                let absIndex = page * pageSize + idx
-                                onOpen(row, absIndex)
-                            }) {
-                                SearchTileView(row: row)
+                        .padding(16)
+                    } else {
+                        LazyVGrid(columns: [GridItem(.adaptive(minimum: 240), spacing: 16)], spacing: 16) {
+                            ForEach(Array(rows.enumerated()), id: \.1.id) { idx, row in
+                                Button {
+                                    let absIndex = page * pageSize + idx
+                                    onOpen(row.result, absIndex)
+                                } label: {
+                                    SearchTileView(row: row)
+                                }
+                                .buttonStyle(.plain)
                             }
-                            .buttonStyle(.plain)
                         }
+                        .padding(16)
                     }
-                    .padding(16)
                 }
             }
+
             if isLoading {
-                VStack(spacing: 8) {
+                VStack(spacing: 10) {
                     ProgressView()
                         .progressViewStyle(.circular)
                     Text("Loading results…")
                         .font(.footnote)
                         .foregroundColor(.secondary)
                 }
-                .padding(16)
-                .background(.ultraThinMaterial)
-                .cornerRadius(10)
+                .padding(.horizontal, 18)
+                .padding(.vertical, 16)
+                .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 14, style: .continuous)
+                        .stroke(Color.primary.opacity(0.08), lineWidth: 1)
+                )
+                .shadow(color: Color.black.opacity(0.08), radius: 10, y: 4)
             }
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .animation(.easeInOut(duration: 0.16), value: viewMode)
     }
 
     private var pager: some View {
-        HStack {
-            Button("Previous") { loadPage(page - 1) }
-                .disabled(page == 0 || isLoading)
-            Button("Next") { loadPage(page + 1) }
-                .disabled(isLoading || !hasNext)
-            Spacer()
+        HStack(spacing: 10) {
+            Button {
+                loadPage(page - 1)
+            } label: {
+                Label("Previous", systemImage: "chevron.left")
+            }
+            .disabled(page == 0 || isLoading)
+
             Text("Page \(page + 1)")
-                .foregroundColor(.secondary)
+                .font(.subheadline.weight(.medium))
+
+            if !rows.isEmpty {
+                Text("• \(rows.count) shown")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+            }
+
+            Spacer()
+
+            Button {
+                loadPage(page + 1)
+            } label: {
+                Label("Next", systemImage: "chevron.right")
+            }
+            .disabled(isLoading || !hasNext)
         }
-        .padding(8)
+        .padding(.horizontal, 16)
+        .padding(.vertical, 12)
     }
 
     private func resetAndReload() {
@@ -154,13 +192,12 @@ struct SearchResultsView: View {
 
     private func loadPage(_ p: Int) {
         guard p >= 0 else { return }
-        // Bump token to invalidate any in-flight searches; only the latest response is applied.
         requestToken &+= 1
         let token = requestToken
         isLoading = true
         let offset = p * pageSize
         let limit = pageSize + 1
-        let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmed = trimmedQuery
         let fuzz = settings.fuzziness
         let ia = settings.intelligentAccuracy
         let aiEnabled = useAI && settings.aiEmbeddingsEnabled
@@ -169,34 +206,35 @@ struct SearchResultsView: View {
         let end = endMs
         let searchSvc = search
 
-        // All searches run on background thread
         DispatchQueue.global(qos: .userInitiated).async {
             let fetched: [SearchResult]
             if trimmed.isEmpty {
                 fetched = searchSvc.latestWithContent(limit: limit,
-                                                       offset: offset,
-                                                       appBundleIds: apps,
-                                                       startMs: start,
-                                                       endMs: end)
+                                                      offset: offset,
+                                                      appBundleIds: apps,
+                                                      startMs: start,
+                                                      endMs: end)
             } else if aiEnabled {
                 fetched = searchSvc.searchAI(trimmed,
-                                              appBundleIds: apps,
-                                              startMs: start,
-                                              endMs: end,
-                                              limit: limit,
-                                              offset: offset)
+                                             appBundleIds: apps,
+                                             startMs: start,
+                                             endMs: end,
+                                             limit: limit,
+                                             offset: offset)
             } else {
                 fetched = searchSvc.searchWithContent(trimmed,
-                                                       fuzziness: fuzz,
-                                                       intelligentAccuracy: ia,
-                                                       appBundleIds: apps,
-                                                       startMs: start,
-                                                       endMs: end,
-                                                       limit: limit,
-                                                       offset: offset)
+                                                      fuzziness: fuzz,
+                                                      intelligentAccuracy: ia,
+                                                      appBundleIds: apps,
+                                                      startMs: start,
+                                                      endMs: end,
+                                                      limit: limit,
+                                                      offset: offset)
+            }
+            let preparedRows = Array(fetched.prefix(self.pageSize)).map {
+                SearchResultDisplayRow(result: $0, query: trimmed, intelligentAccuracy: ia)
             }
             DispatchQueue.main.async {
-                // Ignore stale responses from superseded searches
                 guard token == requestToken else { return }
                 if p > 0 && fetched.isEmpty {
                     self.hasNext = false
@@ -204,7 +242,7 @@ struct SearchResultsView: View {
                     return
                 }
                 self.hasNext = fetched.count > self.pageSize
-                self.rows = Array(fetched.prefix(self.pageSize))
+                self.rows = preparedRows
                 self.page = p
                 self.isLoading = false
             }
@@ -212,298 +250,410 @@ struct SearchResultsView: View {
     }
 }
 
-private struct SearchRowView: View {
-    let row: SearchResult
-    let query: String
-    @State private var loadedThumb: NSImage? = nil
-    @State private var loadStarted: Bool = false
+private struct SearchResultDisplayRow: Identifiable {
+    let result: SearchResult
+    let snippet: AttributedString?
+    let fallbackSnippet: String
 
-    var body: some View {
-        HStack(alignment: .top, spacing: 10) {
-            thumb
-            VStack(alignment: .leading, spacing: 4) {
-                title
-                snippet
-                pathLine
-            }
-            Spacer()
-        }
+    var id: Int64 { result.id }
+
+    init(result: SearchResult, query: String, intelligentAccuracy: Bool) {
+        self.result = result
+        let flat = result.content.replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
+        self.snippet = Self.makeSnippet(content: flat, query: query, intelligentAccuracy: intelligentAccuracy)
+        self.fallbackSnippet = String(flat.prefix(140))
     }
 
-    private var thumb: some View {
-        // Return loaded thumbnail
-        if let img = loadedThumb {
-            return AnyView(Image(nsImage: img).resizable().aspectRatio(contentMode: .fit).frame(width: 120, height: 72).cornerRadius(6))
-        }
-        // Start async load if not started
-        if !loadStarted {
-            DispatchQueue.main.async {
-                guard !loadStarted else { return }
-                loadStarted = true
-                let url = URL(fileURLWithPath: row.path)
-                let ext = url.pathExtension.lowercased()
-                func loadMainImage() {
-                    ThumbnailCache.shared.thumbnailAsync(for: url, maxPixel: 140) { img in
-                        if let img = img { self.loadedThumb = img }
-                    }
-                }
-                func loadVideoFrame() {
-                    ThumbnailCache.shared.hevcThumbnail(for: url, startedAtMs: row.startedAtMs, maxPixel: 140) { img in
-                        if let img = img { self.loadedThumb = img; return }
-                        // Fallback to still image if HEVC frame failed
-                        loadMainImage()
-                    }
-                }
-                // Prefer poster thumbnail
-                if let t = row.thumbPath {
-                    ThumbnailCache.shared.thumbnailAsync(for: URL(fileURLWithPath: t), maxPixel: 140) { img in
-                        if let img = img { self.loadedThumb = img; return }
-                        // Poster missing; fall back to source
-                        if ["mov","mp4","tse"].contains(ext) {
-                            loadVideoFrame()
-                        } else {
-                            loadMainImage()
-                        }
-                    }
-                    return
-                }
-                // Video: use HEVC extractor
-                if ["mov","mp4","tse"].contains(ext) {
-                    loadVideoFrame()
-                    return
-                }
-                // Image: use async thumbnail
-                loadMainImage()
-            }
-        }
-        // Placeholder while loading
-        return AnyView(Rectangle().fill(Color.gray.opacity(0.08)).overlay{ ProgressView().scaleEffect(0.6) }.frame(width: 120, height: 72).cornerRadius(6))
+    private static func normalize(_ string: String) -> String {
+        string.folding(options: [.diacriticInsensitive, .caseInsensitive], locale: .current)
     }
 
-    private var title: some View {
-        HStack(spacing: 6) {
-            if let bid = row.appBundleId, let icon = AppIconCache.shared.icon(for: bid) {
-                Image(nsImage: icon)
-                    .resizable()
-                    .frame(width: 16, height: 16)
-                    .cornerRadius(3)
-            }
-            Text(row.appName ?? row.appBundleId ?? "Unknown App")
-                .font(.subheadline).bold()
-            Text(dateString(ms: row.startedAtMs))
-                .font(.footnote)
-                .foregroundColor(.secondary)
-        }
-    }
+    private static func makeSnippet(content: String, query: String, intelligentAccuracy: Bool) -> AttributedString? {
+        let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        let parts = SearchQueryParser.parse(trimmed).parts
+        guard !parts.isEmpty else { return nil }
 
-    private var snippet: some View {
-        // Flatten whitespace to keep rows compact
-        let flat = row.content.replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
-        let attr = makeSnippet(content: flat, query: query)
-        return Group {
-            if let a = attr {
-                Text(a)
-            } else {
-                Text(String(flat.prefix(120)))
-                    .foregroundColor(.secondary)
-            }
-        }
-    }
-
-    private var pathLine: some View {
-        Text(URL(fileURLWithPath: row.path).lastPathComponent)
-            .font(.caption)
-            .foregroundColor(.secondary)
-    }
-
-    private func dateString(ms: Int64) -> String {
-        let d = Date(timeIntervalSince1970: TimeInterval(ms) / 1000)
-        return Self.df.string(from: d)
-    }
-
-    private static let df: DateFormatter = {
-        let f = DateFormatter()
-        f.dateStyle = .medium
-        f.timeStyle = .short
-        return f
-    }()
-
-    private func normalize(_ s: String) -> String {
-        s.folding(options: [.diacriticInsensitive, .caseInsensitive], locale: .current)
-    }
-
-    private func makeSnippet(content: String, query: String) -> AttributedString? {
-        let q = query.trimmingCharacters(in: .whitespacesAndNewlines)
-        let parts = SearchQueryParser.parse(q).parts
         let contentNorm = normalize(content)
         var firstHit: String.Index? = nil
         var firstLen = 0
-        let intelligent = SettingsStore.shared.intelligentAccuracy
-        // Find earliest occurrence of any token variant (phrases remain exact)
+
         for part in parts {
             if part.isPhrase {
-                let tn = normalize(part.text)
-                if let r = contentNorm.range(of: tn) {
-                    firstHit = r.lowerBound
-                    firstLen = tn.count
+                let token = normalize(part.text)
+                if let range = contentNorm.range(of: token) {
+                    firstHit = range.lowerBound
+                    firstLen = token.count
                     break
                 }
             } else {
                 let base = normalize(part.text)
-                let variants: [String] = intelligent ? OCRConfusion.expand(base) : [base]
+                let variants: [String] = intelligentAccuracy ? OCRConfusion.expand(base) : [base]
                 var found: Range<String.Index>? = nil
-                for v in variants {
-                    if let r = contentNorm.range(of: v) { found = r; break }
+                for variant in variants {
+                    if let range = contentNorm.range(of: variant) {
+                        found = range
+                        break
+                    }
                 }
-                if let r = found {
-                    firstHit = r.lowerBound
-                    firstLen = contentNorm.distance(from: r.lowerBound, to: r.upperBound)
+                if let range = found {
+                    firstHit = range.lowerBound
+                    firstLen = contentNorm.distance(from: range.lowerBound, to: range.upperBound)
                     break
                 }
             }
         }
-        // Window
+
         let snippet: String
-        var baseRange: Range<String.Index>
+        let baseRange: Range<String.Index>
         if let hit = firstHit {
-            // Map index from normalized to original by using same UTF-16 positions
             let utf16 = contentNorm.utf16
             let startPos = utf16.distance(from: utf16.startIndex, to: hit.samePosition(in: utf16) ?? utf16.startIndex)
             let origUTF16 = content.utf16
             let startIdx = origUTF16.index(origUTF16.startIndex, offsetBy: max(0, startPos))
             let start = startIdx.samePosition(in: content) ?? content.startIndex
             let startOffset = max(0, content.distance(from: content.startIndex, to: start) - 40)
-            let sIdx = content.index(content.startIndex, offsetBy: startOffset)
+            let snippetStart = content.index(content.startIndex, offsetBy: startOffset)
             let endOffset = min(content.count, startOffset + max(100, firstLen + 80))
-            let eIdx = content.index(content.startIndex, offsetBy: endOffset)
-            baseRange = sIdx..<eIdx
+            let snippetEnd = content.index(content.startIndex, offsetBy: endOffset)
+            baseRange = snippetStart..<snippetEnd
             snippet = String(content[baseRange])
         } else {
-            let len = min(140, content.count)
-            let eIdx = content.index(content.startIndex, offsetBy: len)
-            baseRange = content.startIndex..<eIdx
+            let endOffset = min(140, content.count)
+            let snippetEnd = content.index(content.startIndex, offsetBy: endOffset)
+            baseRange = content.startIndex..<snippetEnd
             snippet = String(content[baseRange])
         }
-        var attr = AttributedString(snippet)
-        let snNorm = normalize(snippet)
+
+        var attributed = AttributedString(snippet)
+        let snippetNorm = normalize(snippet)
         for part in parts {
             if part.isPhrase {
-                let tn = normalize(part.text)
-                var searchStart = snNorm.startIndex
-                while let r = snNorm.range(of: tn, range: searchStart..<snNorm.endIndex) {
-                    let hi = r.upperBound
-                    if let ra = Range(r, in: attr) { attr[ra].inlinePresentationIntent = .stronglyEmphasized }
-                    searchStart = hi
+                let token = normalize(part.text)
+                var searchStart = snippetNorm.startIndex
+                while let range = snippetNorm.range(of: token, range: searchStart..<snippetNorm.endIndex) {
+                    let upper = range.upperBound
+                    if let attributedRange = Range(range, in: attributed) {
+                        attributed[attributedRange].inlinePresentationIntent = .stronglyEmphasized
+                    }
+                    searchStart = upper
                 }
             } else {
                 let base = normalize(part.text)
-                let variants: [String] = intelligent ? OCRConfusion.expand(base) : [base]
-                for v in variants {
-                    var searchStart = snNorm.startIndex
-                    while let r = snNorm.range(of: v, range: searchStart..<snNorm.endIndex) {
-                        let hi = r.upperBound
-                        if let ra = Range(r, in: attr) { attr[ra].inlinePresentationIntent = .stronglyEmphasized }
-                        searchStart = hi
+                let variants: [String] = intelligentAccuracy ? OCRConfusion.expand(base) : [base]
+                for variant in variants {
+                    var searchStart = snippetNorm.startIndex
+                    while let range = snippetNorm.range(of: variant, range: searchStart..<snippetNorm.endIndex) {
+                        let upper = range.upperBound
+                        if let attributedRange = Range(range, in: attributed) {
+                            attributed[attributedRange].inlinePresentationIntent = .stronglyEmphasized
+                        }
+                        searchStart = upper
                     }
                 }
             }
         }
-        // Ellipsize presentation
-        var leading = ""
-        var trailing = ""
-        if baseRange.lowerBound > content.startIndex { leading = "… " }
-        if baseRange.upperBound < content.endIndex { trailing = " …" }
-        var combined = AttributedString(leading)
-        combined += attr
-        combined += AttributedString(trailing)
+
+        var combined = AttributedString(baseRange.lowerBound > content.startIndex ? "… " : "")
+        combined += attributed
+        combined += AttributedString(baseRange.upperBound < content.endIndex ? " …" : "")
         return combined
     }
 }
 
+private struct SearchRowView: View {
+    let row: SearchResultDisplayRow
+    @State private var isHovering: Bool = false
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 14) {
+            SearchResultThumbnailView(row: row.result, maxPixel: 160, width: 136, height: 82)
+
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(alignment: .center, spacing: 8) {
+                    if let bid = row.result.appBundleId {
+                        AppBundleIconView(bundleId: bid, size: 18, cornerRadius: 4)
+                    }
+                    Text(row.result.appName ?? row.result.appBundleId ?? "Unknown App")
+                        .font(.headline)
+                    Spacer(minLength: 8)
+                    Text(dateString(ms: row.result.startedAtMs))
+                        .font(.footnote)
+                        .foregroundColor(.secondary)
+                }
+
+                snippet
+                    .font(.body)
+                    .foregroundStyle(.primary)
+                    .lineLimit(3)
+
+                Label(URL(fileURLWithPath: row.result.path).lastPathComponent, systemImage: "doc.text")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .padding(14)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(backgroundShape.fill(backgroundFill))
+        .overlay(backgroundShape.stroke(backgroundStroke, lineWidth: 1))
+        .shadow(color: isHovering ? Color.black.opacity(0.08) : .clear, radius: 10, y: 4)
+        .contentShape(Rectangle())
+        .onHover { hovering in
+            withAnimation(.easeInOut(duration: 0.12)) {
+                isHovering = hovering
+            }
+        }
+    }
+
+    private var backgroundShape: RoundedRectangle {
+        RoundedRectangle(cornerRadius: 16, style: .continuous)
+    }
+
+    private var backgroundFill: Color {
+        isHovering
+            ? Color.accentColor.opacity(0.10)
+            : Color(nsColor: .controlBackgroundColor).opacity(0.60)
+    }
+
+    private var backgroundStroke: Color {
+        isHovering
+            ? Color.accentColor.opacity(0.22)
+            : Color.primary.opacity(0.06)
+    }
+
+    private var snippet: Text {
+        if let attributed = row.snippet {
+            return Text(attributed)
+        }
+        return Text(row.fallbackSnippet).foregroundColor(.secondary)
+    }
+
+    private func dateString(ms: Int64) -> String {
+        let date = Date(timeIntervalSince1970: TimeInterval(ms) / 1000)
+        return Self.dateFormatter.string(from: date)
+    }
+
+    private static let dateFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateStyle = .medium
+        formatter.timeStyle = .short
+        return formatter
+    }()
+}
+
 private struct SearchTileView: View {
+    let row: SearchResultDisplayRow
+    @State private var isHovering: Bool = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            SearchResultThumbnailView(row: row.result, maxPixel: 420)
+
+            HStack(alignment: .center, spacing: 8) {
+                if let bid = row.result.appBundleId {
+                    AppBundleIconView(bundleId: bid, size: 16, cornerRadius: 4)
+                }
+                Text(row.result.appName ?? row.result.appBundleId ?? "Unknown App")
+                    .font(.subheadline.weight(.semibold))
+                    .lineLimit(1)
+            }
+
+            Text(dateString(ms: row.result.startedAtMs))
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(backgroundShape.fill(backgroundFill))
+        .overlay(backgroundShape.stroke(backgroundStroke, lineWidth: 1))
+        .shadow(color: isHovering ? Color.black.opacity(0.08) : .clear, radius: 10, y: 4)
+        .contentShape(Rectangle())
+        .onHover { hovering in
+            withAnimation(.easeInOut(duration: 0.12)) {
+                isHovering = hovering
+            }
+        }
+    }
+
+    private var backgroundShape: RoundedRectangle {
+        RoundedRectangle(cornerRadius: 16, style: .continuous)
+    }
+
+    private var backgroundFill: Color {
+        isHovering
+            ? Color.accentColor.opacity(0.10)
+            : Color(nsColor: .controlBackgroundColor).opacity(0.60)
+    }
+
+    private var backgroundStroke: Color {
+        isHovering
+            ? Color.accentColor.opacity(0.22)
+            : Color.primary.opacity(0.06)
+    }
+
+    private func dateString(ms: Int64) -> String {
+        let date = Date(timeIntervalSince1970: TimeInterval(ms) / 1000)
+        return Self.dateFormatter.string(from: date)
+    }
+
+    private static let dateFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateStyle = .medium
+        formatter.timeStyle = .short
+        return formatter
+    }()
+}
+
+private struct AppBundleIconView: View {
+    let bundleId: String
+    let size: CGFloat
+    let cornerRadius: CGFloat
+
+    @State private var icon: NSImage? = nil
+    @State private var requestedLoad = false
+
+    var body: some View {
+        Group {
+            if let icon {
+                Image(nsImage: icon)
+                    .resizable()
+            } else {
+                RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                    .fill(Color.secondary.opacity(0.14))
+            }
+        }
+        .frame(width: size, height: size)
+        .clipShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
+        .onAppear(perform: startLoadingIfNeeded)
+    }
+
+    private func startLoadingIfNeeded() {
+        if let cached = AppIconCache.shared.cachedIcon(for: bundleId) {
+            icon = cached
+            return
+        }
+
+        guard !requestedLoad else { return }
+        requestedLoad = true
+        AppIconCache.shared.loadIconAsync(for: bundleId) { loaded in
+            icon = loaded
+        }
+    }
+}
+
+private struct SearchResultThumbnailView: View {
     let row: SearchResult
+    let maxPixel: Int
+    var width: CGFloat? = nil
+    var height: CGFloat? = nil
+
     @State private var loadedThumb: NSImage? = nil
     @State private var loadStarted: Bool = false
 
     var body: some View {
-        VStack(spacing: 8) {
-            thumb
-            HStack(spacing: 6) {
-                if let bid = row.appBundleId, let icon = AppIconCache.shared.icon(for: bid) {
-                    Image(nsImage: icon)
-                        .resizable()
-                        .frame(width: 14, height: 14)
-                        .cornerRadius(2)
-                }
-                Text(dateString(ms: row.startedAtMs))
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-                Spacer()
+        ZStack {
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .fill(Color.gray.opacity(0.08))
+
+            if let image = loadedThumb {
+                Image(nsImage: image)
+                    .resizable()
+                    .aspectRatio(contentMode: .fill)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                ProgressView()
+                    .scaleEffect(0.75)
             }
         }
-        .padding(8)
-        .background(Color(NSColor.textBackgroundColor))
-        .cornerRadius(8)
+        .frame(width: width, height: height)
+        .aspectRatio((width != nil && height != nil) ? nil : 16 / 10, contentMode: .fit)
+        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .stroke(Color.primary.opacity(0.05), lineWidth: 1)
+        )
+        .onAppear(perform: startLoadingIfNeeded)
     }
 
-    private var thumb: some View {
-        // Return loaded thumbnail
-        if let img = loadedThumb {
-            return AnyView(Image(nsImage: img).resizable().aspectRatio(contentMode: .fit).cornerRadius(6))
-        }
-        // Start async load if not started
-        if !loadStarted {
+    private func startLoadingIfNeeded() {
+        guard !loadStarted else { return }
+        loadStarted = true
+        let url = URL(fileURLWithPath: row.path)
+        let ext = url.pathExtension.lowercased()
+        let pixelSize = CGFloat(maxPixel)
+
+        func assign(_ image: NSImage?) {
+            guard let image else { return }
             DispatchQueue.main.async {
-                guard !loadStarted else { return }
-                loadStarted = true
-                let url = URL(fileURLWithPath: row.path)
-                let ext = url.pathExtension.lowercased()
-                func loadMainImage() {
-                    ThumbnailCache.shared.thumbnailAsync(for: url, maxPixel: 400) { img in
-                        if let img = img { self.loadedThumb = img }
-                    }
-                }
-                func loadVideoFrame() {
-                    ThumbnailCache.shared.hevcThumbnail(for: url, startedAtMs: row.startedAtMs, maxPixel: 400) { img in
-                        if let img = img { self.loadedThumb = img; return }
-                        loadMainImage()
-                    }
-                }
-                // Prefer poster thumbnail
-                if let t = row.thumbPath {
-                    ThumbnailCache.shared.thumbnailAsync(for: URL(fileURLWithPath: t), maxPixel: 400) { img in
-                        if let img = img { self.loadedThumb = img; return }
-                        // Poster missing; fall back to source
-                        if ["mov","mp4","tse"].contains(ext) {
-                            loadVideoFrame()
-                        } else {
-                            loadMainImage()
-                        }
-                    }
-                    return
-                }
-                // Video: use HEVC extractor
-                if ["mov","mp4","tse"].contains(ext) {
-                    loadVideoFrame()
-                    return
-                }
-                // Image: use async thumbnail
-                loadMainImage()
+                loadedThumb = image
             }
         }
-        // Placeholder while loading
-        return AnyView(Rectangle().fill(Color.gray.opacity(0.08)).overlay{ ProgressView().scaleEffect(0.7) }.aspectRatio(16/10, contentMode: .fit).cornerRadius(6))
+
+        func loadMainImage() {
+            ThumbnailCache.shared.thumbnailAsync(for: url, maxPixel: pixelSize) { assign($0) }
+        }
+
+        func loadVideoFrame() {
+            ThumbnailCache.shared.hevcThumbnail(for: url, startedAtMs: row.startedAtMs, maxPixel: pixelSize) { image in
+                if let image {
+                    assign(image)
+                } else {
+                    loadMainImage()
+                }
+            }
+        }
+
+        if let thumbPath = row.thumbPath {
+            ThumbnailCache.shared.thumbnailAsync(for: URL(fileURLWithPath: thumbPath), maxPixel: pixelSize) { image in
+                if let image {
+                    assign(image)
+                } else if ["mov", "mp4", "tse"].contains(ext) {
+                    loadVideoFrame()
+                } else {
+                    loadMainImage()
+                }
+            }
+            return
+        }
+
+        if ["mov", "mp4", "tse"].contains(ext) {
+            loadVideoFrame()
+            return
+        }
+
+        loadMainImage()
+    }
+}
+
+private struct SearchEmptyStateView: View {
+    let query: String
+    let useAI: Bool
+
+    var body: some View {
+        VStack(spacing: 12) {
+            Image(systemName: query.isEmpty ? "photo.on.rectangle.angled" : "magnifyingglass")
+                .font(.system(size: 28))
+                .foregroundStyle(.secondary)
+
+            Text(query.isEmpty ? "No snapshots" : "No matches found")
+                .font(.headline)
+
+            Text(message)
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+                .frame(maxWidth: 360)
+        }
     }
 
-    private func dateString(ms: Int64) -> String {
-        let d = Date(timeIntervalSince1970: TimeInterval(ms) / 1000)
-        return Self.df.string(from: d)
+    private var message: String {
+        if query.isEmpty {
+            return "Try broadening the date or app filters to bring more captures into view."
+        }
+        if useAI {
+            return "Try fewer keywords, a shorter phrase, or switch AI off for a stricter text match."
+        }
+        return "Try a broader term, a shorter phrase, or a different spelling."
     }
-
-    private static let df: DateFormatter = {
-        let f = DateFormatter()
-        f.dateStyle = .medium
-        f.timeStyle = .short
-        return f
-    }()
 }

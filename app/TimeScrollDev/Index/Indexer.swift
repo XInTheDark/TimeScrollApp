@@ -62,32 +62,7 @@ final class Indexer {
             if !result.lines.isEmpty {
                 try DB.shared.replaceBoxes(snapshotId: snapshotId, boxes: result.lines)
             }
-            // Optional: compute and store embedding of OCR text when enabled
-            let d = UserDefaults.standard
-            let aiOn = (d.object(forKey: "settings.aiEmbeddingsEnabled") != nil) ? d.bool(forKey: "settings.aiEmbeddingsEnabled") : false
-            if aiOn {
-                let svc = EmbeddingService.shared
-                svc.reloadFromSettings()
-                let provider = svc.providerID
-                let model = svc.modelID
-                let (vec, known, total) = svc.embedWithStats(result.text, usage: .document)
-                let dim = vec.count
-                if !vec.isEmpty {
-                    do {
-                        try DB.shared.upsertEmbedding(snapshotId: snapshotId, dim: dim, vec: vec, provider: provider, model: model)
-                        if UserDefaults.standard.bool(forKey: "settings.debugMode") {
-                            let head = vec.prefix(8).map { String(format: "%.4f", $0) }.joined(separator: ", ")
-                            print("[AI][Store] snapshotId=\(snapshotId) provider=\(provider) model=\(model) dim=\(vec.count) tokens=\(known)/\(total) head=[\(head)]")
-                        }
-                    } catch {
-                        if UserDefaults.standard.bool(forKey: "settings.debugMode") {
-                            print("[AI][Store][Error] snapshotId=\(snapshotId) provider=\(provider) model=\(model) dim=\(vec.count) err=\(error.localizedDescription)")
-                        }
-                    }
-                } else if UserDefaults.standard.bool(forKey: "settings.debugMode") {
-                    print("[AI][Store][Skip] snapshotId=\(snapshotId) provider=\(provider) model=\(model) dim=\(dim) vecCount=\(vec.count) known=\(known)/\(total)")
-                }
-            }
+            SnapshotEmbeddingWriter.shared.storeCurrentEmbeddingIfNeeded(snapshotId: snapshotId, pixelBuffer: pixelBuffer, extractedText: result.text)
         } catch {
         }
     }

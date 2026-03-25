@@ -24,7 +24,7 @@ struct DebugView: View {
                 }
                 Button("Compact Older") {
                     DispatchQueue.global(qos: .utility).async {
-                        Compactor().compactOlderSnapshots()
+                        _ = try? Compactor().compactOlderSnapshots()
                         DispatchQueue.main.async { refresh() }
                     }
                 }
@@ -86,5 +86,4 @@ struct DebugView: View {
         NSWorkspace.shared.activateFileViewerSelecting([url])
     }
 }
-
 

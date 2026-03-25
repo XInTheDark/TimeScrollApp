@@ -6,6 +6,14 @@ import Cocoa
 final class AXTextExtractor {
     static let shared = AXTextExtractor()
     private init() {}
+    private let cacheLock = NSLock()
+    private var appCache: [pid_t: AXUIElement] = [:]
+    private var windowCache: [pid_t: WindowCacheEntry] = [:]
+
+    private struct WindowCacheEntry {
+        let windows: [AXUIElement]
+        let fetchedAt: TimeInterval
+    }
 
     /// Roles that typically don't contain user-visible text content
     private static let skipRoles: Set<String> = [
@@ -56,9 +64,9 @@ final class AXTextExtractor {
 
         // ========== PHASE 1: Sequential - identify visible windows ==========
         var windowTasks: [WindowTask] = []
-        var appCache: [pid_t: AXUIElement] = [:]
-        var windowCache: [pid_t: [AXUIElement]] = [:]
         var coveredRects: [CGRect] = []
+        let visiblePIDs = Set(infoList.compactMap { $0[kCGWindowOwnerPID as String] as? pid_t })
+        purgeCaches(activePIDs: visiblePIDs)
 
         for entry in infoList {
             if windowTasks.count >= limits.maxWindows { break }
@@ -101,29 +109,9 @@ final class AXTextExtractor {
             }
 
             // Set up AX elements
-            if appCache[pid] == nil {
-                let appAX = AXUIElementCreateApplication(pid)
-                appCache[pid] = appAX
-                let enhancedResult = AXUIElementSetAttributeValue(appAX, "AXEnhancedUserInterface" as CFString, kCFBooleanTrue)
-                let manualResult = AXUIElementSetAttributeValue(appAX, "AXManualAccessibility" as CFString, kCFBooleanTrue)
-                if debugMode {
-                    print("[AX] pid=\(pid) AXEnhancedUserInterface=\(enhancedResult == .success) AXManualAccessibility=\(manualResult == .success)")
-                }
-            }
-
-            guard let appAX = appCache[pid] else { continue }
-
-            if windowCache[pid] == nil {
-                var axWindows: CFTypeRef?
-                if AXUIElementCopyAttributeValue(appAX, kAXWindowsAttribute as CFString, &axWindows) == .success,
-                   let arr = axWindows as? [AXUIElement] {
-                    windowCache[pid] = arr
-                } else {
-                    windowCache[pid] = []
-                }
-            }
-
-            guard let candidates = windowCache[pid] else { continue }
+            let appAX = appElement(for: pid, debugMode: debugMode)
+            let candidates = windows(for: pid, appAX: appAX)
+            guard !candidates.isEmpty else { continue }
 
             // Find best match by frame
             var bestWin: AXUIElement?
@@ -382,4 +370,61 @@ extension AXTextExtractor.Limits {
 
 extension CGRect {
     var area: CGFloat { width * height }
+}
+
+private extension AXTextExtractor {
+    func appElement(for pid: pid_t, debugMode: Bool) -> AXUIElement {
+        cacheLock.lock()
+        if let cached = appCache[pid] {
+            cacheLock.unlock()
+            return cached
+        }
+        cacheLock.unlock()
+
+        let appAX = AXUIElementCreateApplication(pid)
+        // Avoid toggling AXEnhancedUserInterface: it can change other apps' rendering/behavior
+        // (for example reduced transparency or altered window-management behavior).
+        // AXManualAccessibility is the safer third-party opt-in for Chromium/Electron accessibility trees.
+        let manualResult = AXUIElementSetAttributeValue(appAX, "AXManualAccessibility" as CFString, kCFBooleanTrue)
+        if debugMode {
+            print("[AX] pid=\(pid) AXManualAccessibility=\(manualResult == .success)")
+        }
+
+        cacheLock.lock()
+        appCache[pid] = appAX
+        cacheLock.unlock()
+        return appAX
+    }
+
+    func windows(for pid: pid_t, appAX: AXUIElement) -> [AXUIElement] {
+        let now = Date().timeIntervalSince1970
+
+        cacheLock.lock()
+        if let cached = windowCache[pid], now - cached.fetchedAt <= 10 {
+            cacheLock.unlock()
+            return cached.windows
+        }
+        cacheLock.unlock()
+
+        var axWindows: CFTypeRef?
+        let windows: [AXUIElement]
+        if AXUIElementCopyAttributeValue(appAX, kAXWindowsAttribute as CFString, &axWindows) == .success,
+           let arr = axWindows as? [AXUIElement] {
+            windows = arr
+        } else {
+            windows = []
+        }
+
+        cacheLock.lock()
+        windowCache[pid] = WindowCacheEntry(windows: windows, fetchedAt: now)
+        cacheLock.unlock()
+        return windows
+    }
+
+    func purgeCaches(activePIDs: Set<pid_t>) {
+        cacheLock.lock()
+        appCache = appCache.filter { activePIDs.contains($0.key) }
+        windowCache = windowCache.filter { activePIDs.contains($0.key) }
+        cacheLock.unlock()
+    }
 }

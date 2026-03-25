@@ -26,6 +26,10 @@ final class AppState: ObservableObject {
         let days = SettingsStore.shared.retentionDays
         Task.detached {
             try? DB.shared.purgeOlderThan(days: days)
+            DB.shared.pruneOldOCRBoxesIfConfigured()
+            await MainActor.run {
+                StorageMaintenanceManager.shared.runIfNeeded(forceMaintenance: true, afterLargeDelete: true)
+            }
         }
     }
 

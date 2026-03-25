@@ -12,8 +12,8 @@ final class OCRService {
 
     init() {
         let req = VNRecognizeTextRequest()
-        let raw = UserDefaults.standard.string(forKey: "settings.ocrMode") ?? "accurate"
-        let accurate = (raw == "accurate")
+        let raw = UserDefaults.standard.string(forKey: "settings.ocrMode") ?? SettingsStore.defaultOCRMode.rawValue
+        let accurate = (raw == SettingsStore.OCRMode.accurate.rawValue)
         req.recognitionLevel = accurate ? .accurate : .fast
         req.usesLanguageCorrection = accurate
         self.request = req
@@ -24,7 +24,7 @@ final class OCRService {
         applyModeFromDefaultsIfNeeded()
         let handler = VNImageRequestHandler(cvPixelBuffer: pixelBuffer, orientation: .up)
         try handler.perform([request])
-        let observations = request.results as? [VNRecognizedTextObservation] ?? []
+        let observations = request.results ?? []
         var text = ""
         var lines: [OCRLine] = []
         for o in observations {
@@ -38,8 +38,8 @@ final class OCRService {
     }
 
     private func applyModeFromDefaultsIfNeeded() {
-        let raw = UserDefaults.standard.string(forKey: "settings.ocrMode") ?? "accurate"
-        let accurate = (raw == "accurate")
+        let raw = UserDefaults.standard.string(forKey: "settings.ocrMode") ?? SettingsStore.defaultOCRMode.rawValue
+        let accurate = (raw == SettingsStore.OCRMode.accurate.rawValue)
         if accurate != lastAccurate {
             request.recognitionLevel = accurate ? .accurate : .fast
             request.usesLanguageCorrection = accurate

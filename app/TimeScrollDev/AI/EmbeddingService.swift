@@ -1,5 +1,6 @@
 import Foundation
 import NaturalLanguage
+import CoreVideo
 
 // Lightweight embedding service
 // Supports multiple embedding providers:
@@ -12,11 +13,13 @@ final class EmbeddingService {
     enum Provider: String, CaseIterable {
         case appleNL = "apple-nl"
         case ollama = "ollama"
+        case mobileclip2 = "mobileclip2"
 
         var displayName: String {
             switch self {
             case .appleNL: return "Apple built-in"
             case .ollama: return "Ollama"
+            case .mobileclip2: return "MobileCLIP2"
             }
         }
     }
@@ -27,38 +30,12 @@ final class EmbeddingService {
     }
 
     private init() {
-        let d = UserDefaults.standard
-        aiEnabled = (d.object(forKey: "settings.aiEmbeddingsEnabled") != nil) ? d.bool(forKey: "settings.aiEmbeddingsEnabled") : false
-        threshold = (d.object(forKey: "settings.aiThreshold") != nil) ? d.double(forKey: "settings.aiThreshold") : 0.5
-        maxCandidates = {
-            let v = d.integer(forKey: "settings.aiMaxCandidates")
-            return v > 0 ? v : 10000
-        }()
-
-        // Load selected provider
-        if let raw = d.string(forKey: "settings.embeddingProvider"), let p = Provider(rawValue: raw) {
-            selectedProvider = p
-        } else {
-            selectedProvider = .appleNL
-        }
-
-        // Load selected model (if present) — default to the previous snowflake model for backwards compatibility
-        if let m = d.string(forKey: "settings.embeddingModel") {
-            selectedModel = m
-        } else {
-            selectedModel = "snowflake-arctic-embed:33m"
-        }
-
-        // Initialize the appropriate provider
-        switch selectedProvider {
-        case .appleNL:
-            nlProvider = NLEmbeddingProvider()
-            ollamaProvider = nil
-        case .ollama:
-            nlProvider = nil
-            let model = selectedModel ?? "snowflake-arctic-embed:33m"
-            ollamaProvider = OllamaEmbeddingProvider(model: model)
-        }
+        aiEnabled = false
+        threshold = 0.5
+        maxCandidates = 10000
+        selectedProvider = .appleNL
+        selectedModel = nil
+        reloadFromSettings(eagerProviderSetup: !Thread.isMainThread)
     }
 
     private(set) var aiEnabled: Bool
@@ -69,41 +46,72 @@ final class EmbeddingService {
 
         private var nlProvider: NLEmbeddingProvider?
         private var ollamaProvider: OllamaEmbeddingProvider?
+        private var mobileclipProvider: MobileCLIP2EmbeddingProvider?
 
     var dim: Int {
         switch selectedProvider {
         case .appleNL: return nlProvider?.dim ?? 0
         case .ollama: return ollamaProvider?.dim ?? 0
+        case .mobileclip2: return mobileclipProvider?.dim ?? 0
         }
     }
 
     // Reload selection from UserDefaults — used after settings change
-    func reloadFromSettings() {
+    func reloadFromSettings(eagerProviderSetup: Bool = !Thread.isMainThread) {
         let d = UserDefaults.standard
+        aiEnabled = (d.object(forKey: "settings.aiEmbeddingsEnabled") != nil) ? d.bool(forKey: "settings.aiEmbeddingsEnabled") : false
+        threshold = (d.object(forKey: "settings.aiThreshold") != nil) ? d.double(forKey: "settings.aiThreshold") : 0.5
+        maxCandidates = {
+            let v = d.integer(forKey: "settings.aiMaxCandidates")
+            return v > 0 ? v : 10000
+        }()
         if let raw = d.string(forKey: "settings.embeddingProvider"), let p = Provider(rawValue: raw) {
             selectedProvider = p
         } else {
             selectedProvider = .appleNL
         }
-        if let m = d.string(forKey: "settings.embeddingModel") {
-            selectedModel = m
-        } else {
-            selectedModel = "snowflake-arctic-embed:33m"
-        }
+        selectedModel = Self.selectedModel(from: d, provider: selectedProvider)
 
         switch selectedProvider {
         case .appleNL:
             nlProvider = NLEmbeddingProvider()
             ollamaProvider = nil
+            mobileclipProvider = nil
         case .ollama:
             nlProvider = nil
-            let model = selectedModel ?? "snowflake-arctic-embed:33m"
-            ollamaProvider = OllamaEmbeddingProvider(model: model)
+            let model = selectedModel ?? Self.defaultModel(for: .ollama)
+            ollamaProvider = OllamaEmbeddingProvider(model: model, eagerlyResolveDimension: eagerProviderSetup)
+            mobileclipProvider = nil
+        case .mobileclip2:
+            nlProvider = nil
+            ollamaProvider = nil
+            let model = selectedModel ?? Self.defaultModel(for: .mobileclip2)
+            mobileclipProvider = MobileCLIP2EmbeddingProvider(modelName: model, eagerlyLoadRuntime: eagerProviderSetup)
         }
     }
 
     var providerID: String { selectedProvider.rawValue }
-    var modelID: String { selectedModel ?? selectedProvider.rawValue }
+    var modelID: String {
+        switch selectedProvider {
+        case .appleNL:
+            return "apple-nl-en"
+        case .ollama:
+            return selectedModel ?? Self.defaultModel(for: .ollama)
+        case .mobileclip2:
+            return selectedModel ?? Self.defaultModel(for: .mobileclip2)
+        }
+    }
+
+    var supportsImageDocuments: Bool {
+        selectedProvider == .mobileclip2
+    }
+
+    var effectiveThreshold: Double {
+        if selectedProvider == .mobileclip2, abs(threshold - 0.30) < 0.0001 {
+            return 0.15
+        }
+        return threshold
+    }
 
     func embed(_ text: String, usage: Usage = .document) -> [Float] {
         return embedWithStats(text, usage: usage).vec
@@ -115,7 +123,7 @@ final class EmbeddingService {
 
         // Use provider-agnostic long-text embedding util when text exceeds a threshold.
         let maxInput = 2_000
-        if text.count > maxInput {
+        if selectedProvider != .mobileclip2, text.count > maxInput {
             (raw, known, total) = Self.embedLongTextWithStats(text: text, maxInput: maxInput, maxChunks: 10, overlapPct: 0.10, provider: selectedProvider, nlProvider: nlProvider, ollamaProvider: ollamaProvider, usage: usage)
         } else {
             switch selectedProvider {
@@ -125,6 +133,9 @@ final class EmbeddingService {
             case .ollama:
                 guard let p = ollamaProvider else { return ([], 0, 0) }
                 (raw, known, total) = p.embedWithStats(text: text, usage: usage)
+            case .mobileclip2:
+                guard let p = mobileclipProvider else { return ([], 0, 0) }
+                (raw, known, total) = p.embedTextWithStats(text: text)
             }
         }
 
@@ -137,6 +148,41 @@ final class EmbeddingService {
             print("[AI][Embed] provider=\(selectedProvider.rawValue) model=\(model) dim=\(raw.count) known=\(known)/\(total) norm=\(String(format: "%.4f", norm)) head=[\(head)]")
         }
         return (Self.l2normalize(raw), known, total)
+    }
+
+    func embedDocument(pixelBuffer: CVPixelBuffer, extractedText: String?) -> [Float] {
+        switch selectedProvider {
+        case .appleNL:
+            guard let extractedText, !extractedText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return [] }
+            return embed(extractedText, usage: .document)
+        case .ollama:
+            guard let extractedText, !extractedText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return [] }
+            return embed(extractedText, usage: .document)
+        case .mobileclip2:
+            guard let provider = mobileclipProvider else { return [] }
+            let includeText = UserDefaults.standard.bool(forKey: "settings.multimodalIncludeExtractedText")
+            return provider.embedDocument(pixelBuffer: pixelBuffer, extractedText: extractedText, includeText: includeText)
+        }
+    }
+
+    private static func selectedModel(from defaults: UserDefaults, provider: Provider) -> String? {
+        switch provider {
+        case .appleNL:
+            return nil
+        case .ollama, .mobileclip2:
+            return defaults.string(forKey: "settings.embeddingModel") ?? defaultModel(for: provider)
+        }
+    }
+
+    private static func defaultModel(for provider: Provider) -> String {
+        switch provider {
+        case .appleNL:
+            return "apple-nl-en"
+        case .ollama:
+            return "snowflake-arctic-embed:33m"
+        case .mobileclip2:
+            return MobileCLIPModelCatalog.Model.s0.rawValue
+        }
     }
 
     static func l2normalize(_ v: [Float]) -> [Float] {
@@ -228,6 +274,8 @@ extension EmbeddingService {
                     knownSum += k
                     totalSum += t
                 }
+            case .mobileclip2:
+                break
             }
         }
 
@@ -305,12 +353,13 @@ final class OllamaEmbeddingProvider {
 
     init(model: String,
          baseURL: String = "http://localhost:11434",
+         eagerlyResolveDimension: Bool = true,
          metadataFetcher: @escaping MetadataFetcher = OllamaEmbeddingProvider.fetchEmbeddingLength) {
         self.model = model
         self.baseURL = baseURL
         if let cached = Self.cachedDim(for: model) {
             self.dim = cached
-        } else if let fetched = metadataFetcher(model, baseURL) {
+        } else if eagerlyResolveDimension, let fetched = metadataFetcher(model, baseURL) {
             self.dim = fetched
             Self.storeDim(fetched, for: model)
         } else {
@@ -497,6 +546,10 @@ final class OllamaEmbeddingProvider {
     private static func cachedDim(for model: String) -> Int? {
         ensureDimCacheLoaded()
         return metadataQueue.sync { dimCache[model] }
+    }
+
+    static func cachedOrDefaultDim(for model: String) -> Int {
+        cachedDim(for: model) ?? defaultDim
     }
 
     private static func storeDim(_ dim: Int, for model: String) {

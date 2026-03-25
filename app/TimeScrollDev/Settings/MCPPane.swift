@@ -1,30 +1,43 @@
 import SwiftUI
 
 struct MCPPane: View {
-        @Binding var mcpEnabled: Bool
-        var migrating: Bool
-        var migrationProgress: String
+    @Binding var mcpEnabled: Bool
+    var migrating: Bool
+    var migrationProgress: String
 
-        private static let helperExecutable = "/Applications/TimeScroll.app/Contents/Helpers/timescroll-mcp.app/Contents/MacOS/timescroll-mcp"
-        private static let defaultJSON: String = {
-                let helper = helperExecutable
-                return """
-                {
-                    "mcpServers": {
-                        "timescroll": {
-                            "type": "stdio",
-                            "command": "\(helper)",
-                            "args": [],
-                            "env": {}
-                        }
-                    }
+    @State private var jsonText: String
+
+    init(mcpEnabled: Binding<Bool>, migrating: Bool, migrationProgress: String) {
+        self._mcpEnabled = mcpEnabled
+        self.migrating = migrating
+        self.migrationProgress = migrationProgress
+        let helper = Self.helperExecutable(for: Bundle.main.bundleURL)
+        self._jsonText = State(initialValue: Self.makeConfigJSON(helperPath: helper))
+    }
+
+    private static func helperExecutable(for bundleURL: URL) -> String {
+        bundleURL
+            .appendingPathComponent("Contents/Helpers/timescroll-mcp.app/Contents/MacOS/timescroll-mcp")
+            .path
+    }
+
+    private static func makeConfigJSON(helperPath: String) -> String {
+        """
+        {
+            "mcpServers": {
+                "timescroll": {
+                    "type": "stdio",
+                    "command": "\(helperPath)",
+                    "args": [],
+                    "env": {}
                 }
-                """.trimmingCharacters(in: .whitespacesAndNewlines)
-        }()
+            }
+        }
+        """.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
 
-        private var helperPath: String { Self.helperExecutable }
-        private var cliSnippet: String { "claude mcp add --transport stdio timescroll -- \"\(helperPath)\"" }
-        @State private var jsonText: String = MCPPane.defaultJSON
+    private var helperPath: String { Self.helperExecutable(for: Bundle.main.bundleURL) }
+    private var cliSnippet: String { "claude mcp add --transport stdio timescroll -- \"\(helperPath)\"" }
 
     var body: some View {
         Form {
@@ -90,9 +103,6 @@ struct MCPPane: View {
     }
 
     private var logURL: URL? {
-        let appGroupID = "group.com.muzhen.TimeScroll.shared"
-        let fm = FileManager.default
-        guard let container = fm.containerURL(forSecurityApplicationGroupIdentifier: appGroupID) else { return nil }
-        return container.appendingPathComponent("Logs/timescroll-mcp.log")
+        StoragePaths.sharedLogURL(filename: "timescroll-mcp.log")
     }
 }

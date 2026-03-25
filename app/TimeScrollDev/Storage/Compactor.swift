@@ -17,24 +17,25 @@ final class Compactor {
     private func loadSettings() -> CompactionSettings {
         let d = UserDefaults.standard
         let days = d.object(forKey: "settings.degradeAfterDays") != nil ? d.integer(forKey: "settings.degradeAfterDays") : 7
-        let fmt = d.string(forKey: "settings.storageFormat") ?? "heic"
-        let maxEdge = d.object(forKey: "settings.degradeMaxLongEdge") != nil ? d.integer(forKey: "settings.degradeMaxLongEdge") : 1200
-        let quality = d.object(forKey: "settings.degradeQuality") != nil ? d.double(forKey: "settings.degradeQuality") : 0.5
+        let fmt = d.string(forKey: "settings.storageFormat") ?? SettingsStore.defaultStorageFormat.rawValue
+        let maxEdge = d.object(forKey: "settings.degradeMaxLongEdge") != nil ? d.integer(forKey: "settings.degradeMaxLongEdge") : SettingsStore.defaultDegradeMaxLongEdge
+        let quality = d.object(forKey: "settings.degradeQuality") != nil ? d.double(forKey: "settings.degradeQuality") : SettingsStore.defaultDegradeQuality
         return CompactionSettings(degradeAfterDays: days, storageFormatRaw: fmt, degradeMaxLongEdge: maxEdge, degradeQuality: quality)
     }
 
-    func compactOlderSnapshots() {
+    @discardableResult
+    func compactOlderSnapshots() throws -> Bool {
         let s = loadSettings()
         let days = s.degradeAfterDays
-        guard days > 0 else { return }
+        guard days > 0 else { return false }
         let cutoff = Int64(Date().addingTimeInterval(-Double(days)*86400).timeIntervalSince1970 * 1000)
         // When primary storage is HEVC video, delete rows older than cutoff and prune full segments
         if SettingsStore.StorageFormat(rawValue: s.storageFormatRaw) == .hevc {
-            try? DB.shared.purgeRowsOlderThan(cutoffMs: cutoff, deleteFiles: false)
+            try DB.shared.purgeRowsOlderThan(cutoffMs: cutoff, deleteFiles: false)
             pruneHEVCSegments(olderThanMs: cutoff)
-            return
+            return true
         }
-        let paths = (try? DB.shared.pathsOlderThan(cutoffMs: cutoff)) ?? []
+        let paths = try DB.shared.pathsOlderThan(cutoffMs: cutoff)
         for path in paths {
             var cgImage: CGImage?
             autoreleasepool {
@@ -63,6 +64,7 @@ final class Compactor {
                 }
             }
         }
+        return true
     }
 
     private func pruneHEVCSegments(olderThanMs cutoff: Int64) {

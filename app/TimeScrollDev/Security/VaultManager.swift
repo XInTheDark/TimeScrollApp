@@ -97,6 +97,7 @@ final class VaultManager: ObservableObject {
         SQLCipherBridge.shared.close()
         KeyStore.shared.forgetSession()
         ThumbnailCache.shared.clear()
+        EmbeddingANNIndexStore.shared.clearMemory()
         isUnlocked = false
         persistUnlocked(false)
         inactivityTimer?.invalidate()
@@ -118,9 +119,8 @@ final class VaultManager: ObservableObject {
         let std = UserDefaults.standard
         std.set(v, forKey: "vault.isUnlocked")
         std.synchronize()
-        let grp = UserDefaults(suiteName: StoragePaths.appGroupID) ?? .standard
-        grp.set(v, forKey: "vault.isUnlocked")
-        grp.synchronize()
+        StoragePaths.setShared(v, forKey: "vault.isUnlocked")
+        StoragePaths.synchronizeShared()
     }
 
     private func scheduleInactivityTimer() {

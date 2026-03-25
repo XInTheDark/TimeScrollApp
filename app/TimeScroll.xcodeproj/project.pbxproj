@@ -114,19 +114,42 @@
 			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
 			membershipExceptions = (
 				AI/EmbeddingService.swift,
+				AI/MobileCLIP/MobileCLIPEmbeddingProvider.swift,
+				AI/MobileCLIP/MobileCLIPManifest.swift,
+				AI/MobileCLIP/MobileCLIPModelCatalog.swift,
+				AI/MobileCLIP/MobileCLIPModelStore.swift,
+				AI/MobileCLIP/MobileCLIPRuntime.swift,
+				AI/MobileCLIP/MobileCLIPTokenizer.swift,
 				CoreSearch/PreferencesService.swift,
 				CoreSearch/SearchFacade.swift,
 				OCR/OCRService.swift,
 				Search/OCRConfusion.swift,
+				Search/EmbeddingANNIndex.swift,
+				Search/EmbeddingANNIndexStore.swift,
 				Search/SearchQueryParser.swift,
 				Search/SearchService.swift,
+				Search/VectorSearchEngine.swift,
 				Security/FileCrypter.swift,
 				Security/KeyStore.swift,
 				Security/SQLCipherBridge.swift,
 				Settings/SettingsStore.swift,
+				"Storage/DB+Embeddings.swift",
+				"Storage/DB+LatestQueries.swift",
+				"Storage/DB+OCRBoxQueries.swift",
+				"Storage/DB+SearchQueries.swift",
+				"Storage/DB+SnapshotMaintenance.swift",
+				"Storage/DB+SnapshotReads.swift",
+				"Storage/DB+SnapshotStats.swift",
+				"Storage/DB+SnapshotWrites.swift",
+				"Storage/DB+TextQueries.swift",
+				"Storage/DB+UsageSessions.swift",
 				Storage/DB.swift,
 				Storage/HEVCFrameExtractor.swift,
 				Storage/ImageEncoder.swift,
+				"Storage/StoragePaths+Backup.swift",
+				"Storage/StoragePaths+Migration.swift",
+				"Storage/StoragePaths+SecurityScope.swift",
+				"Storage/StoragePaths+SharedState.swift",
 				Storage/StoragePaths.swift,
 				Timeline/ThumbnailCache.swift,
 			);
@@ -657,7 +680,7 @@
 				BUILD_LIBRARY_FOR_DISTRIBUTION = YES;
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
-				CURRENT_PROJECT_VERSION = 42;
+				CURRENT_PROJECT_VERSION = 43;
 				DEVELOPMENT_TEAM = AHMJRF4WSG;
 				DYLIB_COMPATIBILITY_VERSION = 1;
 				DYLIB_CURRENT_VERSION = 1;
@@ -672,7 +695,7 @@
 					"@loader_path/Frameworks",
 				);
 				MACOSX_DEPLOYMENT_TARGET = 13.0;
-				MARKETING_VERSION = alpha.17;
+				MARKETING_VERSION = 1.0.0-rc1;
 				MODULE_VERIFIER_SUPPORTED_LANGUAGES = "objective-c objective-c++";
 				MODULE_VERIFIER_SUPPORTED_LANGUAGE_STANDARDS = "gnu17 gnu++20";
 				PRODUCT_BUNDLE_IDENTIFIER = com.muzhen.CoreSearch;
@@ -693,7 +716,7 @@
 				BUILD_LIBRARY_FOR_DISTRIBUTION = YES;
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
-				CURRENT_PROJECT_VERSION = 42;
+				CURRENT_PROJECT_VERSION = 43;
 				DEVELOPMENT_TEAM = AHMJRF4WSG;
 				DYLIB_COMPATIBILITY_VERSION = 1;
 				DYLIB_CURRENT_VERSION = 1;
@@ -708,7 +731,7 @@
 					"@loader_path/Frameworks",
 				);
 				MACOSX_DEPLOYMENT_TARGET = 13.0;
-				MARKETING_VERSION = alpha.17;
+				MARKETING_VERSION = 1.0.0-rc1;
 				MODULE_VERIFIER_SUPPORTED_LANGUAGES = "objective-c objective-c++";
 				MODULE_VERIFIER_SUPPORTED_LANGUAGE_STANDARDS = "gnu17 gnu++20";
 				PRODUCT_BUNDLE_IDENTIFIER = com.muzhen.CoreSearch;
@@ -727,11 +750,11 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 42;
+				CURRENT_PROJECT_VERSION = 43;
 				DEVELOPMENT_TEAM = AHMJRF4WSG;
 				GENERATE_INFOPLIST_FILE = YES;
 				MACOSX_DEPLOYMENT_TARGET = 15.5;
-				MARKETING_VERSION = alpha.17;
+				MARKETING_VERSION = 1.0.0-rc1;
 				PRODUCT_BUNDLE_IDENTIFIER = com.muzhen.CoreSearchTests;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_EMIT_LOC_STRINGS = NO;
@@ -744,11 +767,11 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 42;
+				CURRENT_PROJECT_VERSION = 43;
 				DEVELOPMENT_TEAM = AHMJRF4WSG;
 				GENERATE_INFOPLIST_FILE = YES;
 				MACOSX_DEPLOYMENT_TARGET = 15.5;
-				MARKETING_VERSION = alpha.17;
+				MARKETING_VERSION = 1.0.0-rc1;
 				PRODUCT_BUNDLE_IDENTIFIER = com.muzhen.CoreSearchTests;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_EMIT_LOC_STRINGS = NO;
@@ -883,12 +906,13 @@
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				ASSETCATALOG_COMPILER_INCLUDE_ALL_APPICON_ASSETS = NO;
-				CODE_SIGN_ENTITLEMENTS = TimeScrollDev/TimeScroll.entitlements;
-				CODE_SIGN_STYLE = Automatic;
+					CODE_SIGN_ENTITLEMENTS = "";
+					CODE_SIGN_IDENTITY = "-";
+					CODE_SIGN_STYLE = Manual;
 				COMBINE_HIDPI_IMAGES = YES;
-				CURRENT_PROJECT_VERSION = 42;
+				CURRENT_PROJECT_VERSION = 43;
 				DEVELOPMENT_ASSET_PATHS = "";
-				DEVELOPMENT_TEAM = AHMJRF4WSG;
+					DEVELOPMENT_TEAM = "";
 				ENABLE_HARDENED_RUNTIME = YES;
 				ENABLE_PREVIEWS = YES;
 				ENABLE_USER_SCRIPT_SANDBOXING = NO;
@@ -908,10 +932,11 @@
 					"@executable_path/../Frameworks",
 				);
 				MACOSX_DEPLOYMENT_TARGET = 13.0;
-				MARKETING_VERSION = alpha.17;
+				MARKETING_VERSION = 1.0.0-rc1;
 				PRODUCT_BUNDLE_IDENTIFIER = com.muzhen.TimeScroll;
 				PRODUCT_NAME = "$(TARGET_NAME)";
-				REGISTER_APP_GROUPS = YES;
+					PROVISIONING_PROFILE_SPECIFIER = "";
+					REGISTER_APP_GROUPS = NO;
 				SWIFT_EMIT_LOC_STRINGS = YES;
 				SWIFT_VERSION = 5.0;
 			};
@@ -923,12 +948,13 @@
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				ASSETCATALOG_COMPILER_INCLUDE_ALL_APPICON_ASSETS = NO;
-				CODE_SIGN_ENTITLEMENTS = TimeScrollDev/TimeScroll.entitlements;
-				CODE_SIGN_STYLE = Automatic;
+					CODE_SIGN_ENTITLEMENTS = "";
+					CODE_SIGN_IDENTITY = "-";
+					CODE_SIGN_STYLE = Manual;
 				COMBINE_HIDPI_IMAGES = YES;
-				CURRENT_PROJECT_VERSION = 42;
+				CURRENT_PROJECT_VERSION = 43;
 				DEVELOPMENT_ASSET_PATHS = "";
-				DEVELOPMENT_TEAM = AHMJRF4WSG;
+					DEVELOPMENT_TEAM = "";
 				ENABLE_HARDENED_RUNTIME = YES;
 				ENABLE_PREVIEWS = YES;
 				ENABLE_USER_SCRIPT_SANDBOXING = NO;
@@ -948,10 +974,11 @@
 					"@executable_path/../Frameworks",
 				);
 				MACOSX_DEPLOYMENT_TARGET = 13.0;
-				MARKETING_VERSION = alpha.17;
+				MARKETING_VERSION = 1.0.0-rc1;
 				PRODUCT_BUNDLE_IDENTIFIER = com.muzhen.TimeScroll;
 				PRODUCT_NAME = "$(TARGET_NAME)";
-				REGISTER_APP_GROUPS = YES;
+					PROVISIONING_PROFILE_SPECIFIER = "";
+					REGISTER_APP_GROUPS = NO;
 				SWIFT_EMIT_LOC_STRINGS = YES;
 				SWIFT_VERSION = 5.0;
 			};
@@ -962,11 +989,11 @@
 			buildSettings = {
 				BUNDLE_LOADER = "$(TEST_HOST)";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 42;
+				CURRENT_PROJECT_VERSION = 43;
 				DEVELOPMENT_TEAM = AHMJRF4WSG;
 				GENERATE_INFOPLIST_FILE = YES;
 				MACOSX_DEPLOYMENT_TARGET = 13.0;
-				MARKETING_VERSION = alpha.17;
+				MARKETING_VERSION = 1.0.0-rc1;
 				PRODUCT_BUNDLE_IDENTIFIER = com.muzhen.TimeScrollTests;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_EMIT_LOC_STRINGS = NO;
@@ -980,11 +1007,11 @@
 			buildSettings = {
 				BUNDLE_LOADER = "$(TEST_HOST)";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 42;
+				CURRENT_PROJECT_VERSION = 43;
 				DEVELOPMENT_TEAM = AHMJRF4WSG;
 				GENERATE_INFOPLIST_FILE = YES;
 				MACOSX_DEPLOYMENT_TARGET = 13.0;
-				MARKETING_VERSION = alpha.17;
+				MARKETING_VERSION = 1.0.0-rc1;
 				PRODUCT_BUNDLE_IDENTIFIER = com.muzhen.TimeScrollTests;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_EMIT_LOC_STRINGS = NO;
@@ -997,10 +1024,10 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 42;
+				CURRENT_PROJECT_VERSION = 43;
 				DEVELOPMENT_TEAM = AHMJRF4WSG;
 				GENERATE_INFOPLIST_FILE = YES;
-				MARKETING_VERSION = alpha.17;
+				MARKETING_VERSION = 1.0.0-rc1;
 				PRODUCT_BUNDLE_IDENTIFIER = com.muzhen.TimeScrollUITests;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_EMIT_LOC_STRINGS = NO;
@@ -1013,10 +1040,10 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 42;
+				CURRENT_PROJECT_VERSION = 43;
 				DEVELOPMENT_TEAM = AHMJRF4WSG;
 				GENERATE_INFOPLIST_FILE = YES;
-				MARKETING_VERSION = alpha.17;
+				MARKETING_VERSION = 1.0.0-rc1;
 				PRODUCT_BUNDLE_IDENTIFIER = com.muzhen.TimeScrollUITests;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_EMIT_LOC_STRINGS = NO;
@@ -1030,11 +1057,12 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
-				CODE_SIGN_ENTITLEMENTS = "timescroll-mcp/timescroll_mcp.entitlements";
-				CODE_SIGN_STYLE = Automatic;
+					CODE_SIGN_ENTITLEMENTS = "";
+					CODE_SIGN_IDENTITY = "-";
+					CODE_SIGN_STYLE = Manual;
 				COMBINE_HIDPI_IMAGES = YES;
-				CURRENT_PROJECT_VERSION = 42;
-				DEVELOPMENT_TEAM = AHMJRF4WSG;
+				CURRENT_PROJECT_VERSION = 43;
+					DEVELOPMENT_TEAM = "";
 				ENABLE_HARDENED_RUNTIME = YES;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
@@ -1046,10 +1074,11 @@
 					"@executable_path/../Frameworks",
 				);
 				MACOSX_DEPLOYMENT_TARGET = 15.5;
-				MARKETING_VERSION = alpha.17;
+				MARKETING_VERSION = 1.0.0-rc1;
 				PRODUCT_BUNDLE_IDENTIFIER = com.muzhen.TimeScroll.mcp;
 				PRODUCT_NAME = "$(TARGET_NAME)";
-				REGISTER_APP_GROUPS = YES;
+					PROVISIONING_PROFILE_SPECIFIER = "";
+					REGISTER_APP_GROUPS = NO;
 				SKIP_INSTALL = YES;
 				SWIFT_EMIT_LOC_STRINGS = YES;
 				SWIFT_VERSION = 5.0;
@@ -1061,11 +1090,12 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
-				CODE_SIGN_ENTITLEMENTS = "timescroll-mcp/timescroll_mcp.entitlements";
-				CODE_SIGN_STYLE = Automatic;
+					CODE_SIGN_ENTITLEMENTS = "";
+					CODE_SIGN_IDENTITY = "-";
+					CODE_SIGN_STYLE = Manual;
 				COMBINE_HIDPI_IMAGES = YES;
-				CURRENT_PROJECT_VERSION = 42;
-				DEVELOPMENT_TEAM = AHMJRF4WSG;
+				CURRENT_PROJECT_VERSION = 43;
+					DEVELOPMENT_TEAM = "";
 				ENABLE_HARDENED_RUNTIME = YES;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
@@ -1077,10 +1107,11 @@
 					"@executable_path/../Frameworks",
 				);
 				MACOSX_DEPLOYMENT_TARGET = 15.5;
-				MARKETING_VERSION = alpha.17;
+				MARKETING_VERSION = 1.0.0-rc1;
 				PRODUCT_BUNDLE_IDENTIFIER = com.muzhen.TimeScroll.mcp;
 				PRODUCT_NAME = "$(TARGET_NAME)";
-				REGISTER_APP_GROUPS = YES;
+					PROVISIONING_PROFILE_SPECIFIER = "";
+					REGISTER_APP_GROUPS = NO;
 				SKIP_INSTALL = YES;
 				SWIFT_EMIT_LOC_STRINGS = YES;
 				SWIFT_VERSION = 5.0;

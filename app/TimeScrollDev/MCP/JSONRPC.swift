@@ -68,22 +68,14 @@ enum MCPFileLogger {
     private static let appGroupID = "group.com.muzhen.TimeScroll.shared"
 
     static var logURL: URL {
-        let fm = FileManager.default
-        if let container = fm.containerURL(forSecurityApplicationGroupIdentifier: appGroupID) {
-            let base = container.appendingPathComponent("Logs", isDirectory: true)
-            if !fm.fileExists(atPath: base.path) {
-                try? fm.createDirectory(at: base, withIntermediateDirectories: true)
-            }
-            return base.appendingPathComponent("timescroll-mcp.log")
-        } else {
-            // Fallback (may be sandbox-denied in helper, but ok in main app)
-            let homeBase = fm.homeDirectoryForCurrentUser
-                .appendingPathComponent("Library/Logs/TimeScroll", isDirectory: true)
-            if !fm.fileExists(atPath: homeBase.path) {
-                try? fm.createDirectory(at: homeBase, withIntermediateDirectories: true)
-            }
-            return homeBase.appendingPathComponent("timescroll-mcp.log")
+        let base = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: appGroupID)?
+            .appendingPathComponent("Logs", isDirectory: true)
+            ?? FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+                .appendingPathComponent("TimeScrollShared/Logs", isDirectory: true)
+        if !FileManager.default.fileExists(atPath: base.path) {
+            try? FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
         }
+        return base.appendingPathComponent("timescroll-mcp.log")
     }
 
     static func log(_ message: String) {

@@ -180,50 +180,17 @@ final class SearchService {
                                      endMs: endMs)
         }
         let svc = EmbeddingService.shared
+        svc.reloadFromSettings()
         let (qVec, known, total) = svc.embedWithStats(trimmed, usage: .query)
-        let maxC = svc.maxCandidates
-        let thresh = Float(svc.threshold)
-        let modelStats = (try? DB.shared.embeddingModelStats(requireDim: svc.dim, requireProvider: svc.providerID)) ?? []
-        let chosenModel = svc.modelID
-        let candidates = (try? DB.shared.embeddingCandidates(appBundleIds: appBundleIds,
-                                     startMs: startMs,
-                                     endMs: endMs,
-                                     limit: maxC,
-                                     offset: 0,
-                                     requireDim: svc.dim,
-                                     requireProvider: svc.providerID,
-                                     requireModel: chosenModel)) ?? []
-        if UserDefaults.standard.bool(forKey: "settings.debugMode") {
-            let head = qVec.prefix(8).map { String(format: "%.4f", $0) }.joined(separator: ", ")
-            let statsDesc = modelStats.map { entry in
-                let name = entry.model.isEmpty ? "(empty)" : entry.model
-                return "\(name):\(entry.count)"
-            }.joined(separator: ", ")
-            let log = String(format: "[AI][Query] provider=%@ model=%@ dim=%d tokens=%d/%d threshold=%.2f candidates=%d models=%@ head=[%@]",
-                             svc.providerID, svc.modelID, qVec.count, known, total, thresh, candidates.count, statsDesc, head)
-            print(log)
-        }
-        // Score and keep above threshold
-        var scored: [(SearchResult, Float)] = []
-        scored.reserveCapacity(candidates.count)
-        for c in candidates {
-            let s = EmbeddingService.dot(qVec, c.vector)
-            if s >= thresh { scored.append((c.result, s)) }
-        }
-        if UserDefaults.standard.bool(forKey: "settings.debugMode") {
-            let scores = scored.map { $0.1 }.sorted(by: >)
-            let top = scores.prefix(5).map { String(format: "%.3f", $0) }.joined(separator: ", ")
-            print("[AI][Score] kept=\(scored.count) / \(candidates.count) top5=[\(top)]")
-        }
-        // Sort by score desc then recency desc
-        scored.sort { (a, b) in
-            if a.1 == b.1 { return a.0.startedAtMs > b.0.startedAtMs }
-            return a.1 > b.1
-        }
-        // Page
-        let start = max(0, offset)
-        let end = min(scored.count, start + limit)
-        guard start < end else { return [] }
-        return scored[start..<end].map { $0.0 }
+        guard !qVec.isEmpty else { return [] }
+        return VectorSearchEngine.shared.searchResults(queryVector: qVec,
+                                                       knownTokens: known,
+                                                       totalTokens: total,
+                                                       service: svc,
+                                                       appBundleIds: appBundleIds,
+                                                       startMs: startMs,
+                                                       endMs: endMs,
+                                                       limit: limit,
+                                                       offset: offset)
     }
 }

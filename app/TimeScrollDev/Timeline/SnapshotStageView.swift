@@ -13,6 +13,7 @@ struct SnapshotStageView: View {
     @State private var lastRequestedId: Int64 = 0
     @State private var loadToken: Int = 0
     @State private var showSpinner: Bool = false
+    @State private var rectRefreshToken: Int = 0
 
     var body: some View {
         ZStack { // center-aligned content by default
@@ -75,156 +76,177 @@ struct SnapshotStageView: View {
         .onChange(of: localQuery) { _ in
             refreshRects()
         }
-        .onAppear { loadSelectedIfNeeded() }
+        .onAppear { handleSelectionChange() }
         .onChange(of: model.selected?.id) { _ in
-            loadSelectedIfNeeded()
-            rects = []
-            refreshRects()
-        }
-        .onChange(of: model.selectedIndex) { _ in
-            loadSelectedIfNeeded()
-            rects = []
-            refreshRects()
+            handleSelectionChange()
         }
     }
 
+    private func handleSelectionChange() {
+        loadSelectedIfNeeded()
+        rects = []
+        refreshRects()
+    }
+
     private func refreshRects() {
-        guard SettingsStore.shared.showHighlights else { rects = []; return }
+        rectRefreshToken &+= 1
+        let token = rectRefreshToken
+
+        let settings = SettingsStore.shared
+        guard settings.showHighlights else { rects = []; return }
         guard let s = model.selected else { rects = []; return }
         // Local query overrides global when present
         let effective = localQuery.isEmpty ? globalQuery : localQuery
         let q = effective.trimmingCharacters(in: .whitespacesAndNewlines)
         if q.isEmpty { rects = []; return }
-        let parts = SearchQueryParser.parse(q).parts
-        if parts.isEmpty {
-            rects = []
-            return
-        }
-        // Improved matching: fetch candidate boxes by contains, then filter by word boundaries
-        // and length-aware fuzziness to avoid false positives like 'on' in 'button'.
-        let fuzz = SettingsStore.shared.fuzziness
-        func normalize(_ s: String) -> String {
-            s.folding(options: [.diacriticInsensitive, .caseInsensitive], locale: .current)
-        }
-    let intelligent = SettingsStore.shared.intelligentAccuracy
-    let tokenNorms = parts.map { normalize($0.text) }.filter { !$0.isEmpty }
+        let snapshotId = s.id
+        let fuzz = settings.fuzziness
+        let intelligent = settings.intelligentAccuracy
 
-        func splitWords(_ s: String) -> [String] {
-            let scalars = Array(s.unicodeScalars)
-            var words: [String] = []
-            var current = ""
-            for u in scalars {
-                if CharacterSet.alphanumerics.contains(u) {
-                    current.unicodeScalars.append(u)
-                } else if !current.isEmpty {
-                    words.append(current)
-                    current = ""
+        DispatchQueue.global(qos: .userInitiated).async {
+            let parts = SearchQueryParser.parse(q).parts
+            guard !parts.isEmpty else {
+                DispatchQueue.main.async {
+                    guard token == self.rectRefreshToken else { return }
+                    self.rects = []
                 }
+                return
             }
-            if !current.isEmpty { words.append(current) }
-            return words
-        }
 
-        func editDistanceLE(_ a: String, _ b: String, max d: Int) -> Bool {
-            if a == b { return true }
-            let na = a.count, nb = b.count
-            if abs(na - nb) > d { return false }
-            // Optimized for small d (1-2). Use two rows.
-            var prev = Array(0...nb)
-            var cur = Array(repeating: 0, count: nb + 1)
-            let xArr = Array(a)
-            let yArr = Array(b)
-            for i in 1...na {
-                cur[0] = i
-                let ac = xArr[i-1]
-                var rowMin = cur[0]
-                for j in 1...nb {
-                    let cost = (ac == yArr[j-1]) ? 0 : 1
-                    cur[j] = min(
-                        prev[j] + 1,
-                        cur[j-1] + 1,
-                        prev[j-1] + cost
-                    )
-                    if cur[j] < rowMin { rowMin = cur[j] }
-                }
-                if rowMin > d { return false }
-                swap(&prev, &cur)
+            // Improved matching: fetch candidate boxes by contains, then filter by word boundaries
+            // and length-aware fuzziness to avoid false positives like 'on' in 'button'.
+            func normalize(_ s: String) -> String {
+                s.folding(options: [.diacriticInsensitive, .caseInsensitive], locale: .current)
             }
-            return prev[nb] <= d
-        }
+            let tokenNorms = parts.map { normalize($0.text) }.filter { !$0.isEmpty }
 
-        func matches(token t: String, inText boxText: String) -> Bool {
-            let tn = t.count
-            if tn == 0 { return false }
-            let words = splitWords(boxText)
-            if words.isEmpty { return false }
-            let minPrefixLen: (Int) -> Int = { n in
-                switch fuzz {
-                case .off:
-                    return n
-                case .low:
-                    return n <= 5 ? n : max(3, n - 1)
-                case .medium:
-                    return max(3, Int(ceil(Double(n) * 0.70)))
-                case .high:
-                    return max(3, Int(ceil(Double(n) * 0.60)))
-                }
-            }
-            let maxEdits: Int = {
-                switch fuzz {
-                case .off: return 0
-                case .low: return tn >= 6 ? 1 : 0
-                case .medium: return 1
-                case .high: return tn >= 8 ? 2 : 1
-                }
-            }()
-            for w in words {
-                let wn = w.count
-                if tn <= 2 {
-                    if w == t { return true }
-                    continue
-                }
-                switch fuzz {
-                case .off:
-                    if w == t { return true }
-                case .low:
-                    if w == t { return true }
-                    if wn >= tn, w.hasPrefix(t) { return true }
-                    if maxEdits > 0, editDistanceLE(t, w, max: maxEdits) { return true }
-                case .medium, .high:
-                    let p = minPrefixLen(tn)
-                    let pref = String(t.prefix(p))
-                    if wn >= p, w.hasPrefix(pref) { return true }
-                    if maxEdits > 0, editDistanceLE(t, w, max: maxEdits) { return true }
-                }
-            }
-            return false
-        }
-
-        var all: [CGRect] = []
-        if let rows = try? DB.shared.boxesWithText(for: s.id, matchingContains: nil) {
-            for row in rows {
-                let textNorm = normalize(row.text)
-                for t in tokenNorms {
-                    // Expand variants when intelligent accuracy is enabled; otherwise test the base token only
-                    let variants = intelligent ? OCRConfusion.expand(t) : [t]
-                    var ok = false
-                    for v in variants {
-                        if matches(token: v, inText: textNorm) { ok = true; break }
-                    }
-                    if ok {
-                        all.append(row.rect)
-                        break
+            func splitWords(_ s: String) -> [String] {
+                let scalars = Array(s.unicodeScalars)
+                var words: [String] = []
+                var current = ""
+                for u in scalars {
+                    if CharacterSet.alphanumerics.contains(u) {
+                        current.unicodeScalars.append(u)
+                    } else if !current.isEmpty {
+                        words.append(current)
+                        current = ""
                     }
                 }
+                if !current.isEmpty { words.append(current) }
+                return words
             }
-        }
-        // Deduplicate approximately (by rounding to 1e-3)
-        var seen = Set<String>()
-        rects = all.filter { r in
-            let key = String(format: "%.3f_%.3f_%.3f_%.3f", r.origin.x, r.origin.y, r.size.width, r.size.height)
-            if seen.contains(key) { return false }
-            seen.insert(key); return true
+
+            func editDistanceLE(_ a: String, _ b: String, max d: Int) -> Bool {
+                if a == b { return true }
+                let na = a.count, nb = b.count
+                if abs(na - nb) > d { return false }
+                // Optimized for small d (1-2). Use two rows.
+                var prev = Array(0...nb)
+                var cur = Array(repeating: 0, count: nb + 1)
+                let xArr = Array(a)
+                let yArr = Array(b)
+                for i in 1...na {
+                    cur[0] = i
+                    let ac = xArr[i-1]
+                    var rowMin = cur[0]
+                    for j in 1...nb {
+                        let cost = (ac == yArr[j-1]) ? 0 : 1
+                        cur[j] = min(
+                            prev[j] + 1,
+                            cur[j-1] + 1,
+                            prev[j-1] + cost
+                        )
+                        if cur[j] < rowMin { rowMin = cur[j] }
+                    }
+                    if rowMin > d { return false }
+                    swap(&prev, &cur)
+                }
+                return prev[nb] <= d
+            }
+
+            func matches(token t: String, inText boxText: String) -> Bool {
+                let tn = t.count
+                if tn == 0 { return false }
+                let words = splitWords(boxText)
+                if words.isEmpty { return false }
+                let minPrefixLen: (Int) -> Int = { n in
+                    switch fuzz {
+                    case .off:
+                        return n
+                    case .low:
+                        return n <= 5 ? n : max(3, n - 1)
+                    case .medium:
+                        return max(3, Int(ceil(Double(n) * 0.70)))
+                    case .high:
+                        return max(3, Int(ceil(Double(n) * 0.60)))
+                    }
+                }
+                let maxEdits: Int = {
+                    switch fuzz {
+                    case .off: return 0
+                    case .low: return tn >= 6 ? 1 : 0
+                    case .medium: return 1
+                    case .high: return tn >= 8 ? 2 : 1
+                    }
+                }()
+                for w in words {
+                    let wn = w.count
+                    if tn <= 2 {
+                        if w == t { return true }
+                        continue
+                    }
+                    switch fuzz {
+                    case .off:
+                        if w == t { return true }
+                    case .low:
+                        if w == t { return true }
+                        if wn >= tn, w.hasPrefix(t) { return true }
+                        if maxEdits > 0, editDistanceLE(t, w, max: maxEdits) { return true }
+                    case .medium, .high:
+                        let p = minPrefixLen(tn)
+                        let pref = String(t.prefix(p))
+                        if wn >= p, w.hasPrefix(pref) { return true }
+                        if maxEdits > 0, editDistanceLE(t, w, max: maxEdits) { return true }
+                    }
+                }
+                return false
+            }
+
+            var all: [CGRect] = []
+            if let rows = try? DB.shared.boxesWithText(for: snapshotId, matchingContains: nil) {
+                for row in rows {
+                    let textNorm = normalize(row.text)
+                    for t in tokenNorms {
+                        // Expand variants when intelligent accuracy is enabled; otherwise test the base token only
+                        let variants = intelligent ? OCRConfusion.expand(t) : [t]
+                        var ok = false
+                        for v in variants {
+                            if matches(token: v, inText: textNorm) {
+                                ok = true
+                                break
+                            }
+                        }
+                        if ok {
+                            all.append(row.rect)
+                            break
+                        }
+                    }
+                }
+            }
+
+            // Deduplicate approximately (by rounding to 1e-3)
+            var seen = Set<String>()
+            let filtered = all.filter { r in
+                let key = String(format: "%.3f_%.3f_%.3f_%.3f", r.origin.x, r.origin.y, r.size.width, r.size.height)
+                if seen.contains(key) { return false }
+                seen.insert(key)
+                return true
+            }
+
+            DispatchQueue.main.async {
+                guard token == self.rectRefreshToken else { return }
+                self.rects = filtered
+            }
         }
     }
 

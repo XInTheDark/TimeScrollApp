@@ -6,6 +6,8 @@ struct TimelineUnifiedView: View {
     @StateObject var model = TimelineModel()
     @EnvironmentObject var settings: SettingsStore
     @ObservedObject var vault = VaultManager.shared
+    @AppStorage("ui.timeline.compressed") private var compressedTimeline: Bool = true
+    @AppStorage("ui.timeline.invertScrollDirection") private var invertTimelineScrollDirection: Bool = false
 
     @State private var query: String = ""
     @State private var showFilters: Bool = false
@@ -13,10 +15,17 @@ struct TimelineUnifiedView: View {
     @State private var endDate: Date? = nil
     @State private var keyMonitor: Any? = nil
     @State private var showingResults: Bool = false
+    @State private var preserveOpenedResultContextOnRefresh: Bool = false
 
     private let minMsPerPt: Double = 100             // 100ms per pt at max zoom-in
     private let maxMsPerPt: Double = 300_000         // 5m per pt at max zoom-out (keeps things "pretty small")
     private let zoomStep: Double = 1.25
+
+    private var activeFilterCount: Int {
+        (model.startMs != nil ? 1 : 0)
+        + (model.endMs != nil ? 1 : 0)
+        + (model.selectedAppBundleIds.isEmpty ? 0 : 1)
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -52,6 +61,7 @@ struct TimelineUnifiedView: View {
             let trimmed = newVal.trimmingCharacters(in: .whitespacesAndNewlines)
             if trimmed.isEmpty && showingResults {
                 // Clear applied query on the model and reload latest
+                preserveOpenedResultContextOnRefresh = false
                 model.query = ""
                 model.load()
                 showingResults = false
@@ -66,121 +76,141 @@ struct TimelineUnifiedView: View {
 
     @MainActor
     private func reloadTimelineKeepingSelection() {
-        let selId = model.selected?.id
+        if preserveOpenedResultContextOnRefresh,
+           !showingResults,
+           let selected = model.selected {
+            model.openSnapshot(id: selected.id, anchorStartedAtMs: selected.startedAtMs)
+            return
+        }
+
         model.load()
         if model.followLatest {
-            model.selectedIndex = model.metas.isEmpty ? -1 : 0
             model.jumpToEndToken &+= 1
-        } else if let id = selId, let idx = model.metas.firstIndex(where: { $0.id == id }) {
-            model.selectedIndex = idx
         }
     }
 
     @State private var debugOpen: Bool = false
 
     private var topBar: some View {
-        HStack(spacing: 8) {
-            Button(appState.isCapturing ? "Stop Capture" : "Start Capture") {
+        HStack(spacing: 12) {
+            Button {
                 Task {
-                    // Use AppState helpers so UsageTracker sessions are opened/closed
                     if appState.isCapturing {
                         await appState.stopCaptureIfNeeded()
                     } else {
                         await appState.startCaptureIfNeeded()
                     }
                 }
+            } label: {
+                Label(appState.isCapturing ? "Stop Capture" : "Start Capture",
+                      systemImage: appState.isCapturing ? "stop.circle.fill" : "record.circle.fill")
             }
+            .buttonStyle(.borderedProminent)
+            .tint(appState.isCapturing ? .red : .accentColor)
+            .controlSize(.large)
 
-            Divider().frame(height: 18)
+            TimelineToolbarSection {
+                Image(systemName: "magnifyingglass")
+                    .foregroundStyle(.secondary)
 
-            // Keep search field a sensible size; don't let it expand endlessly
-            TextField("Search snapshots", text: $query)
-                .textFieldStyle(.roundedBorder)
-                .frame(minWidth: 220, maxWidth: 340)
-                .submitLabel(.search)
-                .onSubmit { showResults() }
+                TextField("Search snapshots", text: $query)
+                    .textFieldStyle(.plain)
+                    .frame(maxWidth: .infinity)
+                    .submitLabel(.search)
+                    .onSubmit { showResults() }
 
-            Button(showFilters ? "Hide Filters" : "Filters") {
-                showFilters.toggle()
+                Divider().frame(height: 22)
+
+                Button {
+                    showFilters.toggle()
+                } label: {
+                    HStack(spacing: 6) {
+                        Image(systemName: activeFilterCount > 0 ? "line.3.horizontal.decrease.circle.fill" : "line.3.horizontal.decrease.circle")
+                        Text("Filters")
+                        if activeFilterCount > 0 {
+                            TimelineToolbarCountBadge(count: activeFilterCount)
+                        }
+                    }
+                }
+                .buttonStyle(.bordered)
+                .popover(isPresented: $showFilters, arrowEdge: .bottom) {
+                    filtersPopover
+                        .padding(12)
+                        .frame(minWidth: 400)
+                }
+
+                Menu {
+                    Button("Show Results") { showResults() }
+                    Button("Search & Jump") { searchAndJump() }
+                        .keyboardShortcut(.return, modifiers: [.command])
+                } label: {
+                    Text(showingResults ? "Refresh" : "Search")
+                } primaryAction: {
+                    showResults()
+                }
+                .menuStyle(.borderedButton)
+                .fixedSize(horizontal: true, vertical: false)
             }
-            // Present filters in a popover to avoid overflowing the top bar
-            .popover(isPresented: $showFilters, arrowEdge: .bottom) {
-                filtersPopover
-                    .padding(12)
-                    .frame(minWidth: 380)
-            }
-
-            Menu("Search") {
-                Button("Show Results") { showResults() }
-                // Keep Cmd+Return for power users; plain Return should not be global
-                Button("Search & Jump") { searchAndJump() }
-                    .keyboardShortcut(.return, modifiers: [.command])
-            } primaryAction: {
-                showResults()
-            }
-            .menuStyle(.borderedButton)
-            // Make the pull‑down size to its label only
-            .fixedSize()
-            .controlSize(.regular)
-
-            Spacer()
+            .frame(maxWidth: .infinity)
 
             if settings.vaultEnabled {
-                if vault.queuedCount > 0 {
-                    Text("Queued: \(vault.queuedCount)")
-                        .font(.caption)
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 4)
-                        .background(Color.gray.opacity(0.2))
-                        .cornerRadius(10)
-                }
-                if vault.isUnlocked {
-                    Button("Lock") { vault.lock() }
-                } else {
-                    Button("Unlock…") { Task { await vault.unlock(presentingWindow: NSApp.keyWindow) } }
+                TimelineToolbarSection {
+                    if vault.queuedCount > 0 {
+                        Label("Queued \(vault.queuedCount)", systemImage: "tray.and.arrow.down.fill")
+                            .font(.caption.weight(.medium))
+                            .foregroundStyle(.secondary)
+                    }
+
+                    Button(vault.isUnlocked ? "Lock" : "Unlock…") {
+                        if vault.isUnlocked {
+                            vault.lock()
+                        } else {
+                            Task { await vault.unlock(presentingWindow: NSApp.keyWindow) }
+                        }
+                    }
+                    .buttonStyle(.bordered)
                 }
             }
 
-            // Zoom controls
-            HStack(spacing: 6) {
-                // '-' should zoom OUT (increase ms/pt)
+            TimelineToolbarSection {
                 Button(action: { model.msPerPoint = min(maxMsPerPt, model.msPerPoint * zoomStep) }) {
                     Image(systemName: "minus")
                 }
                 .buttonStyle(.bordered)
+
                 Slider(value: Binding(get: {
-                    // Log-scale mapping so the slider feels linear across a wide zoom range.
-                    // 1.0 (right) = zoomed in (smaller ms/pt), 0.0 (left) = zoomed out (larger ms/pt)
                     let clamped = min(max(model.msPerPoint, minMsPerPt), maxMsPerPt)
                     let logMin = log(minMsPerPt)
                     let logMax = log(maxMsPerPt)
                     let logVal = log(clamped)
-                    // invert so right is zoom in
                     return (logMax - logVal) / (logMax - logMin)
-                }, set: { v in
-                    // Inverse mapping (log-scale): slider right -> smaller ms/pt (zoom in)
+                }, set: { value in
                     let logMin = log(minMsPerPt)
                     let logMax = log(maxMsPerPt)
-                    let logVal = logMax - v * (logMax - logMin)
-                    let val = exp(logVal)
-                    model.msPerPoint = min(max(val, minMsPerPt), maxMsPerPt)
+                    let logVal = logMax - value * (logMax - logMin)
+                    let msPerPoint = exp(logVal)
+                    model.msPerPoint = min(max(msPerPoint, minMsPerPt), maxMsPerPt)
                 }))
                 .frame(width: 140)
-                // '+' should zoom IN (decrease ms/pt)
+
                 Button(action: { model.msPerPoint = max(minMsPerPt, model.msPerPoint / zoomStep) }) {
                     Image(systemName: "plus")
                 }
                 .buttonStyle(.bordered)
-            }
 
-            Toggle("Live", isOn: $model.followLatest)
-                .toggleStyle(.switch)
+                Divider().frame(height: 22)
+
+                TimelineLiveToggle(isOn: $model.followLatest)
+            }
+            .fixedSize(horizontal: true, vertical: false)
 
             if settings.debugMode {
                 Button("Debug DB") { debugOpen = true }
+                    .buttonStyle(.bordered)
             }
         }
-        .padding(8)
+        .padding(.horizontal, 10)
+        .padding(.vertical, 8)
         .sheet(isPresented: $debugOpen) { DebugView() }
     }
 
@@ -201,6 +231,19 @@ struct TimelineUnifiedView: View {
                 TimelineAppMultiFilter(selected: $model.selectedAppBundleIds)
                     .frame(minHeight: 140, maxHeight: 220)
             }
+            Divider()
+            HStack {
+                Button("Clear Dates") {
+                    startDate = nil
+                    endDate = nil
+                }
+                Button("Clear Apps") {
+                    model.selectedAppBundleIds.removeAll()
+                }
+                Spacer()
+                Button("Done") { showFilters = false }
+                    .keyboardShortcut(.defaultAction)
+            }
         }
     }
 
@@ -217,12 +260,12 @@ struct TimelineUnifiedView: View {
                                       startMs: model.startMs,
                                       endMs: model.endMs,
                                       onOpen: { row, _ in
-                                          model.openSnapshot(id: row.id)
+                                          preserveOpenedResultContextOnRefresh = true
                                           showingResults = false
+                                          model.openSnapshot(id: row.id, anchorStartedAtMs: row.startedAtMs)
                                       },
                                       onClose: {
-                                          // Closing search should restore the timeline view
-                                          // Keep the applied query so timeline can remain filtered if desired
+                                          preserveOpenedResultContextOnRefresh = false
                                           model.load()
                                           showingResults = false
                                       })
@@ -257,6 +300,8 @@ struct TimelineUnifiedView: View {
     private var bottomTimeline: some View {
         ZStack(alignment: .bottomTrailing) {
             TimelineBarContainer(model: model,
+                                 isCompressed: compressedTimeline,
+                                 invertScrollDirection: invertTimelineScrollDirection,
                                  onJump: { t in model.jump(to: t) },
                                  onHover: { t in model.hoverTimeMs = t },
                                  onHoverExit: { model.hoverTimeMs = nil })
@@ -277,6 +322,7 @@ struct TimelineUnifiedView: View {
     }
 
     private func showResults() {
+        preserveOpenedResultContextOnRefresh = false
         applyFilters()
         // Keep model.metas in sync so navigation uses the same result set
         model.load()
@@ -285,6 +331,7 @@ struct TimelineUnifiedView: View {
     }
 
     private func searchAndJump() {
+        preserveOpenedResultContextOnRefresh = false
         applyFilters()
         model.load()
         showingResults = false
@@ -337,6 +384,7 @@ struct TimelineUnifiedView: View {
     }
 
     private func jumpToEnd() {
+        preserveOpenedResultContextOnRefresh = false
         if !model.metas.isEmpty { model.selectedIndex = 0 }
         model.jumpToEndToken &+= 1
     }
@@ -344,10 +392,73 @@ struct TimelineUnifiedView: View {
 
 // Single-select app filter removed; replaced by TimelineAppMultiFilter
 
+private struct TimelineToolbarSection<Content: View>: View {
+    let content: Content
+
+    init(@ViewBuilder content: () -> Content) {
+        self.content = content()
+    }
+
+    var body: some View {
+        HStack(spacing: 10) {
+            content
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 9)
+        .background(
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .fill(Color(nsColor: .controlBackgroundColor).opacity(0.72))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .stroke(Color.primary.opacity(0.06), lineWidth: 1)
+        )
+    }
+}
+
+private struct TimelineToolbarCountBadge: View {
+    let count: Int
+
+    var body: some View {
+        Text("\(count)")
+            .font(.caption2.weight(.bold))
+            .foregroundStyle(.white)
+            .padding(.horizontal, 6)
+            .padding(.vertical, 2)
+            .background(
+                Capsule(style: .continuous)
+                    .fill(Color.accentColor)
+            )
+    }
+}
+
+private struct TimelineLiveToggle: View {
+    @Binding var isOn: Bool
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "dot.radiowaves.left.and.right")
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(isOn ? Color.accentColor : Color.secondary)
+                .accessibilityHidden(true)
+
+            Toggle("", isOn: $isOn)
+                .labelsHidden()
+                .toggleStyle(.switch)
+        }
+        .fixedSize(horizontal: true, vertical: false)
+        .help("Follow newest snapshots")
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("Live follow")
+    }
+}
+
 private struct TimelineAppMultiFilter: View {
     @Binding var selected: Set<String>
     @State private var apps: [(bundleId: String, name: String)] = []
     @State private var filter: String = ""
+    @State private var isLoadingApps: Bool = false
+    @State private var loadToken: Int = 0
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -356,6 +467,15 @@ private struct TimelineAppMultiFilter: View {
                     .textFieldStyle(.roundedBorder)
                 Button("Clear") { selected.removeAll() }
                 Button("All") { selected = Set(apps.map { $0.bundleId }) }
+            }
+            if isLoadingApps && apps.isEmpty {
+                HStack(spacing: 8) {
+                    ProgressView()
+                        .controlSize(.small)
+                    Text("Loading apps…")
+                        .font(.footnote)
+                        .foregroundColor(.secondary)
+                }
             }
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 6) {
@@ -374,7 +494,7 @@ private struct TimelineAppMultiFilter: View {
             }
             .frame(minHeight: 120)
         }
-        .onAppear { load() }
+        .onAppear { loadIfNeeded() }
     }
 
     private func filteredApps() -> [(bundleId: String, name: String)] {
@@ -383,7 +503,19 @@ private struct TimelineAppMultiFilter: View {
         return apps.filter { $0.name.lowercased().contains(f) || $0.bundleId.lowercased().contains(f) }
     }
 
-    private func load() {
-        if let list = try? DB.shared.distinctApps() { apps = list }
+    private func loadIfNeeded(force: Bool = false) {
+        guard force || apps.isEmpty else { return }
+        loadToken &+= 1
+        let token = loadToken
+        isLoadingApps = true
+
+        DispatchQueue.global(qos: .userInitiated).async {
+            let list = (try? DB.shared.distinctApps()) ?? []
+            DispatchQueue.main.async {
+                guard token == loadToken else { return }
+                apps = list
+                isLoadingApps = false
+            }
+        }
     }
 }

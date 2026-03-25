@@ -90,7 +90,7 @@ public final class SearchFacade {
             // Mirror unlocked flag so helpers looking at defaults behave consistently
             let std = UserDefaults.standard
             std.set(true, forKey: "vault.isUnlocked")
-            (UserDefaults(suiteName: StoragePaths.appGroupID) ?? .standard).set(true, forKey: "vault.isUnlocked")
+            StoragePaths.setShared(true, forKey: "vault.isUnlocked")
             
             // Open with the unwrapped key
             SQLCipherBridge.shared.openWithKey(key)

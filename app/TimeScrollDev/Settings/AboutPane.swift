@@ -3,47 +3,48 @@ import AppKit
 
 struct AboutPane: View {
     @EnvironmentObject var settings: SettingsStore
-    @State private var showAdvanced: Bool = false
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            HStack(alignment: .center, spacing: 16) {
-                if let icon = NSApplication.shared.applicationIconImage {
-                    Image(nsImage: icon)
-                        .resizable()
-                        .interpolation(.high)
-                        .frame(width: 64, height: 64)
-                        .cornerRadius(12)
-                }
-                VStack(alignment: .leading, spacing: 4) {
-                    Text(appName)
-                        .font(.title2).bold()
-                    Text("Version \(appVersion)")
-                        .foregroundColor(.secondary)
+        SettingsPaneScrollView {
+            aboutHeader
+
+            SettingsSectionCard(title: "Support Development") {
+                VStack(alignment: .leading, spacing: 10) {
+                    Text("TimeScroll will stay free forever. If it has been useful, you can help support future work.")
+                        .fixedSize(horizontal: false, vertical: true)
+
+                    Link("Buy me a coffee on Ko-fi", destination: URL(string: "https://ko-fi.com/jmuzhen")!)
                 }
             }
 
-            Divider()
-
-            VStack(alignment: .leading, spacing: 8) {
-                Text("This app will always be free! If you find it nice, please consider supporting development! ❤️")
-                Link("Buy me a coffee on Ko‑fi", destination: URL(string: "https://ko-fi.com/jmuzhen")!)
+            SettingsSectionCard(title: "Advanced") {
+                Toggle("Debug mode", isOn: $settings.debugMode)
             }
-            .font(.body)
-
-            DisclosureGroup(isExpanded: $showAdvanced) {
-                VStack(alignment: .leading, spacing: 8) {
-                    Toggle("Debug mode", isOn: $settings.debugMode)
-                }
-                .padding(.top, 6)
-            } label: {
-                Text("Advanced")
-                    .font(.headline)
-            }
-
-            Spacer()
         }
-        .padding(.top, 8)
+    }
+
+    private var aboutHeader: some View {
+        HStack(alignment: .center, spacing: 16) {
+            if let icon = NSApplication.shared.applicationIconImage {
+                Image(nsImage: icon)
+                    .resizable()
+                    .interpolation(.high)
+                    .frame(width: 68, height: 68)
+                    .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+            }
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text(appName)
+                    .font(.title2)
+                    .fontWeight(.semibold)
+
+                Text("Version \(appVersion)")
+                    .foregroundColor(.secondary)
+            }
+
+            Spacer(minLength: 0)
+        }
+        .settingsInsetCard(padding: 20)
     }
 
     private var appName: String {

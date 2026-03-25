@@ -3,6 +3,22 @@ import Foundation
 @MainActor
 final class SettingsStore: ObservableObject {
     static let shared = SettingsStore()
+    nonisolated static let defaultTextProcessingMode: TextProcessingMode = .ocr
+    nonisolated static let defaultOCRMode: OCRMode = .fast
+    nonisolated static let defaultCaptureMinInterval: Double = 5.0
+    nonisolated static let defaultRetentionDays: Int = 30
+    nonisolated static let defaultStorageFormat: StorageFormat = .heic
+    nonisolated static let defaultMaxLongEdge: Int = 1600
+    nonisolated static let defaultLossyQuality: Double = 0.6
+    nonisolated static let defaultDedupEnabled: Bool = true
+    nonisolated static let defaultDedupHammingThreshold: Int = 6
+    nonisolated static let defaultAdaptiveSampling: Bool = true
+    nonisolated static let defaultAdaptiveMaxInterval: Double = 10.0
+    nonisolated static let defaultDegradeAfterDays: Int = 7
+    nonisolated static let defaultDegradeMaxLongEdge: Int = 1200
+    nonisolated static let defaultDegradeQuality: Double = 0.5
+    nonisolated static let defaultCaptureScale: Double = 0.8
+
     private init() {
         load()
     }
@@ -18,33 +34,35 @@ final class SettingsStore: ObservableObject {
         var id: String { rawValue }
     }
 
-    @Published var textProcessingMode: TextProcessingMode = .ocr { didSet { if !isLoading { save() } } }
-    @Published var ocrMode: OCRMode = .fast { didSet { if !isLoading { save() } } }
-    @Published var captureMinInterval: Double = 5.0 { didSet { if !isLoading { save() } } }
+    @Published var textProcessingMode: TextProcessingMode = SettingsStore.defaultTextProcessingMode { didSet { if !isLoading { save() } } }
+    @Published var ocrMode: OCRMode = SettingsStore.defaultOCRMode { didSet { if !isLoading { save() } } }
+    @Published var captureMinInterval: Double = SettingsStore.defaultCaptureMinInterval { didSet { if !isLoading { save() } } }
     @Published var fuzziness: Fuzziness = .low { didSet { if !isLoading { save() } } }
-    @Published var retentionDays: Int = 30 { didSet { if !isLoading { save() } } }
+    @Published var retentionDays: Int = SettingsStore.defaultRetentionDays { didSet { if !isLoading { save() } } }
     @Published var showHighlights: Bool = true { didSet { if !isLoading { save() } } }
+    @Published var recentOCRBoxesOnly: Bool = false { didSet { if !isLoading { save() } } }
     @Published var debugMode: Bool = false { didSet { if !isLoading { save() } } }
     @Published var refreshOnNewSnapshot: Bool = true { didSet { if !isLoading { save() } } }
 
     // Storage & reduction settings
-    @Published var storageFormat: StorageFormat = .heic { didSet { if !isLoading { save() } } }
-    @Published var maxLongEdge: Int = 1600 { didSet { if !isLoading { save() } } }            // 0 = original
-    @Published var lossyQuality: Double = 0.6 { didSet { if !isLoading { save() } } }         // 0.1...1.0
-    @Published var dedupEnabled: Bool = true { didSet { if !isLoading { save() } } }
-    @Published var dedupHammingThreshold: Int = 6 { didSet { if !isLoading { save() } } }     // 0..64
-    @Published var adaptiveSampling: Bool = true { didSet { if !isLoading { save() } } }
-    @Published var adaptiveMaxInterval: Double = 10.0 { didSet { if !isLoading { save() } } }  // seconds
-    @Published var degradeAfterDays: Int = 7 { didSet { if !isLoading { save() } } }
-    @Published var degradeMaxLongEdge: Int = 1200 { didSet { if !isLoading { save() } } }
-    @Published var degradeQuality: Double = 0.5 { didSet { if !isLoading { save() } } }
+    @Published var storageFormat: StorageFormat = SettingsStore.defaultStorageFormat { didSet { if !isLoading { save() } } }
+    @Published var maxLongEdge: Int = SettingsStore.defaultMaxLongEdge { didSet { if !isLoading { save() } } }            // 0 = original
+    @Published var lossyQuality: Double = SettingsStore.defaultLossyQuality { didSet { if !isLoading { save() } } }         // 0.1...1.0
+    @Published var dedupEnabled: Bool = SettingsStore.defaultDedupEnabled { didSet { if !isLoading { save() } } }
+    @Published var dedupHammingThreshold: Int = SettingsStore.defaultDedupHammingThreshold { didSet { if !isLoading { save() } } }     // 0..64
+    @Published var adaptiveSampling: Bool = SettingsStore.defaultAdaptiveSampling { didSet { if !isLoading { save() } } }
+    @Published var adaptiveMaxInterval: Double = SettingsStore.defaultAdaptiveMaxInterval { didSet { if !isLoading { save() } } }  // seconds
+    @Published var autoCompactEnabled: Bool = false { didSet { if !isLoading { save() } } }
+    @Published var degradeAfterDays: Int = SettingsStore.defaultDegradeAfterDays { didSet { if !isLoading { save() } } }
+    @Published var degradeMaxLongEdge: Int = SettingsStore.defaultDegradeMaxLongEdge { didSet { if !isLoading { save() } } }
+    @Published var degradeQuality: Double = SettingsStore.defaultDegradeQuality { didSet { if !isLoading { save() } } }
     // Storage location (display only; bookmark lives in UserDefaults for background use)
     @Published var storageFolderPath: String = StoragePaths.displayPath() { didSet { if !isLoading { save() } } }
     // Backup (external) storage option and display path
     @Published var backupEnabled: Bool = false { didSet { if !isLoading { save() } } }
     @Published var backupFolderPath: String = StoragePaths.backupDisplayPath() { didSet { if !isLoading { save() } } }
     // Energy: keep captureScale
-    @Published var captureScale: Double = 0.8 { didSet { if !isLoading { save() } } }  // 0.5...1.0
+    @Published var captureScale: Double = SettingsStore.defaultCaptureScale { didSet { if !isLoading { save() } } }  // 0.5...1.0
     // Displays: capture first or all
     @Published var captureDisplayMode: DisplayCaptureMode = .first { didSet { if !isLoading { save() } } }
 
@@ -71,6 +89,8 @@ final class SettingsStore: ObservableObject {
     @Published var embeddingProvider: String = "apple-nl" { didSet { if !isLoading { save() } } }
     // When using providers that have multiple models (e.g. Ollama), the concrete model to use
     @Published var embeddingModel: String = "snowflake-arctic-embed:33m" { didSet { if !isLoading { save() } } }
+    // For multimodal/image-document models, optionally blend extracted text into the image embedding.
+    @Published var multimodalIncludeExtractedText: Bool = false { didSet { if !isLoading { save() } } }
 
     // Privacy
     // List of bundle identifiers whose windows should be excluded from capture when visible
@@ -97,7 +117,7 @@ final class SettingsStore: ObservableObject {
            let m = TextProcessingMode(rawValue: raw) {
             textProcessingMode = m
         } else {
-            textProcessingMode = .ocr
+            textProcessingMode = Self.defaultTextProcessingMode
         }
         
         if let raw = defaults.string(forKey: "settings.ocrMode"), let v = OCRMode(rawValue: raw) { ocrMode = v }
@@ -109,6 +129,9 @@ final class SettingsStore: ObservableObject {
         if defaults.object(forKey: "settings.showHighlights") != nil {
             showHighlights = defaults.bool(forKey: "settings.showHighlights")
         }
+        if defaults.object(forKey: "settings.recentOCRBoxesOnly") != nil {
+            recentOCRBoxesOnly = defaults.bool(forKey: "settings.recentOCRBoxesOnly")
+        }
         if defaults.object(forKey: "settings.debugMode") != nil {
             debugMode = defaults.bool(forKey: "settings.debugMode")
         }
@@ -117,15 +140,16 @@ final class SettingsStore: ObservableObject {
         }
 
         if let raw = defaults.string(forKey: "settings.storageFormat"), let f = StorageFormat(rawValue: raw) { storageFormat = f }
-        if let p = (UserDefaults(suiteName: StoragePaths.appGroupID) ?? .standard).string(forKey: StoragePaths.storageDisplayPathKey) { storageFolderPath = p }
+        if let p = StoragePaths.sharedString(forKey: StoragePaths.storageDisplayPathKey) { storageFolderPath = p }
         if defaults.object(forKey: "settings.backupEnabled") != nil { backupEnabled = defaults.bool(forKey: "settings.backupEnabled") }
-        if let bp = (UserDefaults(suiteName: StoragePaths.appGroupID) ?? .standard).string(forKey: StoragePaths.backupDisplayPathKey) { backupFolderPath = bp }
+        if let bp = StoragePaths.sharedString(forKey: StoragePaths.backupDisplayPathKey) { backupFolderPath = bp }
         let mle = defaults.integer(forKey: "settings.maxLongEdge"); if mle >= 0 { maxLongEdge = mle }
         let q = defaults.double(forKey: "settings.lossyQuality"); if q > 0 { lossyQuality = q }
         if defaults.object(forKey: "settings.dedupEnabled") != nil { dedupEnabled = defaults.bool(forKey: "settings.dedupEnabled") }
         let thr = defaults.integer(forKey: "settings.dedupHammingThreshold"); if thr > 0 { dedupHammingThreshold = thr }
         if defaults.object(forKey: "settings.adaptiveSampling") != nil { adaptiveSampling = defaults.bool(forKey: "settings.adaptiveSampling") }
         let maxInt = defaults.double(forKey: "settings.adaptiveMaxInterval"); if maxInt > 0 { adaptiveMaxInterval = maxInt }
+        if defaults.object(forKey: "settings.autoCompactEnabled") != nil { autoCompactEnabled = defaults.bool(forKey: "settings.autoCompactEnabled") }
         let dDays = defaults.integer(forKey: "settings.degradeAfterDays"); if dDays >= 0 { degradeAfterDays = dDays }
         let dEdge = defaults.integer(forKey: "settings.degradeMaxLongEdge"); if dEdge > 0 { degradeMaxLongEdge = dEdge }
         let dQ = defaults.double(forKey: "settings.degradeQuality"); if dQ > 0 { degradeQuality = dQ }
@@ -175,6 +199,15 @@ final class SettingsStore: ObservableObject {
             }
         }
         if let model = defaults.string(forKey: "settings.embeddingModel") { embeddingModel = model }
+        if embeddingProvider == "mobileclip2", MobileCLIPModelCatalog.Model(rawValue: embeddingModel) == nil {
+            embeddingModel = MobileCLIPModelCatalog.Model.s0.rawValue
+        } else if embeddingProvider == "ollama",
+                  embeddingModel.isEmpty || MobileCLIPModelCatalog.Model(rawValue: embeddingModel) != nil {
+            embeddingModel = "snowflake-arctic-embed:33m"
+        }
+        if defaults.object(forKey: "settings.multimodalIncludeExtractedText") != nil {
+            multimodalIncludeExtractedText = defaults.bool(forKey: "settings.multimodalIncludeExtractedText")
+        }
 
         // Updates
         if defaults.object(forKey: "settings.updateChannelBeta") != nil {
@@ -199,12 +232,30 @@ final class SettingsStore: ObservableObject {
 
     private func save() {
         print("[Prefs] Save invoked…")
+        let previousAIEnabled = (defaults.object(forKey: "settings.aiEmbeddingsEnabled") != nil) ? defaults.bool(forKey: "settings.aiEmbeddingsEnabled") : false
+        let previousThreshold = (defaults.object(forKey: "settings.aiThreshold") != nil) ? defaults.double(forKey: "settings.aiThreshold") : 0.30
+        let previousMaxCandidates = {
+            let value = defaults.integer(forKey: "settings.aiMaxCandidates")
+            return value > 0 ? value : 10000
+        }()
+        let previousProvider = defaults.string(forKey: "settings.embeddingProvider") ?? "apple-nl"
+        let previousModel = defaults.string(forKey: "settings.embeddingModel") ?? ""
+
+        let shouldReloadEmbeddingService =
+            previousAIEnabled != aiEmbeddingsEnabled ||
+            abs(previousThreshold - aiThreshold) > 0.0001 ||
+            previousMaxCandidates != aiMaxCandidates ||
+            previousProvider != embeddingProvider ||
+            previousModel != embeddingModel
+
         defaults.set(textProcessingMode.rawValue, forKey: "settings.textProcessingMode")
         defaults.set(ocrMode.rawValue, forKey: "settings.ocrMode")
         defaults.set(captureMinInterval, forKey: "settings.captureMinInterval")
         defaults.set(fuzziness.rawValue, forKey: "settings.fuzziness")
+        StoragePaths.setShared(fuzziness.rawValue, forKey: "settings.fuzziness")
         defaults.set(retentionDays, forKey: "settings.retentionDays")
         defaults.set(showHighlights, forKey: "settings.showHighlights")
+        defaults.set(recentOCRBoxesOnly, forKey: "settings.recentOCRBoxesOnly")
         defaults.set(debugMode, forKey: "settings.debugMode")
         defaults.set(refreshOnNewSnapshot, forKey: "settings.refreshOnNewSnapshot")
 
@@ -215,6 +266,7 @@ final class SettingsStore: ObservableObject {
         defaults.set(dedupHammingThreshold, forKey: "settings.dedupHammingThreshold")
         defaults.set(adaptiveSampling, forKey: "settings.adaptiveSampling")
         defaults.set(adaptiveMaxInterval, forKey: "settings.adaptiveMaxInterval")
+        defaults.set(autoCompactEnabled, forKey: "settings.autoCompactEnabled")
         defaults.set(degradeAfterDays, forKey: "settings.degradeAfterDays")
         defaults.set(degradeMaxLongEdge, forKey: "settings.degradeMaxLongEdge")
         defaults.set(degradeQuality, forKey: "settings.degradeQuality")
@@ -239,24 +291,32 @@ final class SettingsStore: ObservableObject {
         defaults.set(autoDownloadInstallUpdates, forKey: "settings.autoDownloadInstallUpdates")
         // Search behavior
         defaults.set(intelligentAccuracy, forKey: "settings.intelligentAccuracy")
+        StoragePaths.setShared(intelligentAccuracy, forKey: "settings.intelligentAccuracy")
         // AI search
         defaults.set(aiEmbeddingsEnabled, forKey: "settings.aiEmbeddingsEnabled")
+        StoragePaths.setShared(aiEmbeddingsEnabled, forKey: "settings.aiEmbeddingsEnabled")
         defaults.set(aiModeOn, forKey: "settings.aiModeOn")
         defaults.set(aiThreshold, forKey: "settings.aiThreshold")
         defaults.set(aiMaxCandidates, forKey: "settings.aiMaxCandidates")
         defaults.set(embeddingProvider, forKey: "settings.embeddingProvider")
         defaults.set(embeddingModel, forKey: "settings.embeddingModel")
-        // Apply settings to the embedding service singleton immediately
-        EmbeddingService.shared.reloadFromSettings()
+        defaults.set(multimodalIncludeExtractedText, forKey: "settings.multimodalIncludeExtractedText")
+        // Only reload the embedding service when query-time embedding settings actually change.
+        // Multimodal text blending affects indexing only and should not block the UI by rebuilding
+        // MobileCLIP runtime state on every toggle.
+        if shouldReloadEmbeddingService {
+            EmbeddingService.shared.reloadFromSettings()
+        }
         // Storage location display path (bookmark handled via StoragePaths.setStorageFolder) — write to App Group
-        (UserDefaults(suiteName: StoragePaths.appGroupID) ?? .standard).set(storageFolderPath, forKey: StoragePaths.storageDisplayPathKey)
+        StoragePaths.setShared(storageFolderPath, forKey: StoragePaths.storageDisplayPathKey)
         // Backup settings
         defaults.set(backupEnabled, forKey: "settings.backupEnabled")
-        (UserDefaults(suiteName: StoragePaths.appGroupID) ?? .standard).set(backupFolderPath, forKey: StoragePaths.backupDisplayPathKey)
+        StoragePaths.setShared(backupFolderPath, forKey: StoragePaths.backupDisplayPathKey)
     // Security
     defaults.set(vaultEnabled, forKey: "settings.vaultEnabled")
     // Mirror vault flag into App Group so helper/DB agree immediately
-    (UserDefaults(suiteName: StoragePaths.appGroupID) ?? .standard).set(vaultEnabled, forKey: "settings.vaultEnabled")
+    StoragePaths.setShared(vaultEnabled, forKey: "settings.vaultEnabled")
+    StoragePaths.synchronizeShared()
     defaults.set(captureWhileLocked, forKey: "settings.captureWhileLocked")
     defaults.set(autoLockInactivityMinutes, forKey: "settings.autoLockInactivityMinutes")
     defaults.set(autoLockOnSleep, forKey: "settings.autoLockOnSleep")

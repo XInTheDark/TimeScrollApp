@@ -44,6 +44,19 @@ struct ZoomableImageView: NSViewRepresentable {
 final class ZoomScrollView: NSScrollView {
     private var fitPendingCount: Int = 0
     override var acceptsFirstResponder: Bool { true }
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        drawsBackground = false
+        contentView = CenteringClipView(frame: .zero)
+    }
+
+    required init?(coder: NSCoder) {
+        super.init(coder: coder)
+        drawsBackground = false
+        contentView = CenteringClipView(frame: .zero)
+    }
+
     // Fit content initially or when content changes significantly.
     func fitToContent() {
         guard let doc = self.documentView else { return }
@@ -75,9 +88,10 @@ final class ZoomScrollView: NSScrollView {
         guard let doc = self.documentView else { return }
         let vis = self.documentVisibleRect
         let docRect = doc.bounds
-        let x = max(0, (docRect.width - vis.width) / 2)
-        let y = max(0, (docRect.height - vis.height) / 2)
+        let x = (docRect.width - vis.width) / 2
+        let y = (docRect.height - vis.height) / 2
         self.contentView.scroll(to: NSPoint(x: x, y: y))
+        reflectScrolledClipView(contentView)
     }
 
     // Optional: support Option/Command + scroll wheel to zoom in/out.
@@ -96,6 +110,25 @@ final class ZoomScrollView: NSScrollView {
         // Ensure keyboard focus moves away from any text input to the stage
         self.window?.makeFirstResponder(self)
         super.mouseDown(with: event)
+    }
+}
+
+final class CenteringClipView: NSClipView {
+    override func constrainBoundsRect(_ proposedBounds: NSRect) -> NSRect {
+        var constrained = super.constrainBoundsRect(proposedBounds)
+
+        guard let documentView else { return constrained }
+        let documentFrame = documentView.frame
+
+        if documentFrame.width < proposedBounds.width {
+            constrained.origin.x = floor((documentFrame.width - proposedBounds.width) / 2)
+        }
+
+        if documentFrame.height < proposedBounds.height {
+            constrained.origin.y = floor((documentFrame.height - proposedBounds.height) / 2)
+        }
+
+        return constrained
     }
 }
 

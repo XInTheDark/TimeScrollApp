@@ -1,12 +1,11 @@
 import Foundation
 import ScreenCaptureKit
-import CoreImage
-import CoreVideo
 import CoreMedia
-import AppKit
 
 final class CaptureManager: NSObject {
     private var streams: [SCStream] = []
+    private var streamConfigurations: [SCStreamConfiguration] = []
+    private var configuredProbeIntervals: [Double] = []
     private var outputs: [FrameOutput] = []
     private var capturedDisplays: [SCDisplay] = []
     private let outputQueue = DispatchQueue(label: "TimeScroll.Capture.Output")
@@ -27,26 +26,34 @@ final class CaptureManager: NSObject {
         let captureAll = (modeRaw == "all")
         let displays: [SCDisplay] = captureAll ? content.displays : (content.displays.first.map { [$0] } ?? [])
         guard !displays.isEmpty else { throw NSError(domain: "TS", code: -2) }
+        let baseCaptureInterval = {
+            let value = d.double(forKey: "settings.captureMinInterval")
+            return value > 0 ? value : SettingsStore.defaultCaptureMinInterval
+        }()
+        let initialProbeInterval = Self.probeInterval(forCaptureInterval: baseCaptureInterval)
 
         // Capture scale is user-configurable; default 0.8
-        let capScale = (d.object(forKey: "settings.captureScale") != nil) ? d.double(forKey: "settings.captureScale") : 0.8
+        let capScale = (d.object(forKey: "settings.captureScale") != nil) ? d.double(forKey: "settings.captureScale") : SettingsStore.defaultCaptureScale
         let scale = max(0.5, min(capScale, 1.0))
 
         // Configure and start a stream per display
         var newStreams: [SCStream] = []
+        var newConfigs: [SCStreamConfiguration] = []
+        var newProbeIntervals: [Double] = []
         var newOutputs: [FrameOutput] = []
         // Compute initial exclusion set once and reuse per display
         let blacklistBundleSet = Set((UserDefaults.standard.array(forKey: "settings.blacklistBundleIds") as? [String]) ?? [])
         let blacklistApps: [SCRunningApplication] = excludedApplications(bundleIds: blacklistBundleSet, content: content)
 
         for display in displays {
+            let streamIndex = newStreams.count
             let cfg = SCStreamConfiguration()
             cfg.queueDepth = 8
             // NV12 saves bandwidth; if you see issues in your stack, switch back to BGRA.
             cfg.pixelFormat = kCVPixelFormatType_420YpCbCr8BiPlanarFullRange
             cfg.showsCursor = false
             cfg.colorSpaceName = CGColorSpace.sRGB
-            cfg.minimumFrameInterval = CMTime(value: 1, timescale: 10) // 10 fps cap
+            cfg.minimumFrameInterval = CMTime(seconds: initialProbeInterval, preferredTimescale: 600)
 
             // Downscale at the source to cut energy cost
             let w = Int(Double(display.width) * scale)
@@ -58,33 +65,74 @@ final class CaptureManager: NSObject {
             // Build a content filter that excludes any blacklisted applications
             let filter = filterFor(display: display, apps: blacklistApps)
             let stream = SCStream(filter: filter, configuration: cfg, delegate: streamDelegate)
-            let output = FrameOutput(onSnapshot: onSnapshot)
+            let output = FrameOutput(
+                onSnapshot: onSnapshot,
+                onProbeIntervalChanged: { [weak self] probeInterval in
+                    self?.scheduleProbeIntervalUpdate(probeInterval, for: streamIndex)
+                }
+            )
             try stream.addStreamOutput(output, type: .screen, sampleHandlerQueue: outputQueue)
             newStreams.append(stream)
+            newConfigs.append(cfg)
+            newProbeIntervals.append(initialProbeInterval)
             newOutputs.append(output)
         }
 
         // Assign to properties so they are retained during start
-        self.streams = newStreams
-        self.outputs = newOutputs
-        self.capturedDisplays = displays
-        for s in self.streams {
-            try await s.startCapture()
+        streams = newStreams
+        streamConfigurations = newConfigs
+        configuredProbeIntervals = newProbeIntervals
+        outputs = newOutputs
+        capturedDisplays = displays
+        for stream in streams {
+            try await stream.startCapture()
         }
     }
 
     func stop() async {
-        for s in streams {
-            try? await s.stopCapture()
+        for stream in streams {
+            try? await stream.stopCapture()
         }
         streams.removeAll()
+        streamConfigurations.removeAll()
+        configuredProbeIntervals.removeAll()
         outputs.removeAll()
         capturedDisplays.removeAll()
     }
 
+    private static func probeInterval(forCaptureInterval interval: Double) -> Double {
+        min(5.0, max(0.5, interval / 2.0))
+    }
+
+    private func scheduleProbeIntervalUpdate(_ seconds: Double, for index: Int) {
+        Task { @MainActor [weak self] in
+            await self?.applyProbeIntervalUpdate(seconds, for: index)
+        }
+    }
+
+    @MainActor
+    private func applyProbeIntervalUpdate(_ seconds: Double, for index: Int) async {
+        guard streams.indices.contains(index), streamConfigurations.indices.contains(index), configuredProbeIntervals.indices.contains(index) else {
+            return
+        }
+        let clamped = min(5.0, max(0.5, seconds))
+        let current = configuredProbeIntervals[index]
+        if abs(current - clamped) < 0.25 {
+            return
+        }
+        let config = streamConfigurations[index]
+        config.minimumFrameInterval = CMTime(seconds: clamped, preferredTimescale: 600)
+        do {
+            try await streams[index].updateConfiguration(config)
+            configuredProbeIntervals[index] = clamped
+        } catch {
+            // Ignore transient configuration update failures; the stream keeps running.
+        }
+    }
+
     // MARK: - Helpers (DRY)
     private func shareableContent() async throws -> SCShareableContent {
-        return try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
+        try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
     }
 
     private func excludedApplications(bundleIds: Set<String>, content: SCShareableContent) -> [SCRunningApplication] {
@@ -93,16 +141,16 @@ final class CaptureManager: NSObject {
     }
 
     private func filterFor(display: SCDisplay, apps: [SCRunningApplication]) -> SCContentFilter {
-        return SCContentFilter(display: display, excludingApplications: apps, exceptingWindows: [])
+        SCContentFilter(display: display, excludingApplications: apps, exceptingWindows: [])
     }
 
     @MainActor
     func updateExclusions(with bundleIds: [String]) async {
         guard !streams.isEmpty else { return }
         do {
-            let content = try await self.shareableContent()
-            let apps = self.excludedApplications(bundleIds: Set(bundleIds), content: content)
-            await self.applyExclusions(apps: apps)
+            let content = try await shareableContent()
+            let apps = excludedApplications(bundleIds: Set(bundleIds), content: content)
+            await applyExclusions(apps: apps)
         } catch {
             // ignore
         }
@@ -110,11 +158,15 @@ final class CaptureManager: NSObject {
 
     @MainActor
     private func applyExclusions(apps: [SCRunningApplication]) async {
-        for (idx, stream) in streams.enumerated() {
-            guard capturedDisplays.indices.contains(idx) else { continue }
-            let display = capturedDisplays[idx]
+        for (index, stream) in streams.enumerated() {
+            guard capturedDisplays.indices.contains(index) else { continue }
+            let display = capturedDisplays[index]
             let filter = filterFor(display: display, apps: apps)
-            do { try await stream.updateContentFilter(filter) } catch { /* ignore */ }
+            do {
+                try await stream.updateContentFilter(filter)
+            } catch {
+                // ignore
+            }
         }
     }
 }
@@ -124,416 +176,5 @@ final class StreamDelegate: NSObject, SCStreamDelegate {
         #if DEBUG
         print("SCStream stopped with error:", error)
         #endif
-    }
-}
-
-final class FrameOutput: NSObject, SCStreamOutput {
-    // Cadence gating
-    private var lastEvaluatedPTS: CMTime = .invalid
-    private var lastPersistedPTS: CMTime = .invalid
-    private var evaluating = false
-
-    // Adaptive interval
-    private var currentInterval: CFTimeInterval = 0
-    private var baseInterval: CFTimeInterval {
-        let v = UserDefaults.standard.double(forKey: "settings.captureMinInterval")
-        return CFTimeInterval(v > 0 ? v : 2.0)
-    }
-    private var maxInterval: CFTimeInterval {
-        let v = UserDefaults.standard.double(forKey: "settings.adaptiveMaxInterval")
-        return CFTimeInterval(v > 0 ? v : 30.0)
-    }
-
-    // Work infra
-    private let workQueue = DispatchQueue(label: "TimeScroll.Capture.Work", qos: .utility)
-    // Dedicated serial queue for OCR so it does not contend with encode path
-    private let ocrQueue = DispatchQueue(label: "TimeScroll.OCR", qos: .utility)
-    private let onSnapshot: (URL) -> Void
-    private let encoder = ImageEncoder()
-    private let hasher = ImageHasher()
-
-    // Dedup/adaptive
-    private var lastHash: UInt64?
-    private var stableCount: Int = 0
-    private var lastCapturedText: (id: Int64, text: String)? // For accessibility text dedup
-
-    // Thermal governance
-    private var lastThermalState: ProcessInfo.ThermalState = .nominal
-    private var lastThermalAdjustAt: TimeInterval = 0
-    private var suppressPostersUntil: TimeInterval = 0
-
-    init(onSnapshot: @escaping (URL) -> Void) {
-        self.onSnapshot = onSnapshot
-        super.init()
-        self.currentInterval = baseInterval
-    }
-
-    // MARK: - Persistence helpers
-    private enum PersistOutcome {
-        case saved(url: URL, bytes: Int64, width: Int, height: Int, thumbPath: String?)
-        case queuedWhileLocked
-        case skippedWhileLocked
-    }
-
-    private func extractTextForSnapshot(pixelBuffer: CVPixelBuffer,
-                                        startedAtMs: Int64,
-                                        processing: SettingsStore.TextProcessingMode,
-                                        blacklistBundleIds: [String]) -> (text: String, boxes: [OCRLine]) {
-        switch processing {
-        case .ocr:
-            // Existing OCR path
-            if let result = try? self.runOCR(pixelBuffer) {
-                return (result.text, result.lines)
-            }
-            return ("", [])
-        case .accessibility:
-            let set = Set(blacklistBundleIds)
-            let text = AXTextExtractor.shared.collectText(blacklistBundleIds: set)
-            return (text, [])
-        case .none:
-            return ("", [])
-        }
-    }
-
-    private func persist(
-        pixelBuffer: CVPixelBuffer,
-        fmt: SettingsStore.StorageFormat,
-        tsMs: Int64,
-        maxEdge: Int,
-        quality: Double,
-        vaultOn: Bool,
-        allowWhileLocked: Bool,
-        hash64: UInt64,
-        appBundleId: String?,
-        appName: String?
-    ) throws -> PersistOutcome {
-        let unlocked = UserDefaults.standard.bool(forKey: "vault.isUnlocked")
-        switch fmt {
-        case .hevc:
-            let width = CVPixelBufferGetWidth(pixelBuffer)
-            let height = CVPixelBufferGetHeight(pixelBuffer)
-            if vaultOn && !unlocked {
-                guard allowWhileLocked else { return .skippedWhileLocked }
-                HEVCVideoStore.shared.append(pixelBuffer: pixelBuffer, timestampMs: tsMs, encrypt: true)
-                let targetURL = HEVCVideoStore.shared.urlFor(timestampMs: tsMs, encrypt: true)
-                let bytes = (try? targetURL.resourceValues(forKeys: [.fileSizeKey]).fileSize).map { Int64($0) } ?? 0
-                let procRaw = UserDefaults.standard.string(forKey: "settings.textProcessingMode") ?? "ocr"
-                let proc = SettingsStore.TextProcessingMode(rawValue: procRaw) ?? .ocr
-                let blacklist = UserDefaults.standard.array(forKey: "settings.blacklistBundleIds") as? [String] ?? []
-                let extracted = extractTextForSnapshot(pixelBuffer: pixelBuffer,
-                                                       startedAtMs: tsMs,
-                                                       processing: proc,
-                                                       blacklistBundleIds: blacklist)
-                let thumb = self.makePosterThumbIfPossible(pixelBuffer: pixelBuffer, tsMs: tsMs, maxEdge: maxEdge, quality: quality, encrypt: true)
-                try IngestQueue.shared.enqueue(
-                    path: targetURL,
-                    startedAtMs: tsMs,
-                    appBundleId: appBundleId,
-                    appName: appName,
-                    bytes: bytes,
-                    width: width,
-                    height: height,
-                    format: "hevc",
-                    hash64: Int64(bitPattern: hash64),
-                    ocrText: extracted.text,
-                    ocrBoxes: extracted.boxes,
-                    thumbPath: thumb
-                )
-                return .queuedWhileLocked
-            } else {
-                HEVCVideoStore.shared.append(pixelBuffer: pixelBuffer, timestampMs: tsMs, encrypt: vaultOn)
-                let url = HEVCVideoStore.shared.urlFor(timestampMs: tsMs, encrypt: vaultOn)
-                let bytes = (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize).map { Int64($0) } ?? 0
-                let thumb = self.makePosterThumbIfPossible(pixelBuffer: pixelBuffer, tsMs: tsMs, maxEdge: maxEdge, quality: quality, encrypt: vaultOn)
-                return .saved(url: url, bytes: bytes, width: width, height: height, thumbPath: thumb)
-            }
-
-        case .heic, .jpeg, .png:
-            var encoded: EncodedImage
-            do {
-                encoded = try self.encoder.encode(pixelBuffer: pixelBuffer, format: fmt, maxLongEdge: maxEdge, quality: quality)
-            } catch {
-                throw error
-            }
-
-            if vaultOn && !unlocked {
-                guard allowWhileLocked else { return .skippedWhileLocked }
-                let encURL = try FileCrypter.shared.encryptSnapshot(encoded: encoded, timestampMs: tsMs)
-                let procRaw = UserDefaults.standard.string(forKey: "settings.textProcessingMode") ?? "ocr"
-                let proc = SettingsStore.TextProcessingMode(rawValue: procRaw) ?? .ocr
-                let blacklist = UserDefaults.standard.array(forKey: "settings.blacklistBundleIds") as? [String] ?? []
-                let extracted = extractTextForSnapshot(pixelBuffer: pixelBuffer,
-                                                       startedAtMs: tsMs,
-                                                       processing: proc,
-                                                       blacklistBundleIds: blacklist)
-                try IngestQueue.shared.enqueue(
-                    path: encURL,
-                    startedAtMs: tsMs,
-                    appBundleId: appBundleId,
-                    appName: appName,
-                    bytes: Int64(encoded.data.count),
-                    width: encoded.width,
-                    height: encoded.height,
-                    format: encoded.format,
-                    hash64: Int64(bitPattern: hash64),
-                    ocrText: extracted.text,
-                    ocrBoxes: extracted.boxes,
-                    thumbPath: nil
-                )
-                return .queuedWhileLocked
-            } else {
-                if vaultOn {
-                    let url = try FileCrypter.shared.encryptSnapshot(encoded: encoded, timestampMs: tsMs)
-                    return .saved(url: url, bytes: Int64(encoded.data.count), width: encoded.width, height: encoded.height, thumbPath: nil)
-                } else {
-                    let ret = try SnapshotStore.shared.saveEncoded(encoded, timestampMs: tsMs, formatExt: encoded.format)
-                    return .saved(url: ret.url, bytes: ret.bytes, width: encoded.width, height: encoded.height, thumbPath: nil)
-                }
-            }
-        }
-    }
-
-    private func makePosterThumbIfPossible(
-        pixelBuffer: CVPixelBuffer,
-        tsMs: Int64,
-        maxEdge: Int,
-        quality: Double,
-        encrypt: Bool
-    ) -> String? {
-        // Skip poster work during thermal backoff window
-        if Date().timeIntervalSince1970 < self.suppressPostersUntil { return nil }
-        do {
-            let poster = try self.encoder.encode(pixelBuffer: pixelBuffer, format: .heic, maxLongEdge: maxEdge, quality: quality)
-            if encrypt {
-                let encURL = try FileCrypter.shared.encryptSnapshot(encoded: poster, timestampMs: tsMs)
-                return encURL.path
-            } else {
-                let saved = try SnapshotStore.shared.saveEncoded(poster, timestampMs: tsMs, formatExt: poster.format)
-                return saved.url.path
-            }
-        } catch { return nil }
-    }
-
-    func stream(_ stream: SCStream, didOutputSampleBuffer sb: CMSampleBuffer, of outputType: SCStreamOutputType) {
-        guard outputType == .screen, let pixelBuffer = sb.imageBuffer else { return }
-
-        // Lightweight thermal governance check (every ~1s)
-        applyThermalGovernorIfNeeded()
-
-        // Clamp currentInterval to reflect any preference changes immediately
-        let bInt = baseInterval
-        let mInt = maxInterval
-        if currentInterval < bInt || currentInterval > mInt {
-            currentInterval = min(mInt, max(bInt, currentInterval))
-        }
-
-        // Gate evaluation cadence by PTS
-        let pts = CMSampleBufferGetPresentationTimeStamp(sb)
-        if lastEvaluatedPTS.isValid {
-            let delta = CMTimeGetSeconds(CMTimeSubtract(pts, lastEvaluatedPTS))
-            if delta < currentInterval { return }
-        }
-        if evaluating { return }
-
-        // Privacy handled via SCContentFilter exclusions at the stream level.
-
-        evaluating = true
-        lastEvaluatedPTS = pts
-
-        // Snapshot background-readable settings
-        let defaults = UserDefaults.standard
-        let fmtRaw = defaults.string(forKey: "settings.storageFormat") ?? "heic"
-        let fmt = SettingsStore.StorageFormat(rawValue: fmtRaw) ?? .heic
-        let maxEdge = (defaults.object(forKey: "settings.maxLongEdge") != nil) ? defaults.integer(forKey: "settings.maxLongEdge") : 1600
-        let quality = (defaults.object(forKey: "settings.lossyQuality") != nil) ? defaults.double(forKey: "settings.lossyQuality") : 0.6
-        let dedupEnabled = (defaults.object(forKey: "settings.dedupEnabled") != nil) ? defaults.bool(forKey: "settings.dedupEnabled") : true
-        let thr = (defaults.object(forKey: "settings.dedupHammingThreshold") != nil) ? defaults.integer(forKey: "settings.dedupHammingThreshold") : 8
-        let adaptive = (defaults.object(forKey: "settings.adaptiveSampling") != nil) ? defaults.bool(forKey: "settings.adaptiveSampling") : true
-        let vaultOn = (defaults.object(forKey: "settings.vaultEnabled") != nil) ? defaults.bool(forKey: "settings.vaultEnabled") : false
-        let allowWhileLocked = (defaults.object(forKey: "settings.captureWhileLocked") != nil) ? defaults.bool(forKey: "settings.captureWhileLocked") : true
-        let unlockedFlag = defaults.bool(forKey: "vault.isUnlocked")
-
-        // IMPORTANT: Compute hash directly from the pixel buffer (cheap, uses CI) before making any CGImage.
-        var hashVal: UInt64 = 0
-        if dedupEnabled {
-            hashVal = self.hasher.hash64(pixelBuffer: pixelBuffer)
-            if let prev = self.lastHash {
-                let hamming = ImageHasher.hamming(prev, hashVal)
-                if hamming <= thr {
-                    // For HEVC we still append frames to the segment to keep the video continuous,
-                    // but we skip DB/metadata work for unchanged frames.
-                    if fmt == .hevc {
-                        let tsMs = Int64(Date().timeIntervalSince1970 * 1000)
-                        if !vaultOn || (vaultOn && (unlockedFlag ? true : allowWhileLocked)) {
-                            HEVCVideoStore.shared.append(pixelBuffer: pixelBuffer, timestampMs: tsMs, encrypt: vaultOn)
-                        }
-                    }
-                    if adaptive { self.stableCount += 1; self.currentInterval = min(self.maxInterval, self.baseInterval * CFTimeInterval(pow(1.5, Double(self.stableCount)))) }
-                    self.evaluating = false
-                    return
-                }
-            }
-        }
-
-        // Retain the pixel buffer to safely use it across queues.
-        let retainedPB = Unmanaged.passRetained(pixelBuffer)
-        workQueue.async { [weak self] in
-            guard let self = self else { return }
-            defer {
-                self.evaluating = false
-            }
-
-            // Persist directly from the pixel buffer to avoid CGImage creation
-            let pb = retainedPB.takeUnretainedValue()
-            do {
-                let tsMs = Int64(Date().timeIntervalSince1970 * 1000)
-                // App metadata from tracker (no main-thread hop)
-                let info = AppActivityTracker.shared.current()
-                let bid = info.bundleId
-                let name = info.name
-
-                let outcome = try self.persist(
-                    pixelBuffer: pb,
-                    fmt: fmt,
-                    tsMs: tsMs,
-                    maxEdge: maxEdge,
-                    quality: quality,
-                    vaultOn: vaultOn,
-                    allowWhileLocked: allowWhileLocked,
-                    hash64: hashVal,
-                    appBundleId: bid,
-                    appName: name
-                )
-
-                switch outcome {
-                case .queuedWhileLocked, .skippedWhileLocked:
-                    retainedPB.release()
-                    return
-                case let .saved(url, bytes, width, height, thumbPath):
-                    let rowId = Indexer.shared.insertStub(
-                        startedAtMs: tsMs,
-                        savedURL: url,
-                        extra: Indexer.SnapshotExtraMeta(
-                            bytes: bytes,
-                            width: width,
-                            height: height,
-                            format: fmt.dbFormatString,
-                            hash64: Int64(bitPattern: hashVal)
-                        ),
-                        appBundleId: bid,
-                        appName: name,
-                        thumbPath: thumbPath
-                    )
-
-                    // Notify UI before OCR to avoid races
-                    DispatchQueue.main.async { self.onSnapshot(url) }
-
-                    // Reset adaptive state after a real persist
-                    self.lastHash = hashVal
-                    self.stableCount = 0
-                    self.currentInterval = self.baseInterval
-                    self.lastPersistedPTS = pts
-
-                    // Offload OCR to a dedicated serial queue; retain/release around the async call.
-                    self.ocrQueue.async {
-                        let pb2 = retainedPB.takeUnretainedValue()
-                        let modeRaw = UserDefaults.standard.string(forKey: "settings.textProcessingMode") ?? "ocr"
-                        let mode = SettingsStore.TextProcessingMode(rawValue: modeRaw) ?? .ocr
-                        switch mode {
-                        case .ocr:
-                            Indexer.shared.completeOCR(snapshotId: rowId, pixelBuffer: pb2)
-                        case .accessibility:
-                            let blacklist = UserDefaults.standard.array(forKey: "settings.blacklistBundleIds") as? [String] ?? []
-                            let text = AXTextExtractor.shared.collectText(blacklistBundleIds: Set(blacklist))
-                            
-                            // Dedup check
-                            var isDuplicate = false
-                            if let last = self.lastCapturedText {
-                                let sim = text.jaccardSimilarity(to: last.text)
-                                if sim > 0.9 {
-                                    if UserDefaults.standard.bool(forKey: "settings.debugMode") {
-                                        print("[Capture] Deduplicating text, similarity \(sim) > 0.9, refId=\(last.id)")
-                                    }
-                                    // Store reference to the ANCHOR snapshot
-                                    try? DB.shared.updateSnapshotTextRef(rowId: rowId, refId: last.id)
-                                    isDuplicate = true
-                                }
-                            }
-                            
-                            if !isDuplicate {
-                                // This is a new anchor
-                                self.lastCapturedText = (rowId, text)
-                                do {
-                                    try DB.shared.updateFTS(rowId: rowId, content: text)
-                                    // Produce embeddings if enabled (same as OCR)
-                                    let svc = EmbeddingService.shared
-                                    svc.reloadFromSettings()
-                                    let aiEnabled = UserDefaults.standard.bool(forKey: "settings.aiEmbeddingsEnabled")
-                                    if aiEnabled && svc.dim > 0 {
-                                        let (vec, known, total) = svc.embedWithStats(text, usage: .document)
-                                        if !vec.isEmpty {
-                                            try? DB.shared.upsertEmbedding(snapshotId: rowId,
-                                                                           dim: vec.count,
-                                                                           vec: vec,
-                                                                           provider: svc.providerID,
-                                                                           model: svc.modelID)
-                                            if UserDefaults.standard.bool(forKey: "settings.debugMode") {
-                                                print("[AI][Store] snapshotId=\(rowId) dim=\(vec.count) tokens=\(known)/\(total)")
-                                            }
-                                        }
-                                    }
-                                } catch {
-                                    // Swallow errors; debug log if needed
-                                }
-                            }
-                        case .none:
-                            break
-                        }
-                        retainedPB.release()
-                    }
-                }
-            } catch {
-                retainedPB.release()
-                // swallow for now
-            }
-        }
-    }
-
-    private func runOCR(_ pixelBuffer: CVPixelBuffer) throws -> OCRResult {
-        // Keep a small OCR service per FrameOutput to avoid contention
-        return try self.ocr().recognize(from: pixelBuffer)
-    }
-
-    private var _ocrService: OCRService?
-    private func ocr() -> OCRService {
-        if let s = _ocrService { return s }
-        let s = OCRService(); _ocrService = s; return s
-    }
-
-    private func applyThermalGovernorIfNeeded() {
-        let now = Date().timeIntervalSince1970
-        if now - lastThermalAdjustAt < 1.0 { return } // check ~1Hz
-        lastThermalAdjustAt = now
-
-        let state = ProcessInfo.processInfo.thermalState
-        guard state != lastThermalState else { return }
-
-        switch state {
-        case .nominal, .fair:
-            // Return to normal; nothing to do (cooldown auto-expires in Indexer)
-            break
-        case .serious:
-            currentInterval = min(maxInterval, max(currentInterval, baseInterval) * 2)
-            Indexer.shared.setOCRCooldown(seconds: 30)
-            suppressPostersUntil = now + 30
-        case .critical:
-            currentInterval = min(maxInterval, max(currentInterval, baseInterval) * 3)
-            Indexer.shared.setOCRCooldown(seconds: 60)
-            suppressPostersUntil = now + 60
-        @unknown default:
-            break
-        }
-
-        lastThermalState = state
     }
 }

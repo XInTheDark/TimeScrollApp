@@ -3,6 +3,7 @@ import AppKit
 
 struct TimelineBar: NSViewRepresentable {
     @ObservedObject var model: TimelineModel
+    let isCompressed: Bool
     let onJump: (Int64) -> Void           // timeMs
     let onHover: (Int64) -> Void          // timeMs
     let onHoverExit: () -> Void
@@ -10,6 +11,8 @@ struct TimelineBar: NSViewRepresentable {
     func makeNSView(context: Context) -> TimelineBarNSView {
         let v = TimelineBarNSView()
         v.model = model
+        v.isCompressed = isCompressed
+        v.refreshLayout()
         v.onJump = onJump
         v.onHover = onHover
         v.onHoverExit = onHoverExit
@@ -18,18 +21,23 @@ struct TimelineBar: NSViewRepresentable {
 
     func updateNSView(_ nsView: TimelineBarNSView, context: Context) {
         nsView.model = model
+        nsView.isCompressed = isCompressed
+        nsView.refreshLayout()
         nsView.needsDisplay = true
     }
 }
 
 struct TimelineBarContainer: NSViewRepresentable {
     @ObservedObject var model: TimelineModel
+    let isCompressed: Bool
+    let invertScrollDirection: Bool
     let onJump: (Int64) -> Void
     let onHover: (Int64) -> Void
     let onHoverExit: () -> Void
 
     func makeNSView(context: Context) -> NSScrollView {
-        let scroll = NSScrollView()
+        let scroll = TimelineBarScrollView()
+        scroll.invertScrollDirection = invertScrollDirection
         scroll.hasHorizontalScroller = true
         scroll.hasVerticalScroller = false
         scroll.scrollerStyle = .overlay
@@ -37,6 +45,8 @@ struct TimelineBarContainer: NSViewRepresentable {
         scroll.drawsBackground = false
         let doc = TimelineBarNSView()
         doc.model = model
+        doc.isCompressed = isCompressed
+        doc.refreshLayout()
         doc.onJump = onJump
         doc.onHover = onHover
         doc.onHoverExit = onHoverExit
@@ -46,10 +56,15 @@ struct TimelineBarContainer: NSViewRepresentable {
 
     func updateNSView(_ scroll: NSScrollView, context: Context) {
         guard let doc = scroll.documentView as? TimelineBarNSView else { return }
+        (scroll as? TimelineBarScrollView)?.invertScrollDirection = invertScrollDirection
         doc.model = model
+        doc.isCompressed = isCompressed
+        doc.refreshLayout()
         let contentWidth = max(scroll.bounds.width, doc.requiredContentWidth())
         doc.setFrameSize(NSSize(width: contentWidth, height: 80))
         doc.needsDisplay = true
+        let compressionChanged = context.coordinator.lastCompressedState != isCompressed
+        context.coordinator.lastCompressedState = isCompressed
 
         if context.coordinator.shouldScrollToEndIfNeeded {
             Self.scrollToRightEnd(scroll)
@@ -60,7 +75,7 @@ struct TimelineBarContainer: NSViewRepresentable {
         if let sel = model.selected {
             if context.coordinator.lastSelectedId != sel.id {
                 context.coordinator.lastSelectedId = sel.id
-                let xSel = CGFloat(Double(sel.startedAtMs - (model.minTimeMs)) / max(1.0, model.msPerPoint))
+                let xSel = doc.timelineX(for: sel.startedAtMs)
                 let vis = scroll.contentView.bounds
                 let targetX = max(0, min(doc.bounds.width - vis.width, xSel - vis.width/2))
                 if abs(targetX - vis.origin.x) > 8 {
@@ -73,10 +88,10 @@ struct TimelineBarContainer: NSViewRepresentable {
         }
 
         // If zoom level changed, re-center around the current snapshot
-        if context.coordinator.lastMsPerPoint != model.msPerPoint {
+        if context.coordinator.lastMsPerPoint != model.msPerPoint || compressionChanged {
             context.coordinator.lastMsPerPoint = model.msPerPoint
             if let sel = model.selected {
-                let xSel = CGFloat(Double(sel.startedAtMs - (model.minTimeMs)) / max(1.0, model.msPerPoint))
+                let xSel = doc.timelineX(for: sel.startedAtMs)
                 let vis = scroll.contentView.bounds
                 let targetX = max(0, min(doc.bounds.width - vis.width, xSel - vis.width/2))
                 scroll.contentView.scroll(to: NSPoint(x: targetX, y: 0))
@@ -104,11 +119,217 @@ struct TimelineBarContainer: NSViewRepresentable {
         var lastSelectedId: Int64? = nil
         var lastJumpToken: Int = 0
         var lastMsPerPoint: Double = .nan
+        var lastCompressedState: Bool? = nil
     }
 }
 
+final class TimelineBarScrollView: NSScrollView {
+    var invertScrollDirection: Bool = false
+
+    override func scrollWheel(with event: NSEvent) {
+        guard let documentView else {
+            super.scrollWheel(with: event)
+            return
+        }
+
+        let horizontalDelta = effectiveHorizontalDelta(for: event)
+        guard abs(horizontalDelta) > 0.01 else {
+            super.scrollWheel(with: event)
+            return
+        }
+
+        let clipView = contentView
+        let visibleWidth = clipView.bounds.width
+        let maxX = max(0, documentView.bounds.width - visibleWidth)
+        guard maxX > 0 else {
+            super.scrollWheel(with: event)
+            return
+        }
+
+        let currentX = clipView.bounds.origin.x
+        let targetX = min(max(0, currentX + horizontalDelta), maxX)
+        guard abs(targetX - currentX) > 0.01 else { return }
+
+        clipView.scroll(to: NSPoint(x: targetX, y: 0))
+        reflectScrolledClipView(clipView)
+    }
+
+    private func effectiveHorizontalDelta(for event: NSEvent) -> CGFloat {
+        let horizontalDelta = event.scrollingDeltaX
+        let verticalDelta = event.scrollingDeltaY
+        let resolvedDelta: CGFloat
+
+        if abs(horizontalDelta) > max(0.01, abs(verticalDelta)) {
+            resolvedDelta = horizontalDelta
+        } else {
+            guard abs(verticalDelta) > 0.01 else { return horizontalDelta }
+
+            let isDirectionInverted =
+                event.isDirectionInvertedFromDevice ||
+                Self.shouldFallbackToGlobalScrollDirection(for: event)
+            let physicalVerticalDelta = isDirectionInverted ? -verticalDelta : verticalDelta
+            resolvedDelta = -physicalVerticalDelta
+        }
+
+        return invertScrollDirection ? -resolvedDelta : resolvedDelta
+    }
+
+    private static func shouldFallbackToGlobalScrollDirection(for event: NSEvent) -> Bool {
+        guard !event.hasPreciseScrollingDeltas, !event.isDirectionInvertedFromDevice else {
+            return false
+        }
+
+        guard let domain = UserDefaults.standard.persistentDomain(forName: UserDefaults.globalDomain) else {
+            return false
+        }
+
+        if let boolValue = domain["com.apple.swipescrolldirection"] as? Bool {
+            return boolValue
+        }
+        if let numberValue = domain["com.apple.swipescrolldirection"] as? NSNumber {
+            return numberValue.boolValue
+        }
+        return false
+    }
+}
+
+@MainActor
+private struct TimelineAxisLayout {
+    static let trailingPadding: CGFloat = 200
+    static let compressedGapWidth: CGFloat = 18
+    static let empty = TimelineAxisLayout(timesAsc: [], positionsAsc: [], contentWidth: trailingPadding, isCompressed: true, msPerPoint: 1)
+
+    let timesAsc: [Int64]
+    let positionsAsc: [CGFloat]
+    let contentWidth: CGFloat
+    let isCompressed: Bool
+    let msPerPoint: Double
+
+    init(model: TimelineModel?, isCompressed: Bool) {
+        guard let model else {
+            self = .empty
+            return
+        }
+
+        let timesAsc = model.metas.map(\.startedAtMs).sorted()
+        let msPerPoint = max(1.0, model.msPerPoint)
+        self.init(timesAsc: timesAsc,
+                  positionsAsc: Self.makePositions(timesAsc: timesAsc, isCompressed: isCompressed, msPerPoint: msPerPoint),
+                  contentWidth: Self.makeContentWidth(timesAsc: timesAsc, isCompressed: isCompressed, msPerPoint: msPerPoint),
+                  isCompressed: isCompressed,
+                  msPerPoint: msPerPoint)
+    }
+
+    private init(timesAsc: [Int64], positionsAsc: [CGFloat], contentWidth: CGFloat, isCompressed: Bool, msPerPoint: Double) {
+        self.timesAsc = timesAsc
+        self.positionsAsc = positionsAsc
+        self.contentWidth = contentWidth
+        self.isCompressed = isCompressed
+        self.msPerPoint = msPerPoint
+    }
+
+    func x(for timeMs: Int64) -> CGFloat {
+        guard !timesAsc.isEmpty else { return 0 }
+        guard timesAsc.count > 1 else { return 0 }
+        guard isCompressed else {
+            return CGFloat(Double(max(0, timeMs - timesAsc[0])) / msPerPoint)
+        }
+
+        if timeMs <= timesAsc[0] { return positionsAsc[0] }
+        if let lastTime = timesAsc.last, timeMs >= lastTime {
+            return positionsAsc.last ?? 0
+        }
+
+        let upperIndex = Self.firstIndex(in: timesAsc, atOrAfter: timeMs)
+        if timesAsc[upperIndex] == timeMs { return positionsAsc[upperIndex] }
+        let lowerIndex = max(0, upperIndex - 1)
+        let startTime = timesAsc[lowerIndex]
+        let endTime = timesAsc[upperIndex]
+        let timeSpan = max(1, endTime - startTime)
+        let fraction = CGFloat(Double(timeMs - startTime) / Double(timeSpan))
+        return positionsAsc[lowerIndex] + (positionsAsc[upperIndex] - positionsAsc[lowerIndex]) * fraction
+    }
+
+    func time(atX x: CGFloat) -> Int64 {
+        guard !timesAsc.isEmpty else { return 0 }
+        guard positionsAsc.count > 1 else { return timesAsc[0] }
+        let maxX = positionsAsc.last ?? 0
+        let clampedX = min(max(0, x), maxX)
+
+        guard isCompressed else {
+            return timesAsc[0] + Int64((Double(clampedX) * msPerPoint).rounded())
+        }
+
+        if clampedX <= positionsAsc[0] { return timesAsc[0] }
+        if clampedX >= maxX { return timesAsc.last ?? timesAsc[0] }
+
+        let upperIndex = Self.firstIndex(in: positionsAsc, atOrAfter: clampedX)
+        if positionsAsc[upperIndex] == clampedX { return timesAsc[upperIndex] }
+        let lowerIndex = max(0, upperIndex - 1)
+        let startX = positionsAsc[lowerIndex]
+        let endX = positionsAsc[upperIndex]
+        let spanX = max(1, endX - startX)
+        let fraction = Double((clampedX - startX) / spanX)
+        let deltaTime = Double(timesAsc[upperIndex] - timesAsc[lowerIndex]) * fraction
+        return timesAsc[lowerIndex] + Int64(deltaTime.rounded())
+    }
+
+    private static func makePositions(timesAsc: [Int64], isCompressed: Bool, msPerPoint: Double) -> [CGFloat] {
+        guard !timesAsc.isEmpty else { return [] }
+        guard isCompressed else {
+            let origin = timesAsc[0]
+            return timesAsc.map { CGFloat(Double(max(0, $0 - origin)) / msPerPoint) }
+        }
+
+        var positions: [CGFloat] = [0]
+        guard timesAsc.count > 1 else { return positions }
+
+        for i in 1..<timesAsc.count {
+            let gapMs = max(0, timesAsc[i] - timesAsc[i - 1])
+            let linearWidth = CGFloat(Double(gapMs) / msPerPoint)
+            positions.append((positions.last ?? 0) + min(linearWidth, compressedGapWidth))
+        }
+        return positions
+    }
+
+    private static func makeContentWidth(timesAsc: [Int64], isCompressed: Bool, msPerPoint: Double) -> CGFloat {
+        let positions = makePositions(timesAsc: timesAsc, isCompressed: isCompressed, msPerPoint: msPerPoint)
+        return (positions.last ?? 0) + trailingPadding
+    }
+
+    private static func firstIndex(in values: [Int64], atOrAfter target: Int64) -> Int {
+        var low = 0
+        var high = values.count - 1
+        while low < high {
+            let mid = (low + high) / 2
+            if values[mid] < target {
+                low = mid + 1
+            } else {
+                high = mid
+            }
+        }
+        return low
+    }
+
+    private static func firstIndex(in values: [CGFloat], atOrAfter target: CGFloat) -> Int {
+        var low = 0
+        var high = values.count - 1
+        while low < high {
+            let mid = (low + high) / 2
+            if values[mid] < target {
+                low = mid + 1
+            } else {
+                high = mid
+            }
+        }
+        return low
+    }
+}
+
+@MainActor
 final class TimelineBarNSView: NSView {
     weak var model: TimelineModel?
+    var isCompressed: Bool = true
     var onJump: ((Int64) -> Void)?
     var onHover: ((Int64) -> Void)?
     var onHoverExit: (() -> Void)?
@@ -122,18 +343,28 @@ final class TimelineBarNSView: NSView {
     private var previewDebounce: DispatchWorkItem?
     private var pendingPreviewIndex: Int? = nil
     private var previewViewModel = HoverPreviewViewModel()
+    private var layout = TimelineAxisLayout.empty
+    private var isDraggingTimeline = false
 
     override var isFlipped: Bool { true }
+    override var acceptsFirstResponder: Bool { true }
 
     func requiredContentWidth() -> CGFloat {
-        guard let m = model else { return bounds.width }
-        let span = max(1, Double(max(0, m.maxTimeMs - m.minTimeMs)))
-        return CGFloat(span / max(1.0, m.msPerPoint)) + 200 // padding
+        layout.contentWidth
+    }
+
+    func refreshLayout() {
+        layout = TimelineAxisLayout(model: model, isCompressed: isCompressed)
+    }
+
+    func timelineX(for timeMs: Int64) -> CGFloat {
+        layout.x(for: timeMs)
     }
 
     override func draw(_ dirtyRect: NSRect) {
         super.draw(dirtyRect)
         guard let m = model else { return }
+        refreshLayout()
         NSColor.windowBackgroundColor.setFill()
         dirtyRect.fill()
 
@@ -146,18 +377,59 @@ final class TimelineBarNSView: NSView {
         let h: CGFloat = 20
         let y: CGFloat = rect.midY - h/2 + 8
         for seg in m.segments {
-            let x0 = x(for: seg.startMs, m: m)
-            let x1 = x(for: seg.endMs, m: m)
+            let x0 = timelineX(for: seg.startMs)
+            let x1 = timelineX(for: seg.endMs)
             let w = max(1, x1 - x0)
             let r = NSRect(x: x0, y: y, width: w, height: h)
+            let segmentPath = NSBezierPath(roundedRect: r, xRadius: 6, yRadius: 6)
             AppColor.color(for: seg.appBundleId).setFill()
-            r.fill()
+            segmentPath.fill()
+            NSColor.separatorColor.withAlphaComponent(0.16).setStroke()
+            segmentPath.lineWidth = 1
+            segmentPath.stroke()
+
+            guard w >= 18,
+                  let bundleId = seg.appBundleId else {
+                continue
+            }
+
+            if AppIconCache.shared.cachedIcon(for: bundleId) == nil {
+                AppIconCache.shared.loadIconAsync(for: bundleId) { [weak self] _ in
+                    self?.needsDisplay = true
+                }
+            }
+
+            guard let icon = AppIconCache.shared.cachedIcon(for: bundleId) else {
+                continue
+            }
+
+            let iconSize = min(h - 6, 14)
+            guard iconSize > 0 else { continue }
+            let iconX = min(r.maxX - iconSize - 3, r.minX + 4)
+            guard iconX >= r.minX + 2 else { continue }
+
+            let backgroundRect = NSRect(x: iconX - 1.5,
+                                        y: r.midY - iconSize/2 - 1.5,
+                                        width: iconSize + 3,
+                                        height: iconSize + 3)
+            let iconRect = NSRect(x: iconX,
+                                  y: r.midY - iconSize / 2,
+                                  width: iconSize,
+                                  height: iconSize)
+            NSColor.windowBackgroundColor.withAlphaComponent(0.72).setFill()
+            NSBezierPath(roundedRect: backgroundRect, xRadius: 4, yRadius: 4).fill()
+            icon.draw(in: iconRect,
+                      from: .zero,
+                      operation: .sourceOver,
+                      fraction: 0.96,
+                      respectFlipped: true,
+                      hints: nil)
         }
     }
 
     private func drawSelection(model m: TimelineModel, in rect: NSRect) {
         guard let s = m.selected else { return }
-        let xSel = x(for: s.startedAtMs, m: m)
+        let xSel = timelineX(for: s.startedAtMs)
         let path = NSBezierPath()
         path.move(to: NSPoint(x: xSel, y: rect.minY))
         path.line(to: NSPoint(x: xSel, y: rect.maxY))
@@ -167,6 +439,11 @@ final class TimelineBarNSView: NSView {
     }
 
     private func drawTicks(model m: TimelineModel, in rect: NSRect) {
+        if isCompressed {
+            drawCompressedTicks(in: rect)
+            return
+        }
+
         let majorStep = pickMajorTickStep(msPerPoint: m.msPerPoint)
         let minorStep = majorStep / 5
         let start = m.minTimeMs
@@ -184,7 +461,7 @@ final class TimelineBarNSView: NSView {
         var t = firstMajor
         let df = TimelineBarNSView.timeFormatter
         while t < end {
-            let xPos = x(for: t, m: m)
+            let xPos = timelineX(for: t)
             // Major tick
             NSColor.separatorColor.setStroke()
             let p = NSBezierPath()
@@ -201,7 +478,7 @@ final class TimelineBarNSView: NSView {
             var mt = t + minorStep
             let nextMajor = t + majorStep
             while mt < min(nextMajor, end) {
-                let mx = x(for: mt, m: m)
+                let mx = timelineX(for: mt)
                 NSColor.separatorColor.withAlphaComponent(0.5).setStroke()
                 let mp = NSBezierPath()
                 mp.move(to: NSPoint(x: mx, y: yTop))
@@ -211,6 +488,45 @@ final class TimelineBarNSView: NSView {
                 mt += minorStep
             }
             t += majorStep
+        }
+    }
+
+    private func drawCompressedTicks(in rect: NSRect) {
+        guard !layout.timesAsc.isEmpty else { return }
+        let firstTime = layout.timesAsc.first ?? 0
+        let lastTime = layout.timesAsc.last ?? firstTime
+        let labelStyle: [NSAttributedString.Key: Any] = [
+            .font: NSFont.systemFont(ofSize: 10, weight: .regular),
+            .foregroundColor: NSColor.secondaryLabelColor
+        ]
+        let yTop = rect.minY + 8
+        let majorTickHeight: CGFloat = 8
+        let minorTickHeight: CGFloat = 4
+        let df = TimelineBarNSView.timeFormatter
+        var lastMajorX = -CGFloat.greatestFiniteMagnitude
+        var lastMinorX = -CGFloat.greatestFiniteMagnitude
+
+        for (timeMs, xPos) in zip(layout.timesAsc, layout.positionsAsc) {
+            let isMajor = xPos - lastMajorX >= 90 || timeMs == firstTime || timeMs == lastTime
+            let needsMinor = xPos - lastMinorX >= 22
+            guard isMajor || needsMinor else { continue }
+
+            let tickHeight = isMajor ? majorTickHeight : minorTickHeight
+            let color = isMajor ? NSColor.separatorColor : NSColor.separatorColor.withAlphaComponent(0.5)
+            color.setStroke()
+            let path = NSBezierPath()
+            path.move(to: NSPoint(x: xPos, y: yTop))
+            path.line(to: NSPoint(x: xPos, y: yTop + tickHeight))
+            path.lineWidth = 1
+            path.stroke()
+            lastMinorX = xPos
+
+            if isMajor {
+                let label = df.string(from: Date(timeIntervalSince1970: TimeInterval(timeMs) / 1000)) as NSString
+                let size = label.size(withAttributes: labelStyle)
+                label.draw(at: NSPoint(x: xPos - size.width / 2, y: yTop + majorTickHeight + 2), withAttributes: labelStyle)
+                lastMajorX = xPos
+            }
         }
     }
 
@@ -232,11 +548,6 @@ final class TimelineBarNSView: NSView {
         return candidates.last ?? 3_600_000
     }
 
-    private func x(for timeMs: Int64, m: TimelineModel) -> CGFloat {
-        let dt = Double(timeMs - m.minTimeMs)
-        return CGFloat(dt / max(1.0, m.msPerPoint))
-    }
-
     override func updateTrackingAreas() {
         super.updateTrackingAreas()
         if let t = tracking { removeTrackingArea(t) }
@@ -245,17 +556,22 @@ final class TimelineBarNSView: NSView {
         addTrackingArea(tracking!)
     }
 
+    override func resetCursorRects() {
+        super.resetCursorRects()
+        addCursorRect(bounds, cursor: isDraggingTimeline ? .closedHand : .openHand)
+    }
+
     override func mouseMoved(with event: NSEvent) {
-        guard let m = model else { return }
+        guard model != nil else { return }
         let p = convert(event.locationInWindow, from: nil)
-        let t = timeAt(x: p.x, m: m)
+        let t = timeAt(x: p.x)
         onHover?(t)
 
         // Throttle popover repositioning
         let now = Date()
         let shouldReposition = now.timeIntervalSince(hoverThrottle) >= 0.05
 
-        if let idx = m.indexNearest(to: t), m.metas.indices.contains(idx) {
+        if let m = model, let idx = m.indexNearest(to: t), m.metas.indices.contains(idx) {
             // Show or reposition popover at mouse location
             if !popover.isShown {
                 showPopover(at: p)
@@ -301,15 +617,62 @@ final class TimelineBarNSView: NSView {
     }
 
     override func mouseDown(with event: NSEvent) {
-        guard let m = model else { return }
-        let p = convert(event.locationInWindow, from: nil)
-        onJump?(timeAt(x: p.x, m: m))
+        guard model != nil else { return }
+        window?.makeFirstResponder(self)
+
+        let startPoint = convert(event.locationInWindow, from: nil)
+        guard let scrollView = enclosingScrollView else {
+            onJump?(timeAt(x: startPoint.x))
+            return
+        }
+
+        let startOriginX = scrollView.contentView.bounds.origin.x
+        let maxX = max(0, bounds.width - scrollView.contentView.bounds.width)
+        let dragThreshold: CGFloat = 3
+        var didDrag = false
+
+        while let nextEvent = window?.nextEvent(matching: [.leftMouseDragged, .leftMouseUp]) {
+            let currentPoint = convert(nextEvent.locationInWindow, from: nil)
+
+            switch nextEvent.type {
+            case .leftMouseDragged:
+                guard maxX > 0 else { continue }
+                let dragDeltaX = currentPoint.x - startPoint.x
+                if !didDrag, abs(dragDeltaX) >= dragThreshold {
+                    didDrag = true
+                    beginTimelineDrag()
+                    cancelTimelineHoverPreview()
+                }
+                guard didDrag else { continue }
+
+                let targetX = min(max(0, startOriginX - dragDeltaX), maxX)
+                scrollView.contentView.scroll(to: NSPoint(x: targetX, y: 0))
+                scrollView.reflectScrolledClipView(scrollView.contentView)
+
+            case .leftMouseUp:
+                if didDrag {
+                    endTimelineDrag()
+                } else {
+                    onJump?(timeAt(x: startPoint.x))
+                }
+                return
+
+            default:
+                break
+            }
+        }
+
+        if didDrag {
+            endTimelineDrag()
+        } else {
+            onJump?(timeAt(x: startPoint.x))
+        }
     }
 
     override func rightMouseDown(with event: NSEvent) {
-        guard let m = model else { return }
+        guard model != nil else { return }
         let p = convert(event.locationInWindow, from: nil)
-        let t = timeAt(x: p.x, m: m)
+        let t = timeAt(x: p.x)
         let menu = NSMenu()
         let jump = NSMenuItem(title: "Jump to here", action: #selector(ctxJump(_:)), keyEquivalent: "")
         jump.representedObject = t
@@ -322,9 +685,33 @@ final class TimelineBarNSView: NSView {
         if let t = sender.representedObject as? Int64 { onJump?(t) }
     }
 
-    private func timeAt(x: CGFloat, m: TimelineModel) -> Int64 {
-        let offsetMs = Int64(Double(x) * max(1.0, m.msPerPoint))
-        return m.minTimeMs + offsetMs
+    private func timeAt(x: CGFloat) -> Int64 {
+        layout.time(atX: x)
+    }
+
+    private func beginTimelineDrag() {
+        guard !isDraggingTimeline else { return }
+        isDraggingTimeline = true
+        NSCursor.closedHand.push()
+        window?.invalidateCursorRects(for: self)
+    }
+
+    private func endTimelineDrag() {
+        guard isDraggingTimeline else { return }
+        isDraggingTimeline = false
+        NSCursor.pop()
+        window?.invalidateCursorRects(for: self)
+    }
+
+    private func cancelTimelineHoverPreview() {
+        onHoverExit?()
+        popover.performClose(nil)
+        lastPreviewIndex = nil
+        pendingPreviewIndex = nil
+        loadingTimer?.cancel()
+        loadingTimer = nil
+        previewDebounce?.cancel()
+        previewDebounce = nil
     }
 
     private func showPopover(at point: NSPoint) {
@@ -351,15 +738,23 @@ final class TimelineBarNSView: NSView {
         loadingTimer = nil
 
         // Update metadata immediately with fade
-        let appIcon: NSImage? = meta.appBundleId.flatMap { AppIconCache.shared.icon(for: $0) }
         let date = Date(timeIntervalSince1970: TimeInterval(meta.startedAtMs)/1000)
         previewViewModel.update(
             thumbnail: nil,
-            appIcon: appIcon,
+            appIcon: meta.appBundleId.flatMap { AppIconCache.shared.cachedIcon(for: $0) },
             appName: meta.appName ?? (meta.appBundleId ?? "Unknown"),
             date: date,
             isLoading: true
         )
+
+        if let bundleId = meta.appBundleId,
+           AppIconCache.shared.cachedIcon(for: bundleId) == nil {
+            AppIconCache.shared.loadIconAsync(for: bundleId) { [weak self] icon in
+                guard let self = self, self.lastPreviewIndex == index else { return }
+                guard let icon else { return }
+                self.previewViewModel.appIcon = icon
+            }
+        }
 
         // After 500ms, if still no image, show "No preview"
         let timer = DispatchWorkItem { [weak self] in

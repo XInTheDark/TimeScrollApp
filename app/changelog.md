@@ -1,3 +1,16 @@
+# v1.0.0 - 2026-03-25
+
+## What's Changed
+- first v1 release
+- visual refresh and many UI fixes
+	- fixed many instances of app freezes
+- fixes for app builds and packaging
+- efficiency and storage optimisations
+- new AI search mode powered by Apple's image embedding models
+- faster search algorithms and improved result quality
+
+---
+
 # v1.0.0-rc1 - 2026-03-25
 
 

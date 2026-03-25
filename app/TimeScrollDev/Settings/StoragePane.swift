@@ -146,16 +146,14 @@ struct StoragePane: View {
                     .help("Older highlight boxes are pruned after the aging window to save database space.")
                     .onChange(of: settings.recentOCRBoxesOnly) { enabled in
                         guard enabled else { return }
-                        Task.detached {
-                            DB.shared.pruneOldOCRBoxesIfConfigured(force: true)
-                        }
+                        triggerOCRBoxPrune()
                     }
 
                 Toggle("Auto-compact older snapshots", isOn: $settings.autoCompactEnabled)
                     .help("Automatically rewrites older snapshots using the settings below.")
                     .onChange(of: settings.autoCompactEnabled) { enabled in
                         guard enabled else { return }
-                        StorageMaintenanceManager.shared.runIfNeeded(forceMaintenance: true)
+                        triggerStorageMaintenance()
                     }
 
                 if settings.autoCompactEnabled {
@@ -296,6 +294,18 @@ private struct DataResetConfirmSheet: View {
 }
 
 private extension StoragePane {
+    func triggerOCRBoxPrune() {
+        DispatchQueue.global(qos: .utility).async {
+            DB.shared.pruneOldOCRBoxesIfConfigured(force: true)
+        }
+    }
+
+    func triggerStorageMaintenance() {
+        DispatchQueue.global(qos: .utility).async {
+            StorageMaintenanceManager.shared.runIfNeeded(forceMaintenance: true)
+        }
+    }
+
     func chooseFolder() {
         let panel = NSOpenPanel()
         panel.title = "Choose Storage Folder"

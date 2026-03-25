@@ -346,6 +346,9 @@ final class OllamaEmbeddingProvider {
     let model: String
     private let baseURL: String
     private static let defaultDim = 384
+    private static let embedRequestTimeout: TimeInterval = 12
+    private static let metadataRequestTimeout: TimeInterval = 5
+    private static let listRequestTimeout: TimeInterval = 5
     private static let metadataQueue = DispatchQueue(label: "com.timescroll.ollama.metadata", attributes: .concurrent)
     private static var dimCache: [String: Int] = [:]
     private static let dimDefaultsKey = "embedding.ollamaDims"
@@ -393,6 +396,7 @@ final class OllamaEmbeddingProvider {
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.timeoutInterval = Self.embedRequestTimeout
 
         let payload: [String: Any] = [
             "model": model,
@@ -407,40 +411,27 @@ final class OllamaEmbeddingProvider {
 
         // Synchronous request (will block)
         var result: [Float] = Array(repeating: 0, count: dim)
-        let semaphore = DispatchSemaphore(value: 0)
+        guard let data = Self.performSynchronousRequest(request,
+                                                        timeout: Self.embedRequestTimeout,
+                                                        label: "embed") else {
+            return (result, 0, tokens)
+        }
+        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            print("[Ollama] Failed to parse JSON response")
+            return (result, 0, tokens)
+        }
 
-        URLSession.shared.dataTask(with: request) { data, response, error in
-            defer { semaphore.signal() }
-
-            if let error = error {
-                print("[Ollama] Request error: \(error)")
-                return
-            }
-
-            guard let data = data else {
-                print("[Ollama] No data received")
-                return
-            }
-
-            guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-                print("[Ollama] Failed to parse JSON response")
-                return
-            }
-
-            // Ollama /api/embed returns: {"model": "...", "embeddings": [[...], ...]}
-            // For single input, we get one embedding
-            if let embeddings = json["embeddings"] as? [[Double]],
-               let embedding = embeddings.first {
-                result = embedding.map { Float($0) }
-            } else if let embedding = json["embedding"] as? [Double] {
-                // Fallback for older API format
-                result = embedding.map { Float($0) }
-            } else {
-                print("[Ollama] No embeddings in response")
-            }
-        }.resume()
-
-        semaphore.wait()
+        // Ollama /api/embed returns: {"model": "...", "embeddings": [[...], ...]}
+        // For single input, we get one embedding
+        if let embeddings = json["embeddings"] as? [[Double]],
+           let embedding = embeddings.first {
+            result = embedding.map { Float($0) }
+        } else if let embedding = json["embedding"] as? [Double] {
+            // Fallback for older API format
+            result = embedding.map { Float($0) }
+        } else {
+            print("[Ollama] No embeddings in response")
+        }
         // If Ollama returned a different dimension than we expected, update in-memory dim and cache it.
         if !result.isEmpty && result.count != dim {
             dim = result.count
@@ -452,21 +443,16 @@ final class OllamaEmbeddingProvider {
     // Check if model is installed
     static func isModelInstalled(_ model: String, baseURL: String = "http://localhost:11434") -> Bool {
         guard let url = URL(string: "\(baseURL)/api/tags") else { return false }
-
-        var installed = false
-        let semaphore = DispatchSemaphore(value: 0)
-
-        URLSession.shared.dataTask(with: url) { data, _, error in
-            defer { semaphore.signal() }
-            guard let data = data, error == nil else { return }
-            if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-               let models = json["models"] as? [[String: Any]] {
-                installed = models.contains { ($0["name"] as? String)?.hasPrefix(model) == true }
-            }
-        }.resume()
-
-        semaphore.wait()
-        return installed
+        guard let data = performSynchronousRequest(url: url,
+                                                   timeout: listRequestTimeout,
+                                                   label: "check installed models") else {
+            return false
+        }
+        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let models = json["models"] as? [[String: Any]] else {
+            return false
+        }
+        return models.contains { ($0["name"] as? String)?.hasPrefix(model) == true }
     }
 
     // Exposed parser used by listModels and tests
@@ -491,18 +477,17 @@ final class OllamaEmbeddingProvider {
     // List available models from Ollama, preferring /api/models then falling back to /api/tags.
     static func listModels(baseURL: String = "http://localhost:11434") -> [String] {
         var out: [String] = []
-        let sem = DispatchSemaphore(value: 0)
 
         func parseModelsJson(_ data: Data) {
             out.append(contentsOf: parseModelsFromData(data))
         }
 
         if let url = URL(string: "\(baseURL)/api/tags") {
-            URLSession.shared.dataTask(with: url) { data, _, _ in
-                if let data = data { parseModelsJson(data) }
-                sem.signal()
-            }.resume()
-            sem.wait()
+            if let data = performSynchronousRequest(url: url,
+                                                    timeout: listRequestTimeout,
+                                                    label: "list models") {
+                parseModelsJson(data)
+            }
         }
 
         let uniq = Array(NSOrderedSet(array: out)) as? [String] ?? out
@@ -592,16 +577,14 @@ final class OllamaEmbeddingProvider {
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         let payload: [String: Any] = ["name": model]
         request.httpBody = try? JSONSerialization.data(withJSONObject: payload)
+        request.timeoutInterval = metadataRequestTimeout
 
-        let semaphore = DispatchSemaphore(value: 0)
-        var length: Int?
-        URLSession.shared.dataTask(with: request) { data, _, error in
-            defer { semaphore.signal() }
-            guard error == nil, let data = data else { return }
-            length = parseEmbeddingLength(from: data)
-        }.resume()
-        semaphore.wait()
-        return length
+        guard let data = performSynchronousRequest(request,
+                                                   timeout: metadataRequestTimeout,
+                                                   label: "fetch embedding metadata") else {
+            return nil
+        }
+        return parseEmbeddingLength(from: data)
     }
 
     static func parseEmbeddingLength(from data: Data) -> Int? {
@@ -631,5 +614,44 @@ final class OllamaEmbeddingProvider {
             }
         }
         return nil
+    }
+
+    private static func performSynchronousRequest(_ request: URLRequest,
+                                                  timeout: TimeInterval,
+                                                  label: String) -> Data? {
+        var data: Data?
+        var requestError: Error?
+        let semaphore = DispatchSemaphore(value: 0)
+        let task = URLSession.shared.dataTask(with: request) { responseData, _, error in
+            data = responseData
+            requestError = error
+            semaphore.signal()
+        }
+        task.resume()
+
+        if semaphore.wait(timeout: .now() + timeout) == .timedOut {
+            task.cancel()
+            print("[Ollama] \(label) timed out after \(String(format: "%.1f", timeout))s")
+            return nil
+        }
+
+        if let requestError {
+            print("[Ollama] \(label) error: \(requestError)")
+            return nil
+        }
+
+        guard let data else {
+            print("[Ollama] No data received for \(label)")
+            return nil
+        }
+        return data
+    }
+
+    private static func performSynchronousRequest(url: URL,
+                                                  timeout: TimeInterval,
+                                                  label: String) -> Data? {
+        var request = URLRequest(url: url)
+        request.timeoutInterval = timeout
+        return performSynchronousRequest(request, timeout: timeout, label: label)
     }
 }

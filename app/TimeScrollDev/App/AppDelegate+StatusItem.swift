@@ -45,11 +45,6 @@ extension AppDelegate {
         open.target = self
         menu.addItem(open)
 
-        let invertTimelineScroll = NSMenuItem(title: "Invert Timeline Scroll", action: #selector(toggleTimelineScrollDirection), keyEquivalent: "")
-        invertTimelineScroll.target = self
-        invertTimelineScroll.state = UserDefaults.standard.bool(forKey: "ui.timeline.invertScrollDirection") ? .on : .off
-        menu.addItem(invertTimelineScroll)
-
         // Preferences
         let prefs = NSMenuItem(title: "Preferences…", action: #selector(openPreferences), keyEquivalent: ",")
         prefs.target = self
@@ -113,13 +108,6 @@ extension AppDelegate {
     @objc func openMainWindow() {
         showMainWindow()
         updateActivationPolicy()
-    }
-
-    @objc func toggleTimelineScrollDirection() {
-        let defaults = UserDefaults.standard
-        let newValue = !defaults.bool(forKey: "ui.timeline.invertScrollDirection")
-        defaults.set(newValue, forKey: "ui.timeline.invertScrollDirection")
-        refreshMenu()
     }
 
     @objc func quitApp() {

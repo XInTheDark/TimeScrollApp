@@ -324,8 +324,6 @@ struct TimelineUnifiedView: View {
     private func showResults() {
         preserveOpenedResultContextOnRefresh = false
         applyFilters()
-        // Keep model.metas in sync so navigation uses the same result set
-        model.load()
         showingResults = true
         showFilters = false
     }

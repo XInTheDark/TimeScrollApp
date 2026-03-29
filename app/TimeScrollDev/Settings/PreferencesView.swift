@@ -20,6 +20,8 @@ struct PreferencesView: View {
                 .tabItem { Label("Storage", systemImage: "externaldrive") }
             UpdatesPane(settings: settings)
                 .tabItem { Label("Updates", systemImage: "arrow.down.circle") }
+            ImportPane()
+                .tabItem { Label("Import", systemImage: "square.and.arrow.down") }
             StatsPane()
                 .tabItem { Label("Stats", systemImage: "chart.bar") }
             AboutPane()

@@ -12,6 +12,10 @@ final class Compactor {
         let storageFormatRaw: String
         let degradeMaxLongEdge: Int
         let degradeQuality: Double
+
+        var profile: String {
+            "v1|\(storageFormatRaw)|\(degradeMaxLongEdge)|\(String(format: "%.4f", degradeQuality))"
+        }
     }
 
     private func loadSettings() -> CompactionSettings {
@@ -35,7 +39,8 @@ final class Compactor {
             pruneHEVCSegments(olderThanMs: cutoff)
             return true
         }
-        let paths = try DB.shared.pathsOlderThan(cutoffMs: cutoff)
+        let profile = s.profile
+        let paths = try DB.shared.pathsNeedingCompaction(cutoffMs: cutoff, profile: profile)
         for path in paths {
             var cgImage: CGImage?
             autoreleasepool {
@@ -60,6 +65,7 @@ final class Compactor {
                     let _ = try FileManager.default.replaceItemAt(url, withItemAt: tmp)
                     let bytes = (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize).map { Int64($0) } ?? Int64(encoded.data.count)
                     DB.shared.updateSnapshotMeta(path: path, bytes: bytes, width: encoded.width, height: encoded.height, format: encoded.format)
+                    DB.shared.markCompacted(path: path, profile: profile)
                 } catch {
                 }
             }
@@ -74,7 +80,7 @@ final class Compactor {
         for u in items {
             let name = u.deletingPathExtension().lastPathComponent
             guard name.hasPrefix("seg-") else { continue }
-            let tsStr = String(name.dropFirst(4))
+            let tsStr = String(String(name.dropFirst(4)).prefix(19))
             guard let d = Compactor.segDF.date(from: tsStr) else { continue }
             let startMs = Int64(d.timeIntervalSince1970 * 1000)
             let endMs = startMs + 60_000 - 1

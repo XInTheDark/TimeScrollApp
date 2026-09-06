@@ -6,6 +6,7 @@ final class SnapshotStore {
     private init() {}
 
     private let fm = FileManager.default
+    private let writeLock = NSLock()
 
     var snapshotsDir: URL {
         let dir = StoragePaths.snapshotsDir()
@@ -16,6 +17,8 @@ final class SnapshotStore {
     }
 
     func saveEncoded(_ encoded: EncodedImage, timestampMs: Int64, formatExt: String) throws -> (url: URL, bytes: Int64) {
+        writeLock.lock()
+        defer { writeLock.unlock() }
         return try StoragePaths.withSecurityScope {
             let day = Date(timeIntervalSince1970: TimeInterval(timestampMs)/1000)
             let subdir = snapshotsDir.appendingPathComponent(Self.dayFormatter.string(from: day), isDirectory: true)

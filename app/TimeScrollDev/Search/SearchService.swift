@@ -60,12 +60,16 @@ final class SearchService {
                      offset: Int = 0,
                      appBundleIds: [String]? = nil,
                      startMs: Int64? = nil,
-                     endMs: Int64? = nil) -> [SnapshotMeta] {
+                     endMs: Int64? = nil,
+                     captureKinds: [CaptureKind]? = nil,
+                     audioSourceKinds: [AudioSourceKind]? = nil) -> [SnapshotMeta] {
         return (try? DB.shared.latestMetas(limit: limit,
                                            offset: offset,
                                            appBundleIds: appBundleIds,
                                            startMs: startMs,
-                                           endMs: endMs)) ?? []
+                                           endMs: endMs,
+                                           captureKinds: captureKinds,
+                                           audioSourceKinds: audioSourceKinds)) ?? []
     }
 
     // Build a legacy single-string preview honoring fuzziness & phrase rules.
@@ -81,6 +85,8 @@ final class SearchService {
                      appBundleIds: [String]? = nil,
                      startMs: Int64? = nil,
                      endMs: Int64? = nil,
+                     captureKinds: [CaptureKind]? = nil,
+                     audioSourceKinds: [AudioSourceKind]? = nil,
                      limit: Int = 1000,
                      offset: Int = 0) -> [SnapshotMeta] {
         let parts = ftsParts(for: query, fuzziness: fuzziness, intelligentAccuracy: intelligentAccuracy)
@@ -88,6 +94,8 @@ final class SearchService {
                                            appBundleIds: appBundleIds,
                                            startMs: startMs,
                                            endMs: endMs,
+                                           captureKinds: captureKinds,
+                                           audioSourceKinds: audioSourceKinds,
                                            limit: limit,
                                            offset: offset)) ?? []
     }
@@ -97,12 +105,16 @@ final class SearchService {
                            offset: Int,
                            appBundleIds: [String]?,
                            startMs: Int64?,
-                           endMs: Int64?) -> [SearchResult] {
+                           endMs: Int64?,
+                           captureKinds: [CaptureKind]? = nil,
+                           audioSourceKinds: [AudioSourceKind]? = nil) -> [SearchResult] {
         return (try? DB.shared.latestWithContent(limit: limit,
                                                  offset: offset,
                                                  appBundleIds: appBundleIds,
                                                  startMs: startMs,
-                                                 endMs: endMs)) ?? []
+                                                 endMs: endMs,
+                                                 captureKinds: captureKinds,
+                                                 audioSourceKinds: audioSourceKinds)) ?? []
     }
 
     func searchWithContent(_ query: String,
@@ -111,6 +123,8 @@ final class SearchService {
                            appBundleIds: [String]?,
                            startMs: Int64?,
                            endMs: Int64?,
+                           captureKinds: [CaptureKind]? = nil,
+                           audioSourceKinds: [AudioSourceKind]? = nil,
                            limit: Int,
                            offset: Int) -> [SearchResult] {
         let parts = ftsParts(for: query, fuzziness: fuzziness, intelligentAccuracy: intelligentAccuracy)
@@ -119,6 +133,8 @@ final class SearchService {
                                                  appBundleIds: appBundleIds,
                                                  startMs: startMs,
                                                  endMs: endMs,
+                                                 captureKinds: captureKinds,
+                                                 audioSourceKinds: audioSourceKinds,
                                                  limit: limit,
                                                  offset: offset)) ?? []
     }
@@ -132,12 +148,16 @@ final class SearchService {
                   appBundleIds: [String]?,
                   startMs: Int64?,
                   endMs: Int64?,
+                  captureKinds: [CaptureKind]? = nil,
+                  audioSourceKinds: [AudioSourceKind]? = nil,
                   limit: Int,
                   offset: Int) -> [SearchResult] {
         return searchAIResults(query,
                                appBundleIds: appBundleIds,
                                startMs: startMs,
                                endMs: endMs,
+                               captureKinds: captureKinds,
+                               audioSourceKinds: audioSourceKinds,
                                limit: limit,
                                offset: offset)
     }
@@ -147,21 +167,30 @@ final class SearchService {
                        appBundleIds: [String]?,
                        startMs: Int64?,
                        endMs: Int64?,
+                       captureKinds: [CaptureKind]? = nil,
+                       audioSourceKinds: [AudioSourceKind]? = nil,
                        limit: Int,
                        offset: Int = 0) -> [SnapshotMeta] {
         let results = searchAIResults(query,
                                       appBundleIds: appBundleIds,
                                       startMs: startMs,
                                       endMs: endMs,
+                                      captureKinds: captureKinds,
+                                      audioSourceKinds: audioSourceKinds,
                                       limit: limit,
                                       offset: offset)
         return results.map { r in
             SnapshotMeta(id: r.id,
                          startedAtMs: r.startedAtMs,
+                         endedAtMs: r.endedAtMs,
                          path: r.path,
                          appBundleId: r.appBundleId,
                          appName: r.appName,
-                         thumbPath: nil)
+                         thumbPath: r.thumbPath,
+                         captureKind: r.captureKind,
+                         audioSourceKind: r.audioSourceKind,
+                         audioAssetId: r.audioAssetId,
+                         audioDurationMs: r.audioDurationMs)
         }
     }
 
@@ -170,6 +199,8 @@ final class SearchService {
                                  appBundleIds: [String]?,
                                  startMs: Int64?,
                                  endMs: Int64?,
+                                 captureKinds: [CaptureKind]?,
+                                 audioSourceKinds: [AudioSourceKind]?,
                                  limit: Int,
                                  offset: Int) -> [SearchResult] {
         let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -177,10 +208,12 @@ final class SearchService {
             return latestWithContent(limit: limit, offset: offset,
                                      appBundleIds: appBundleIds,
                                      startMs: startMs,
-                                     endMs: endMs)
+                                     endMs: endMs,
+                                     captureKinds: captureKinds,
+                                     audioSourceKinds: audioSourceKinds)
         }
         let svc = EmbeddingService.shared
-        svc.reloadFromSettings()
+        svc.reloadFromSettings(onlyIfSelectionChanged: true)
         let (qVec, known, total) = svc.embedWithStats(trimmed, usage: .query)
         guard !qVec.isEmpty else { return [] }
         return VectorSearchEngine.shared.searchResults(queryVector: qVec,
@@ -190,6 +223,8 @@ final class SearchService {
                                                        appBundleIds: appBundleIds,
                                                        startMs: startMs,
                                                        endMs: endMs,
+                                                       captureKinds: captureKinds,
+                                                       audioSourceKinds: audioSourceKinds,
                                                        limit: limit,
                                                        offset: offset)
     }

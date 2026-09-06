@@ -9,6 +9,7 @@ import SQLite3
 extension DB {
     func insertSnapshot(
         startedAtMs: Int64,
+        endedAtMs: Int64? = nil,
         path: String,
         text: String,
         appBundleId: String?,
@@ -20,31 +21,38 @@ extension DB {
         format: String? = nil,
         hash64: Int64? = nil,
         thumbPath: String? = nil,
-        textRefId: Int64? = nil
+        textRefId: Int64? = nil,
+        captureKind: CaptureKind = .screen,
+        sourceKind: AudioSourceKind? = nil,
+        audioAssetId: Int64? = nil
     ) throws -> Int64 {
-        try onQueueSync {
+        try withWriteSavepoint {
         try openIfNeeded()
         guard let db = db else { throw NSError(domain: "TS.DB", code: 3) }
         var stmt: OpaquePointer?
         defer { sqlite3_finalize(stmt) }
         let sql = """
-        INSERT INTO ts_snapshot(started_at_ms, path, app_bundle_id, app_name, bytes, width, height, format, hash64, thumb_path, text_ref_id)
-        VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+        INSERT INTO ts_snapshot(started_at_ms, ended_at_ms, path, app_bundle_id, app_name, bytes, width, height, format, hash64, thumb_path, text_ref_id, capture_kind, source_kind, audio_asset_id)
+        VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
         """
         if sqlite3_prepare_v2(db, sql, -1, &stmt, nil) != SQLITE_OK {
             throw NSError(domain: "TS.DB", code: 4)
         }
         sqlite3_bind_int64(stmt, 1, startedAtMs)
-        sqlite3_bind_text(stmt, 2, path, -1, SQLITE_TRANSIENT)
-        if let b = appBundleId { sqlite3_bind_text(stmt, 3, b, -1, SQLITE_TRANSIENT) } else { sqlite3_bind_null(stmt, 3) }
-        if let n = appName { sqlite3_bind_text(stmt, 4, n, -1, SQLITE_TRANSIENT) } else { sqlite3_bind_null(stmt, 4) }
-        if let v = bytes { sqlite3_bind_int64(stmt, 5, v) } else { sqlite3_bind_null(stmt, 5) }
-        if let v = width { sqlite3_bind_int(stmt, 6, Int32(v)) } else { sqlite3_bind_null(stmt, 6) }
-        if let v = height { sqlite3_bind_int(stmt, 7, Int32(v)) } else { sqlite3_bind_null(stmt, 7) }
-        if let v = format { sqlite3_bind_text(stmt, 8, v, -1, SQLITE_TRANSIENT) } else { sqlite3_bind_null(stmt, 8) }
-        if let v = hash64 { sqlite3_bind_int64(stmt, 9, v) } else { sqlite3_bind_null(stmt, 9) }
-        if let v = thumbPath { sqlite3_bind_text(stmt, 10, v, -1, SQLITE_TRANSIENT) } else { sqlite3_bind_null(stmt, 10) }
-        if let v = textRefId { sqlite3_bind_int64(stmt, 11, v) } else { sqlite3_bind_null(stmt, 11) }
+        if let endedAtMs { sqlite3_bind_int64(stmt, 2, endedAtMs) } else { sqlite3_bind_null(stmt, 2) }
+        sqlite3_bind_text(stmt, 3, path, -1, SQLITE_TRANSIENT)
+        if let b = appBundleId { sqlite3_bind_text(stmt, 4, b, -1, SQLITE_TRANSIENT) } else { sqlite3_bind_null(stmt, 4) }
+        if let n = appName { sqlite3_bind_text(stmt, 5, n, -1, SQLITE_TRANSIENT) } else { sqlite3_bind_null(stmt, 5) }
+        if let v = bytes { sqlite3_bind_int64(stmt, 6, v) } else { sqlite3_bind_null(stmt, 6) }
+        if let v = width { sqlite3_bind_int(stmt, 7, Int32(v)) } else { sqlite3_bind_null(stmt, 7) }
+        if let v = height { sqlite3_bind_int(stmt, 8, Int32(v)) } else { sqlite3_bind_null(stmt, 8) }
+        if let v = format { sqlite3_bind_text(stmt, 9, v, -1, SQLITE_TRANSIENT) } else { sqlite3_bind_null(stmt, 9) }
+        if let v = hash64 { sqlite3_bind_int64(stmt, 10, v) } else { sqlite3_bind_null(stmt, 10) }
+        if let v = thumbPath { sqlite3_bind_text(stmt, 11, v, -1, SQLITE_TRANSIENT) } else { sqlite3_bind_null(stmt, 11) }
+        if let v = textRefId { sqlite3_bind_int64(stmt, 12, v) } else { sqlite3_bind_null(stmt, 12) }
+        sqlite3_bind_text(stmt, 13, captureKind.rawValue, -1, SQLITE_TRANSIENT)
+        if let sourceKind { sqlite3_bind_text(stmt, 14, sourceKind.rawValue, -1, SQLITE_TRANSIENT) } else { sqlite3_bind_null(stmt, 14) }
+        if let audioAssetId { sqlite3_bind_int64(stmt, 15, audioAssetId) } else { sqlite3_bind_null(stmt, 15) }
         if sqlite3_step(stmt) != SQLITE_DONE { throw NSError(domain: "TS.DB", code: 5) }
         let rowId = sqlite3_last_insert_rowid(db)
         var tstmt: OpaquePointer?
@@ -61,7 +69,7 @@ extension DB {
             var bstmt: OpaquePointer?
             defer { sqlite3_finalize(bstmt) }
             if sqlite3_prepare_v2(db, "INSERT INTO ts_ocr_boxes(snapshot_id, text, x, y, w, h) VALUES(?, ?, ?, ?, ?, ?);", -1, &bstmt, nil) != SQLITE_OK {
-                return rowId
+                throw NSError(domain: "TS.DB", code: 8)
             }
             for box in boxes {
                 sqlite3_bind_int64(bstmt, 1, rowId)
@@ -70,7 +78,7 @@ extension DB {
                 sqlite3_bind_double(bstmt, 4, Double(box.box.origin.y))
                 sqlite3_bind_double(bstmt, 5, Double(box.box.size.width))
                 sqlite3_bind_double(bstmt, 6, Double(box.box.size.height))
-                _ = sqlite3_step(bstmt)
+                guard sqlite3_step(bstmt) == SQLITE_DONE else { throw NSError(domain: "TS.DB", code: 9) }
                 sqlite3_reset(bstmt)
             }
         }
@@ -105,23 +113,29 @@ extension DB {
         }
     }
 
-    func updateSnapshotPath(oldPath: String, newPath: String, bytes: Int64?, format: String?) {
-        _ = try? onQueueSync {
+    func updateSnapshotPath(oldPath: String, newPath: String, bytes: Int64?, format: String?) throws {
+        try withWriteSavepoint {
             try openIfNeeded()
-            guard let db = db else { return }
+            guard let db = db else { throw NSError(domain: "TS.DB", code: 3) }
             var sets: [String] = ["path=?"]
             if bytes != nil { sets.append("bytes=?") }
             if format != nil { sets.append("format=?") }
             let sql = "UPDATE ts_snapshot SET \(sets.joined(separator: ", ")) WHERE path=?;"
             var stmt: OpaquePointer?
             defer { sqlite3_finalize(stmt) }
-            if sqlite3_prepare_v2(db, sql, -1, &stmt, nil) != SQLITE_OK { return }
+            if sqlite3_prepare_v2(db, sql, -1, &stmt, nil) != SQLITE_OK { throw NSError(domain: "TS.DB", code: 14) }
             var idx: Int32 = 1
             sqlite3_bind_text(stmt, idx, newPath, -1, SQLITE_TRANSIENT); idx += 1
             if let v = bytes { sqlite3_bind_int64(stmt, idx, v); idx += 1 }
             if let v = format { sqlite3_bind_text(stmt, idx, v, -1, SQLITE_TRANSIENT); idx += 1 }
             sqlite3_bind_text(stmt, idx, oldPath, -1, SQLITE_TRANSIENT)
-            _ = sqlite3_step(stmt)
+            guard sqlite3_step(stmt) == SQLITE_DONE, sqlite3_changes(db) > 0 else { throw NSError(domain: "TS.DB", code: 15) }
+            var audio: OpaquePointer?
+            defer { sqlite3_finalize(audio) }
+            guard sqlite3_prepare_v2(db, "UPDATE ts_audio_asset SET path=? WHERE path=?;", -1, &audio, nil) == SQLITE_OK else { throw NSError(domain: "TS.DB", code: 16) }
+            sqlite3_bind_text(audio, 1, newPath, -1, SQLITE_TRANSIENT)
+            sqlite3_bind_text(audio, 2, oldPath, -1, SQLITE_TRANSIENT)
+            guard sqlite3_step(audio) == SQLITE_DONE else { throw NSError(domain: "TS.DB", code: 17) }
         }
     }
 

@@ -1,3 +1,23 @@
+# v1.0.2 - 2026-09-06
+
+## Performance
+
+- Reduced repeated database writes during capture and OCR processing.
+- Improved timeline scrolling by reusing layout calculations and skipping offscreen drawing.
+- Reduced HEVC preview generation work and reused video assets and decrypted segments when browsing recordings.
+- Coalesced live timeline updates and paused capture-triggered refreshes while the timeline is hidden.
+- Reduced repeated embedding provider setup and bounded thumbnail cache memory.
+- Bounded OCR processing to prevent capture buffers from accumulating under heavy load.
+
+## Fixes
+
+- Fixed thumbnail caching at different preview sizes.
+- Prevented stale media results from being shown after the vault locks.
+- Made vault migrations recoverable and preserved source recordings when database updates or video sealing fail.
+- Fixed encrypted still-image handling in MCP search results.
+
+---
+
 # v1.0.1 - 2026-03-25
 
 UI Fixes

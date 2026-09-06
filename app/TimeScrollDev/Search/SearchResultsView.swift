@@ -6,6 +6,8 @@ struct SearchResultsView: View {
     let appBundleIds: [String]?
     let startMs: Int64?
     let endMs: Int64?
+    let captureKinds: [CaptureKind]?
+    let audioSourceKinds: [AudioSourceKind]?
     let onOpen: (SearchResult, Int) -> Void
     let onClose: () -> Void
 
@@ -19,12 +21,12 @@ struct SearchResultsView: View {
     @State private var requestToken: Int = 0
 
     private let pageSize: Int = 50
+    private let search = SearchService()
 
     enum ViewMode: String {
-        case list, tiles
+        case list
+        case tiles
     }
-
-    private let search = SearchService()
 
     private var trimmedQuery: String {
         query.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -42,16 +44,18 @@ struct SearchResultsView: View {
             useAI = settings.aiEmbeddingsEnabled && settings.aiModeOn
             loadPage(0)
         }
-        .onChange(of: query) { _ in resetAndReload() }
-        .onChange(of: appBundleIds) { _ in resetAndReload() }
-        .onChange(of: startMs) { _ in resetAndReload() }
-        .onChange(of: endMs) { _ in resetAndReload() }
+        .onChange(of: query) { _, _ in resetAndReload() }
+        .onChange(of: appBundleIds) { _, _ in resetAndReload() }
+        .onChange(of: startMs) { _, _ in resetAndReload() }
+        .onChange(of: endMs) { _, _ in resetAndReload() }
+        .onChange(of: captureKinds) { _, _ in resetAndReload() }
+        .onChange(of: audioSourceKinds) { _, _ in resetAndReload() }
     }
 
     private var header: some View {
         HStack(alignment: .top, spacing: 16) {
             VStack(alignment: .leading, spacing: 4) {
-                Text(trimmedQuery.isEmpty ? "Latest Snapshots" : "Search Results")
+                Text(trimmedQuery.isEmpty ? "Latest Captures" : "Search Results")
                     .font(.title3.weight(.semibold))
             }
 
@@ -104,10 +108,10 @@ struct SearchResultsView: View {
                 ScrollView {
                     if viewMode == .list {
                         LazyVStack(alignment: .leading, spacing: 12) {
-                            ForEach(Array(rows.enumerated()), id: \.1.id) { idx, row in
+                            ForEach(Array(rows.enumerated()), id: \.1.id) { index, row in
                                 Button {
-                                    let absIndex = page * pageSize + idx
-                                    onOpen(row.result, absIndex)
+                                    let absoluteIndex = page * pageSize + index
+                                    onOpen(row.result, absoluteIndex)
                                 } label: {
                                     SearchRowView(row: row)
                                 }
@@ -117,10 +121,10 @@ struct SearchResultsView: View {
                         .padding(16)
                     } else {
                         LazyVGrid(columns: [GridItem(.adaptive(minimum: 240), spacing: 16)], spacing: 16) {
-                            ForEach(Array(rows.enumerated()), id: \.1.id) { idx, row in
+                            ForEach(Array(rows.enumerated()), id: \.1.id) { index, row in
                                 Button {
-                                    let absIndex = page * pageSize + idx
-                                    onOpen(row.result, absIndex)
+                                    let absoluteIndex = page * pageSize + index
+                                    onOpen(row.result, absoluteIndex)
                                 } label: {
                                     SearchTileView(row: row)
                                 }
@@ -190,12 +194,13 @@ struct SearchResultsView: View {
         loadPage(0)
     }
 
-    private func loadPage(_ p: Int) {
-        guard p >= 0 else { return }
+    private func loadPage(_ requestedPage: Int) {
+        guard requestedPage >= 0 else { return }
         requestToken &+= 1
         let token = requestToken
         isLoading = true
-        let offset = p * pageSize
+
+        let offset = requestedPage * pageSize
         let limit = pageSize + 1
         let trimmed = trimmedQuery
         let fuzz = settings.fuzziness
@@ -204,46 +209,62 @@ struct SearchResultsView: View {
         let apps = appBundleIds
         let start = startMs
         let end = endMs
-        let searchSvc = search
+        let captureKindsFilter = self.captureKinds
+        let audioSourceKindsFilter = self.audioSourceKinds
+        let searchService = search
 
         DispatchQueue.global(qos: .userInitiated).async {
             let fetched: [SearchResult]
             if trimmed.isEmpty {
-                fetched = searchSvc.latestWithContent(limit: limit,
-                                                      offset: offset,
-                                                      appBundleIds: apps,
-                                                      startMs: start,
-                                                      endMs: end)
+                fetched = searchService.latestWithContent(
+                    limit: limit,
+                    offset: offset,
+                    appBundleIds: apps,
+                    startMs: start,
+                    endMs: end,
+                    captureKinds: captureKindsFilter,
+                    audioSourceKinds: audioSourceKindsFilter
+                )
             } else if aiEnabled {
-                fetched = searchSvc.searchAI(trimmed,
-                                             appBundleIds: apps,
-                                             startMs: start,
-                                             endMs: end,
-                                             limit: limit,
-                                             offset: offset)
+                fetched = searchService.searchAI(
+                    trimmed,
+                    appBundleIds: apps,
+                    startMs: start,
+                    endMs: end,
+                    captureKinds: captureKindsFilter,
+                    audioSourceKinds: audioSourceKindsFilter,
+                    limit: limit,
+                    offset: offset
+                )
             } else {
-                fetched = searchSvc.searchWithContent(trimmed,
-                                                      fuzziness: fuzz,
-                                                      intelligentAccuracy: ia,
-                                                      appBundleIds: apps,
-                                                      startMs: start,
-                                                      endMs: end,
-                                                      limit: limit,
-                                                      offset: offset)
+                fetched = searchService.searchWithContent(
+                    trimmed,
+                    fuzziness: fuzz,
+                    intelligentAccuracy: ia,
+                    appBundleIds: apps,
+                    startMs: start,
+                    endMs: end,
+                    captureKinds: captureKindsFilter,
+                    audioSourceKinds: audioSourceKindsFilter,
+                    limit: limit,
+                    offset: offset
+                )
             }
+
             let preparedRows = Array(fetched.prefix(self.pageSize)).map {
                 SearchResultDisplayRow(result: $0, query: trimmed, intelligentAccuracy: ia)
             }
+
             DispatchQueue.main.async {
                 guard token == requestToken else { return }
-                if p > 0 && fetched.isEmpty {
+                if requestedPage > 0 && fetched.isEmpty {
                     self.hasNext = false
                     self.isLoading = false
                     return
                 }
                 self.hasNext = fetched.count > self.pageSize
                 self.rows = preparedRows
-                self.page = p
+                self.page = requestedPage
                 self.isLoading = false
             }
         }
@@ -259,9 +280,15 @@ private struct SearchResultDisplayRow: Identifiable {
 
     init(result: SearchResult, query: String, intelligentAccuracy: Bool) {
         self.result = result
-        let flat = result.content.replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
-        self.snippet = Self.makeSnippet(content: flat, query: query, intelligentAccuracy: intelligentAccuracy)
-        self.fallbackSnippet = String(flat.prefix(140))
+        let flattened = result.content.replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
+        self.snippet = Self.makeSnippet(content: flattened, query: query, intelligentAccuracy: intelligentAccuracy)
+        if flattened.isEmpty {
+            self.fallbackSnippet = result.captureKind == .audio
+                ? "No transcript available yet."
+                : "No extracted text available."
+        } else {
+            self.fallbackSnippet = String(flattened.prefix(140))
+        }
     }
 
     private static func normalize(_ string: String) -> String {
@@ -370,10 +397,8 @@ private struct SearchRowView: View {
 
             VStack(alignment: .leading, spacing: 8) {
                 HStack(alignment: .center, spacing: 8) {
-                    if let bid = row.result.appBundleId {
-                        AppBundleIconView(bundleId: bid, size: 18, cornerRadius: 4)
-                    }
-                    Text(row.result.appName ?? row.result.appBundleId ?? "Unknown App")
+                    SearchResultIdentityIcon(row: row.result, size: 18, cornerRadius: 4)
+                    Text(titleText)
                         .font(.headline)
                     Spacer(minLength: 8)
                     Text(dateString(ms: row.result.startedAtMs))
@@ -381,12 +406,14 @@ private struct SearchRowView: View {
                         .foregroundColor(.secondary)
                 }
 
+                SearchResultMetadataBadges(row: row.result)
+
                 snippet
                     .font(.body)
                     .foregroundStyle(.primary)
                     .lineLimit(3)
 
-                Label(URL(fileURLWithPath: row.result.path).lastPathComponent, systemImage: "doc.text")
+                Label(URL(fileURLWithPath: row.result.path).lastPathComponent, systemImage: fileLabelSystemImage)
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
@@ -404,6 +431,17 @@ private struct SearchRowView: View {
                 isHovering = hovering
             }
         }
+    }
+
+    private var titleText: String {
+        row.result.appName
+        ?? row.result.audioSourceKind?.displayName
+        ?? row.result.appBundleId
+        ?? row.result.captureKind.displayName
+    }
+
+    private var fileLabelSystemImage: String {
+        row.result.captureKind == .audio ? "waveform" : "doc.text"
     }
 
     private var backgroundShape: RoundedRectangle {
@@ -451,13 +489,13 @@ private struct SearchTileView: View {
             SearchResultThumbnailView(row: row.result, maxPixel: 420)
 
             HStack(alignment: .center, spacing: 8) {
-                if let bid = row.result.appBundleId {
-                    AppBundleIconView(bundleId: bid, size: 16, cornerRadius: 4)
-                }
-                Text(row.result.appName ?? row.result.appBundleId ?? "Unknown App")
+                SearchResultIdentityIcon(row: row.result, size: 16, cornerRadius: 4)
+                Text(titleText)
                     .font(.subheadline.weight(.semibold))
                     .lineLimit(1)
             }
+
+            SearchResultMetadataBadges(row: row.result)
 
             Text(dateString(ms: row.result.startedAtMs))
                 .font(.caption)
@@ -474,6 +512,13 @@ private struct SearchTileView: View {
                 isHovering = hovering
             }
         }
+    }
+
+    private var titleText: String {
+        row.result.appName
+        ?? row.result.audioSourceKind?.displayName
+        ?? row.result.appBundleId
+        ?? row.result.captureKind.displayName
     }
 
     private var backgroundShape: RoundedRectangle {
@@ -503,6 +548,86 @@ private struct SearchTileView: View {
         formatter.timeStyle = .short
         return formatter
     }()
+}
+
+private struct SearchResultMetadataBadges: View {
+    let row: SearchResult
+
+    var body: some View {
+        HStack(spacing: 8) {
+            SearchResultBadge(title: row.captureKind.displayName, systemImage: row.captureKind.systemImage)
+            if let source = row.audioSourceKind {
+                SearchResultBadge(title: source.displayName, systemImage: source.systemImage)
+            }
+            if let durationMs = row.audioDurationMs {
+                SearchResultBadge(title: durationString(ms: durationMs), systemImage: "clock")
+            }
+        }
+    }
+
+    private func durationString(ms: Int64) -> String {
+        let totalSeconds = max(0, Int(ms / 1000))
+        let minutes = totalSeconds / 60
+        let seconds = totalSeconds % 60
+        return String(format: "%02d:%02d", minutes, seconds)
+    }
+}
+
+private struct SearchResultBadge: View {
+    let title: String
+    let systemImage: String
+
+    var body: some View {
+        Label(title, systemImage: systemImage)
+            .font(.caption)
+            .foregroundStyle(.secondary)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 4)
+            .background(
+                Capsule(style: .continuous)
+                    .fill(Color(nsColor: .controlBackgroundColor))
+            )
+    }
+}
+
+private struct SearchResultIdentityIcon: View {
+    let row: SearchResult
+    let size: CGFloat
+    let cornerRadius: CGFloat
+
+    var body: some View {
+        if row.captureKind == .audio {
+            SearchResultSymbolIcon(symbolName: row.audioSourceKind?.systemImage ?? row.captureKind.systemImage,
+                                   size: size,
+                                   cornerRadius: cornerRadius,
+                                   tint: .accentColor)
+        } else if let bundleId = row.appBundleId {
+            AppBundleIconView(bundleId: bundleId, size: size, cornerRadius: cornerRadius)
+        } else {
+            SearchResultSymbolIcon(symbolName: row.captureKind.systemImage,
+                                   size: size,
+                                   cornerRadius: cornerRadius,
+                                   tint: .secondary)
+        }
+    }
+}
+
+private struct SearchResultSymbolIcon: View {
+    let symbolName: String
+    let size: CGFloat
+    let cornerRadius: CGFloat
+    let tint: Color
+
+    var body: some View {
+        ZStack {
+            RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                .fill(tint.opacity(0.14))
+            Image(systemName: symbolName)
+                .font(.system(size: size * 0.6, weight: .semibold))
+                .foregroundStyle(tint)
+        }
+        .frame(width: size, height: size)
+    }
 }
 
 private struct AppBundleIconView: View {
@@ -556,7 +681,9 @@ private struct SearchResultThumbnailView: View {
             RoundedRectangle(cornerRadius: 12, style: .continuous)
                 .fill(Color.gray.opacity(0.08))
 
-            if let image = loadedThumb {
+            if row.captureKind == .audio {
+                audioPlaceholder
+            } else if let image = loadedThumb {
                 Image(nsImage: image)
                     .resizable()
                     .aspectRatio(contentMode: .fill)
@@ -576,9 +703,23 @@ private struct SearchResultThumbnailView: View {
         .onAppear(perform: startLoadingIfNeeded)
     }
 
+    private var audioPlaceholder: some View {
+        VStack(spacing: 8) {
+            Image(systemName: row.audioSourceKind?.systemImage ?? row.captureKind.systemImage)
+                .font(.system(size: 24, weight: .semibold))
+                .foregroundStyle(Color.accentColor)
+            Text(row.audioSourceKind?.shortDisplayName ?? row.captureKind.displayName)
+                .font(.caption.weight(.medium))
+                .foregroundStyle(.secondary)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
     private func startLoadingIfNeeded() {
+        guard row.captureKind != .audio else { return }
         guard !loadStarted else { return }
         loadStarted = true
+
         let url = URL(fileURLWithPath: row.path)
         let ext = url.pathExtension.lowercased()
         let pixelSize = CGFloat(maxPixel)
@@ -636,7 +777,7 @@ private struct SearchEmptyStateView: View {
                 .font(.system(size: 28))
                 .foregroundStyle(.secondary)
 
-            Text(query.isEmpty ? "No snapshots" : "No matches found")
+            Text(query.isEmpty ? "No captures" : "No matches found")
                 .font(.headline)
 
             Text(message)
@@ -649,7 +790,7 @@ private struct SearchEmptyStateView: View {
 
     private var message: String {
         if query.isEmpty {
-            return "Try broadening the date or app filters to bring more captures into view."
+            return "Try broadening the date, app, or media filters to bring more captures into view."
         }
         if useAI {
             return "Try fewer keywords, a shorter phrase, or switch AI off for a stricter text match."

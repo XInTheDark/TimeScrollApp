@@ -124,11 +124,14 @@ final class EmbeddingANNIndexStore {
 
 private extension EmbeddingANNIndexStore {
     func buildIndex(identity: VectorSearchIdentity, stats: EmbeddingStats) -> EmbeddingANNIndex? {
-        let entries = (try? DB.shared.embeddingIndexEntries(requireDim: identity.dim,
-                                                            requireProvider: identity.provider,
-                                                            requireModel: identity.model)) ?? []
-        guard !entries.isEmpty else { return nil }
-        return EmbeddingANNIndexBuilder.build(identity: identity, stats: stats, entries: entries)
+        EmbeddingANNIndexBuilder.buildStreaming(identity: identity, stats: stats) { limit, before in
+            (try? DB.shared.embeddingIndexEntries(requireDim: identity.dim,
+                                                  requireProvider: identity.provider,
+                                                  requireModel: identity.model,
+                                                  limit: limit,
+                                                  beforeStartedAtMs: before?.startedAtMs,
+                                                  beforeSnapshotId: before?.snapshotId)) ?? []
+        }
     }
 
     func nearestCentroidIndex(for vector: [Float], index: EmbeddingANNIndex) -> Int {

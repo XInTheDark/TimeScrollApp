@@ -11,23 +11,24 @@ extension DB {
     private static let ocrBoxPruneIntervalMs: Int64 = 6 * 60 * 60 * 1000
 
     func replaceBoxes(snapshotId: Int64, boxes: [OCRLine]) throws {
-        try onQueueSync {
+        try withWriteSavepoint {
             try openIfNeeded()
             guard let db = db else { return }
 
             var del: OpaquePointer?
             defer { sqlite3_finalize(del) }
-            if sqlite3_prepare_v2(db, "DELETE FROM ts_ocr_boxes WHERE snapshot_id=?;", -1, &del, nil) == SQLITE_OK {
-                sqlite3_bind_int64(del, 1, snapshotId)
-                _ = sqlite3_step(del)
+            guard sqlite3_prepare_v2(db, "DELETE FROM ts_ocr_boxes WHERE snapshot_id=?;", -1, &del, nil) == SQLITE_OK else {
+                throw NSError(domain: "TS.DB", code: 10)
             }
+            sqlite3_bind_int64(del, 1, snapshotId)
+            guard sqlite3_step(del) == SQLITE_DONE else { throw NSError(domain: "TS.DB", code: 11) }
 
             guard !boxes.isEmpty else { return }
 
             var ins: OpaquePointer?
             defer { sqlite3_finalize(ins) }
             if sqlite3_prepare_v2(db, "INSERT INTO ts_ocr_boxes(snapshot_id, text, x, y, w, h) VALUES(?, ?, ?, ?, ?, ?);", -1, &ins, nil) != SQLITE_OK {
-                return
+                throw NSError(domain: "TS.DB", code: 12)
             }
             for b in boxes {
                 sqlite3_bind_int64(ins, 1, snapshotId)
@@ -36,7 +37,7 @@ extension DB {
                 sqlite3_bind_double(ins, 4, Double(b.box.origin.y))
                 sqlite3_bind_double(ins, 5, Double(b.box.size.width))
                 sqlite3_bind_double(ins, 6, Double(b.box.size.height))
-                _ = sqlite3_step(ins)
+                guard sqlite3_step(ins) == SQLITE_DONE else { throw NSError(domain: "TS.DB", code: 13) }
                 sqlite3_reset(ins)
             }
 

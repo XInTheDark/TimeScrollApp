@@ -4,7 +4,8 @@ import AppKit
 struct TimelineBar: NSViewRepresentable {
     @ObservedObject var model: TimelineModel
     let isCompressed: Bool
-    let onJump: (Int64) -> Void           // timeMs
+    let visibleCaptureKinds: Set<CaptureKind>
+    let onJump: (Int64, CaptureKind?) -> Void
     let onHover: (Int64) -> Void          // timeMs
     let onHoverExit: () -> Void
 
@@ -12,6 +13,7 @@ struct TimelineBar: NSViewRepresentable {
         let v = TimelineBarNSView()
         v.model = model
         v.isCompressed = isCompressed
+        v.visibleCaptureKinds = visibleCaptureKinds
         v.refreshLayout()
         v.onJump = onJump
         v.onHover = onHover
@@ -22,6 +24,7 @@ struct TimelineBar: NSViewRepresentable {
     func updateNSView(_ nsView: TimelineBarNSView, context: Context) {
         nsView.model = model
         nsView.isCompressed = isCompressed
+        nsView.visibleCaptureKinds = visibleCaptureKinds
         nsView.refreshLayout()
         nsView.needsDisplay = true
     }
@@ -31,7 +34,8 @@ struct TimelineBarContainer: NSViewRepresentable {
     @ObservedObject var model: TimelineModel
     let isCompressed: Bool
     let invertScrollDirection: Bool
-    let onJump: (Int64) -> Void
+    let visibleCaptureKinds: Set<CaptureKind>
+    let onJump: (Int64, CaptureKind?) -> Void
     let onHover: (Int64) -> Void
     let onHoverExit: () -> Void
 
@@ -46,10 +50,12 @@ struct TimelineBarContainer: NSViewRepresentable {
         let doc = TimelineBarNSView()
         doc.model = model
         doc.isCompressed = isCompressed
+        doc.visibleCaptureKinds = visibleCaptureKinds
         doc.refreshLayout()
         doc.onJump = onJump
         doc.onHover = onHover
         doc.onHoverExit = onHoverExit
+        doc.setFrameSize(NSSize(width: max(600, doc.requiredContentWidth()), height: timelineContentHeight(for: scroll.bounds.height)))
         scroll.documentView = doc
         return scroll
     }
@@ -59,9 +65,10 @@ struct TimelineBarContainer: NSViewRepresentable {
         (scroll as? TimelineBarScrollView)?.invertScrollDirection = invertScrollDirection
         doc.model = model
         doc.isCompressed = isCompressed
+        doc.visibleCaptureKinds = visibleCaptureKinds
         doc.refreshLayout()
         let contentWidth = max(scroll.bounds.width, doc.requiredContentWidth())
-        doc.setFrameSize(NSSize(width: contentWidth, height: 80))
+        doc.setFrameSize(NSSize(width: contentWidth, height: timelineContentHeight(for: scroll.bounds.height)))
         doc.needsDisplay = true
         let compressionChanged = context.coordinator.lastCompressedState != isCompressed
         context.coordinator.lastCompressedState = isCompressed
@@ -111,6 +118,11 @@ struct TimelineBarContainer: NSViewRepresentable {
         let x = max(0, doc.bounds.width - scroll.contentView.bounds.width)
         scroll.contentView.scroll(to: NSPoint(x: x, y: 0))
         scroll.reflectScrolledClipView(scroll.contentView)
+    }
+
+    private func timelineContentHeight(for viewportHeight: CGFloat) -> CGFloat {
+        let baseHeight: CGFloat = visibleCaptureKinds.contains(.screen) && visibleCaptureKinds.contains(.audio) ? 92 : 80
+        return max(viewportHeight, baseHeight)
     }
 
     func makeCoordinator() -> Coordinator { Coordinator() }
@@ -213,9 +225,10 @@ private struct TimelineAxisLayout {
 
         let timesAsc = model.metas.map(\.startedAtMs).sorted()
         let msPerPoint = max(1.0, model.msPerPoint)
+        let positions = Self.makePositions(timesAsc: timesAsc, isCompressed: isCompressed, msPerPoint: msPerPoint)
         self.init(timesAsc: timesAsc,
-                  positionsAsc: Self.makePositions(timesAsc: timesAsc, isCompressed: isCompressed, msPerPoint: msPerPoint),
-                  contentWidth: Self.makeContentWidth(timesAsc: timesAsc, isCompressed: isCompressed, msPerPoint: msPerPoint),
+                  positionsAsc: positions,
+                  contentWidth: (positions.last ?? 0) + Self.trailingPadding,
                   isCompressed: isCompressed,
                   msPerPoint: msPerPoint)
     }
@@ -292,11 +305,6 @@ private struct TimelineAxisLayout {
         return positions
     }
 
-    private static func makeContentWidth(timesAsc: [Int64], isCompressed: Bool, msPerPoint: Double) -> CGFloat {
-        let positions = makePositions(timesAsc: timesAsc, isCompressed: isCompressed, msPerPoint: msPerPoint)
-        return (positions.last ?? 0) + trailingPadding
-    }
-
     private static func firstIndex(in values: [Int64], atOrAfter target: Int64) -> Int {
         var low = 0
         var high = values.count - 1
@@ -326,11 +334,92 @@ private struct TimelineAxisLayout {
     }
 }
 
+private struct TimelineTrackLayout {
+    let screenRect: NSRect?
+    let audioRect: NSRect?
+
+    init(in bounds: NSRect, visibleCaptureKinds: Set<CaptureKind>) {
+        let topInset: CGFloat = 34
+        let bottomInset: CGFloat = 12
+        let hasScreen = visibleCaptureKinds.contains(.screen)
+        let hasAudio = visibleCaptureKinds.contains(.audio)
+        let usableHeight = max(24, bounds.height - topInset - bottomInset)
+        let rowSpacing: CGFloat = hasScreen && hasAudio ? 8 : 0
+        let screenHeight: CGFloat = {
+            guard hasScreen else { return 0 }
+            if hasAudio {
+                return min(28, max(20, usableHeight * 0.38))
+            }
+            return min(30, max(22, usableHeight * 0.58))
+        }()
+        let audioHeight: CGFloat = {
+            guard hasAudio else { return 0 }
+            if hasScreen {
+                return min(24, max(16, screenHeight * 0.8))
+            }
+            return min(24, max(16, usableHeight * 0.42))
+        }()
+        let totalHeight =
+            (hasScreen ? screenHeight : 0)
+            + (hasAudio ? audioHeight : 0)
+            + rowSpacing
+        let availableHeight = max(totalHeight, bounds.height - topInset - bottomInset)
+        var currentY = topInset + max(0, (availableHeight - totalHeight) / 2)
+
+        if hasScreen {
+            screenRect = NSRect(x: bounds.minX, y: currentY, width: bounds.width, height: screenHeight)
+            currentY += screenHeight + rowSpacing
+        } else {
+            screenRect = nil
+        }
+
+        if hasAudio {
+            audioRect = NSRect(x: bounds.minX, y: currentY, width: bounds.width, height: audioHeight)
+        } else {
+            audioRect = nil
+        }
+    }
+
+    func preferredCaptureKind(at point: NSPoint) -> CaptureKind? {
+        if let screenRect, screenRect.insetBy(dx: 0, dy: -6).contains(point) {
+            return .screen
+        }
+        if let audioRect, audioRect.insetBy(dx: 0, dy: -6).contains(point) {
+            return .audio
+        }
+
+        let distances: [(CaptureKind, CGFloat)] = [
+            screenRect.map { (.screen, abs($0.midY - point.y)) },
+            audioRect.map { (.audio, abs($0.midY - point.y)) }
+        ].compactMap { $0 }
+
+        return distances.min(by: { $0.1 < $1.1 })?.0
+    }
+}
+
+private struct MergedAudioDisplaySpan {
+    let sourceKind: AudioSourceKind?
+    let startMs: Int64
+    var endMs: Int64
+    var items: [SnapshotMeta]
+}
+
+private final class TimelineJumpTarget {
+    let timeMs: Int64
+    let preferredCaptureKind: CaptureKind?
+
+    init(timeMs: Int64, preferredCaptureKind: CaptureKind?) {
+        self.timeMs = timeMs
+        self.preferredCaptureKind = preferredCaptureKind
+    }
+}
+
 @MainActor
 final class TimelineBarNSView: NSView {
     weak var model: TimelineModel?
     var isCompressed: Bool = true
-    var onJump: ((Int64) -> Void)?
+    var visibleCaptureKinds: Set<CaptureKind> = Set(CaptureKind.allCases)
+    var onJump: ((Int64, CaptureKind?) -> Void)?
     var onHover: ((Int64) -> Void)?
     var onHoverExit: (() -> Void)?
 
@@ -344,6 +433,9 @@ final class TimelineBarNSView: NSView {
     private var pendingPreviewIndex: Int? = nil
     private var previewViewModel = HoverPreviewViewModel()
     private var layout = TimelineAxisLayout.empty
+    private weak var layoutModel: TimelineModel?
+    private var layoutRevision: UInt64?
+    private var audioSpans: [MergedAudioDisplaySpan] = []
     private var isDraggingTimeline = false
 
     override var isFlipped: Bool { true }
@@ -354,7 +446,19 @@ final class TimelineBarNSView: NSView {
     }
 
     func refreshLayout() {
+        if layoutModel === model,
+           layoutRevision == model?.dataRevision,
+           layout.isCompressed == isCompressed,
+           layout.msPerPoint == max(1, model?.msPerPoint ?? 1) { return }
+        if layoutModel !== model || layoutRevision != model?.dataRevision {
+            audioSpans = model.map { model in
+                mergeAudioDisplaySpans(from: model.metas.filter { $0.captureKind == .audio }
+                    .sorted { $0.startedAtMs < $1.startedAtMs }, model: model)
+            } ?? []
+        }
         layout = TimelineAxisLayout(model: model, isCompressed: isCompressed)
+        layoutModel = model
+        layoutRevision = model?.dataRevision
     }
 
     func timelineX(for timeMs: Int64) -> CGFloat {
@@ -371,39 +475,45 @@ final class TimelineBarNSView: NSView {
         drawTicks(model: m, in: bounds)
         drawSegments(model: m, in: bounds)
         drawSelection(model: m, in: bounds)
+        drawPlaybackCursor(model: m, in: bounds)
     }
 
     private func drawSegments(model m: TimelineModel, in rect: NSRect) {
-        let h: CGFloat = 20
-        let y: CGFloat = rect.midY - h/2 + 8
-        for seg in m.segments {
+        let trackLayout = TimelineTrackLayout(in: rect, visibleCaptureKinds: visibleCaptureKinds)
+        if let audioRect = trackLayout.audioRect, visibleCaptureKinds.contains(.audio) {
+            drawAudioSegments(model: m, in: audioRect)
+        }
+
+        for seg in m.segments where seg.captureKind == .screen && visibleCaptureKinds.contains(.screen) {
+            guard let row = trackLayout.screenRect else { continue }
             let x0 = timelineX(for: seg.startMs)
             let x1 = timelineX(for: seg.endMs)
             let w = max(1, x1 - x0)
-            let r = NSRect(x: x0, y: y, width: w, height: h)
+            let r = NSRect(x: x0, y: row.minY, width: w, height: row.height)
+            guard needsToDraw(r.insetBy(dx: -1, dy: -1)) else { continue }
             let segmentPath = NSBezierPath(roundedRect: r, xRadius: 6, yRadius: 6)
-            AppColor.color(for: seg.appBundleId).setFill()
+            segmentColor(for: seg).setFill()
             segmentPath.fill()
             NSColor.separatorColor.withAlphaComponent(0.16).setStroke()
             segmentPath.lineWidth = 1
             segmentPath.stroke()
 
-            guard w >= 18,
-                  let bundleId = seg.appBundleId else {
+            guard w >= 18 else {
                 continue
             }
 
-            if AppIconCache.shared.cachedIcon(for: bundleId) == nil {
+            if let bundleId = seg.appBundleId,
+               AppIconCache.shared.cachedIcon(for: bundleId) == nil {
                 AppIconCache.shared.loadIconAsync(for: bundleId) { [weak self] _ in
                     self?.needsDisplay = true
                 }
             }
 
-            guard let icon = AppIconCache.shared.cachedIcon(for: bundleId) else {
+            guard let icon = segmentIcon(for: seg) else {
                 continue
             }
 
-            let iconSize = min(h - 6, 14)
+            let iconSize = min(row.height - 6, 14)
             guard iconSize > 0 else { continue }
             let iconX = min(r.maxX - iconSize - 3, r.minX + 4)
             guard iconX >= r.minX + 2 else { continue }
@@ -438,6 +548,155 @@ final class TimelineBarNSView: NSView {
         path.stroke()
     }
 
+    private func drawPlaybackCursor(model m: TimelineModel, in rect: NSRect) {
+        guard let playbackTimeMs = m.playbackTimeMs else { return }
+        let x = timelineX(for: playbackTimeMs)
+        let path = NSBezierPath()
+        path.move(to: NSPoint(x: x, y: rect.minY))
+        path.line(to: NSPoint(x: x, y: rect.maxY))
+        NSColor.controlAccentColor.withAlphaComponent(0.9).setStroke()
+        path.lineWidth = 2
+        path.stroke()
+    }
+
+    private func segmentColor(for segment: TimelineSegment) -> NSColor {
+        switch segment.captureKind {
+        case .screen:
+            return AppColor.color(for: segment.appBundleId)
+        case .audio:
+            switch segment.audioSourceKind {
+            case .microphone:
+                return NSColor.systemPink
+            case .system:
+                return NSColor.systemOrange
+            case nil:
+                return NSColor.systemPurple
+            }
+        }
+    }
+
+    private func segmentIcon(for segment: TimelineSegment) -> NSImage? {
+        if let bundleId = segment.appBundleId {
+            return AppIconCache.shared.cachedIcon(for: bundleId)
+        }
+        if segment.captureKind == .audio {
+            return NSImage(systemSymbolName: segment.audioSourceKind?.systemImage ?? segment.captureKind.systemImage,
+                           accessibilityDescription: segment.audioSourceKind?.displayName ?? segment.captureKind.displayName)
+        }
+        return nil
+    }
+
+    private func drawAudioSegments(model m: TimelineModel, in rect: NSRect) {
+        guard !audioSpans.isEmpty else { return }
+
+        let laneRect = rect.insetBy(dx: 0, dy: -1)
+        NSColor.separatorColor.withAlphaComponent(0.08).setFill()
+        NSBezierPath(roundedRect: laneRect, xRadius: laneRect.height / 2, yRadius: laneRect.height / 2).fill()
+
+        for span in audioSpans {
+            let spanRect = NSRect(x: timelineX(for: span.startMs),
+                                  y: rect.minY,
+                                  width: max(2, timelineX(for: span.endMs) - timelineX(for: span.startMs)),
+                                  height: rect.height)
+            guard needsToDraw(spanRect) else { continue }
+            drawAudioWaveformPlaceholder(in: spanRect.insetBy(dx: 1, dy: 1),
+                                         color: audioBaseColor(for: span.sourceKind))
+
+            for meta in span.items {
+                let x0 = timelineX(for: meta.startedAtMs)
+                let x1 = timelineX(for: m.resolvedEndMs(for: meta))
+                let width = max(2, x1 - x0)
+                let segmentRect = NSRect(x: x0, y: rect.minY, width: width, height: rect.height)
+                guard needsToDraw(segmentRect) else { continue }
+
+                if let overview = AudioWaveformOverviewCache.shared.cachedOverview(for: meta.path) {
+                    drawAudioWaveform(overview,
+                                      in: segmentRect.insetBy(dx: 1, dy: 1),
+                                      color: audioBaseColor(for: meta))
+                } else {
+                    AudioWaveformOverviewCache.shared.loadOverviewAsync(for: meta.path) { [weak self] _ in
+                        DispatchQueue.main.async {
+                            self?.needsDisplay = true
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private func mergeAudioDisplaySpans(from metas: [SnapshotMeta],
+                                        model: TimelineModel) -> [MergedAudioDisplaySpan] {
+        let allowedGapMs: Int64 = 1_500
+        var spans: [MergedAudioDisplaySpan] = []
+
+        for meta in metas {
+            let endMs = model.resolvedEndMs(for: meta)
+            if var last = spans.last,
+               last.sourceKind == meta.audioSourceKind,
+               meta.startedAtMs <= last.endMs + allowedGapMs {
+                last.items.append(meta)
+                last.endMs = max(last.endMs, endMs)
+                spans[spans.count - 1] = last
+            } else {
+                spans.append(
+                    MergedAudioDisplaySpan(
+                        sourceKind: meta.audioSourceKind,
+                        startMs: meta.startedAtMs,
+                        endMs: endMs,
+                        items: [meta]
+                    )
+                )
+            }
+        }
+
+        return spans
+    }
+
+    private func drawAudioWaveform(_ overview: AudioWaveformOverview,
+                                   in rect: NSRect,
+                                   color: NSColor) {
+        guard rect.width >= 3, rect.height >= 4, !overview.bins.isEmpty else { return }
+
+        let midY = rect.midY
+        let step = rect.width / CGFloat(max(overview.bins.count, 1))
+        let barWidth = max(1, min(2, step - 1))
+        color.withAlphaComponent(0.82).setFill()
+
+        for (index, amplitude) in overview.bins.enumerated() {
+            let x = rect.minX + CGFloat(index) * step
+            let height = max(2, CGFloat(amplitude) * rect.height)
+            let barRect = NSRect(x: x,
+                                 y: midY - height / 2,
+                                 width: barWidth,
+                                 height: height)
+            NSBezierPath(roundedRect: barRect, xRadius: 1, yRadius: 1).fill()
+        }
+    }
+
+    private func drawAudioWaveformPlaceholder(in rect: NSRect, color: NSColor) {
+        let path = NSBezierPath()
+        path.move(to: NSPoint(x: rect.minX, y: rect.midY))
+        path.line(to: NSPoint(x: rect.maxX, y: rect.midY))
+        color.withAlphaComponent(0.30).setStroke()
+        path.lineWidth = 1
+        path.stroke()
+    }
+
+    private func audioBaseColor(for meta: SnapshotMeta) -> NSColor {
+        audioBaseColor(for: meta.audioSourceKind)
+    }
+
+    private func audioBaseColor(for sourceKind: AudioSourceKind?) -> NSColor {
+        switch sourceKind {
+        case .microphone:
+            return NSColor.secondaryLabelColor
+        case .system:
+            return NSColor.tertiaryLabelColor
+        case nil:
+            return NSColor.secondaryLabelColor
+        }
+    }
+
     private func drawTicks(model m: TimelineModel, in rect: NSRect) {
         if isCompressed {
             drawCompressedTicks(in: rect)
@@ -446,8 +705,9 @@ final class TimelineBarNSView: NSView {
 
         let majorStep = pickMajorTickStep(msPerPoint: m.msPerPoint)
         let minorStep = majorStep / 5
-        let start = m.minTimeMs
-        let end = m.maxTimeMs
+        // Include the preceding major tick and label overhang at the viewport edges.
+        let start = max(m.minTimeMs, layout.time(atX: visibleRect.minX - 100) - majorStep)
+        let end = min(m.maxTimeMs, layout.time(atX: visibleRect.maxX + 100) + majorStep)
         let labelStyle: [NSAttributedString.Key: Any] = [
             .font: NSFont.systemFont(ofSize: 10, weight: .regular),
             .foregroundColor: NSColor.secondaryLabelColor
@@ -510,6 +770,9 @@ final class TimelineBarNSView: NSView {
             let isMajor = xPos - lastMajorX >= 90 || timeMs == firstTime || timeMs == lastTime
             let needsMinor = xPos - lastMinorX >= 22
             guard isMajor || needsMinor else { continue }
+            lastMinorX = xPos
+            if isMajor { lastMajorX = xPos }
+            guard xPos >= visibleRect.minX - 100, xPos <= visibleRect.maxX + 100 else { continue }
 
             let tickHeight = isMajor ? majorTickHeight : minorTickHeight
             let color = isMajor ? NSColor.separatorColor : NSColor.separatorColor.withAlphaComponent(0.5)
@@ -519,13 +782,11 @@ final class TimelineBarNSView: NSView {
             path.line(to: NSPoint(x: xPos, y: yTop + tickHeight))
             path.lineWidth = 1
             path.stroke()
-            lastMinorX = xPos
 
             if isMajor {
                 let label = df.string(from: Date(timeIntervalSince1970: TimeInterval(timeMs) / 1000)) as NSString
                 let size = label.size(withAttributes: labelStyle)
                 label.draw(at: NSPoint(x: xPos - size.width / 2, y: yTop + majorTickHeight + 2), withAttributes: labelStyle)
-                lastMajorX = xPos
             }
         }
     }
@@ -565,13 +826,16 @@ final class TimelineBarNSView: NSView {
         guard model != nil else { return }
         let p = convert(event.locationInWindow, from: nil)
         let t = timeAt(x: p.x)
+        let preferredCaptureKind = TimelineTrackLayout(in: bounds, visibleCaptureKinds: visibleCaptureKinds).preferredCaptureKind(at: p)
         onHover?(t)
 
         // Throttle popover repositioning
         let now = Date()
         let shouldReposition = now.timeIntervalSince(hoverThrottle) >= 0.05
 
-        if let m = model, let idx = m.indexNearest(to: t), m.metas.indices.contains(idx) {
+        if let idx = nearestMetaIndex(to: t, preferredCaptureKind: preferredCaptureKind),
+           let m = model,
+           m.metas.indices.contains(idx) {
             // Show or reposition popover at mouse location
             if !popover.isShown {
                 showPopover(at: p)
@@ -621,8 +885,9 @@ final class TimelineBarNSView: NSView {
         window?.makeFirstResponder(self)
 
         let startPoint = convert(event.locationInWindow, from: nil)
+        let preferredCaptureKind = TimelineTrackLayout(in: bounds, visibleCaptureKinds: visibleCaptureKinds).preferredCaptureKind(at: startPoint)
         guard let scrollView = enclosingScrollView else {
-            onJump?(timeAt(x: startPoint.x))
+            onJump?(timeAt(x: startPoint.x), preferredCaptureKind)
             return
         }
 
@@ -653,7 +918,7 @@ final class TimelineBarNSView: NSView {
                 if didDrag {
                     endTimelineDrag()
                 } else {
-                    onJump?(timeAt(x: startPoint.x))
+                    onJump?(timeAt(x: startPoint.x), preferredCaptureKind)
                 }
                 return
 
@@ -665,7 +930,7 @@ final class TimelineBarNSView: NSView {
         if didDrag {
             endTimelineDrag()
         } else {
-            onJump?(timeAt(x: startPoint.x))
+            onJump?(timeAt(x: startPoint.x), preferredCaptureKind)
         }
     }
 
@@ -673,20 +938,30 @@ final class TimelineBarNSView: NSView {
         guard model != nil else { return }
         let p = convert(event.locationInWindow, from: nil)
         let t = timeAt(x: p.x)
+        let preferredCaptureKind = TimelineTrackLayout(in: bounds, visibleCaptureKinds: visibleCaptureKinds).preferredCaptureKind(at: p)
         let menu = NSMenu()
         let jump = NSMenuItem(title: "Jump to here", action: #selector(ctxJump(_:)), keyEquivalent: "")
-        jump.representedObject = t
+        jump.representedObject = TimelineJumpTarget(timeMs: t, preferredCaptureKind: preferredCaptureKind)
         jump.target = self
         menu.addItem(jump)
         NSMenu.popUpContextMenu(menu, with: event, for: self)
     }
 
     @objc private func ctxJump(_ sender: NSMenuItem) {
-        if let t = sender.representedObject as? Int64 { onJump?(t) }
+        if let target = sender.representedObject as? TimelineJumpTarget {
+            onJump?(target.timeMs, target.preferredCaptureKind)
+        }
     }
 
     private func timeAt(x: CGFloat) -> Int64 {
         layout.time(atX: x)
+    }
+
+    private func nearestMetaIndex(to timeMs: Int64, preferredCaptureKind: CaptureKind?) -> Int? {
+        guard let model else { return nil }
+        return model.indexNearest(to: timeMs,
+                                  preferredCaptureKind: preferredCaptureKind,
+                                  visibleCaptureKinds: visibleCaptureKinds)
     }
 
     private func beginTimelineDrag() {
@@ -737,14 +1012,24 @@ final class TimelineBarNSView: NSView {
         loadingTimer?.cancel()
         loadingTimer = nil
 
-        // Update metadata immediately with fade
         let date = Date(timeIntervalSince1970: TimeInterval(meta.startedAtMs)/1000)
+        let initialIcon: NSImage? = {
+            if let bundleId = meta.appBundleId {
+                return AppIconCache.shared.cachedIcon(for: bundleId)
+            }
+            if meta.captureKind == .audio {
+                return NSImage(systemSymbolName: meta.audioSourceKind?.systemImage ?? meta.captureKind.systemImage,
+                               accessibilityDescription: meta.audioSourceKind?.displayName ?? meta.captureKind.displayName)
+            }
+            return nil
+        }()
+
         previewViewModel.update(
             thumbnail: nil,
-            appIcon: meta.appBundleId.flatMap { AppIconCache.shared.cachedIcon(for: $0) },
-            appName: meta.appName ?? (meta.appBundleId ?? "Unknown"),
+            appIcon: initialIcon,
+            appName: meta.appName ?? meta.audioSourceKind?.displayName ?? meta.appBundleId ?? "Unknown",
             date: date,
-            isLoading: true
+            isLoading: meta.captureKind != .audio
         )
 
         if let bundleId = meta.appBundleId,
@@ -754,6 +1039,11 @@ final class TimelineBarNSView: NSView {
                 guard let icon else { return }
                 self.previewViewModel.appIcon = icon
             }
+        }
+
+        if meta.captureKind == .audio {
+            previewViewModel.setLoading(false)
+            return
         }
 
         // After 500ms, if still no image, show "No preview"

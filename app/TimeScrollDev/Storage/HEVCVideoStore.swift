@@ -9,7 +9,13 @@ import Collections
 import CoreGraphics
 
 final class HEVCVideoStore {
-    static let shared = HEVCVideoStore(); private init() {}
+    static let shared = HEVCVideoStore(namespace: "default")
+
+    private let namespace: String
+
+    init(namespace: String) {
+        self.namespace = namespace
+    }
 
     // Config
     private let segmentMs: Int64 = 60_000
@@ -131,9 +137,9 @@ final class HEVCVideoStore {
         let outURL: URL
         let videos = StoragePaths.videosDir()
         if !fm.fileExists(atPath: videos.path) { try? fm.createDirectory(at: videos, withIntermediateDirectories: true) }
-        //  always write the live, open segment as Videos/seg-*.mov.
+        // Always write the live, open segment with this store's namespace.
         // When encryption is enabled, we will encrypt-and-replace on close().
-        outURL = videos.appendingPathComponent("seg-\(segmentName(startMs)).mov")
+        outURL = plainURL(forStart: startMs)
         let writer = try AVAssetWriter(outputURL: outURL, fileType: .mov)
         // Enable progressive readability of in‑progress files and place moov up front
         writer.shouldOptimizeForNetworkUse = true
@@ -176,23 +182,31 @@ final class HEVCVideoStore {
 
     private func closeCurrent() throws {
         guard let c = current else { return }
+        defer {
+            awaitingCallback = false
+            current = nil
+        }
         // Stop accepting new frames and finish
         c.input.markAsFinished()
         clearPendingFrames()
         let g = DispatchGroup(); g.enter(); c.writer.finishWriting { g.leave() }; g.wait()
+        guard c.writer.status == .completed else {
+            throw c.writer.error ?? NSError(domain: "TimeScroll.HEVC", code: 1, userInfo: [NSLocalizedDescriptionKey: "Video writer did not finish; live file retained."])
+        }
         if c.encrypt {
-            if let data = try? Data(contentsOf: c.outURL, options: [.mappedIfSafe]), let blob = try? FileCrypter.shared.makeTSEBlob(data: data, timestampMs: c.startMs, width: c.width, height: c.height, mime: "video/quicktime") {
-                let dest = finalEncURL(forStart: c.startMs); let tmp = dest.appendingPathExtension("tmp")
-                try? blob.write(to: tmp, options: .atomic); let _ = try? FileManager.default.replaceItemAt(dest, withItemAt: tmp)
+            let data = try Data(contentsOf: c.outURL, options: [.mappedIfSafe])
+            let blob = try FileCrypter.shared.makeTSEBlob(data: data, timestampMs: c.startMs, width: c.width, height: c.height, mime: "video/quicktime")
+            let dest = finalEncURL(forStart: c.startMs)
+            try blob.write(to: dest, options: .atomic)
+            guard try Data(contentsOf: dest) == blob else {
+                throw NSError(domain: "TimeScroll.HEVC", code: 2, userInfo: [NSLocalizedDescriptionKey: "Encrypted segment verification failed; live file retained."])
             }
-            _ = try? FileManager.default.removeItem(at: c.outURL)
+            try FileManager.default.removeItem(at: c.outURL)
         }
         else {
         }
         // After a segment is sealed/closed, remove posters for rows in this segment window.
         PosterManager.cleanupSegment(startMs: c.startMs, endMs: c.startMs + segmentMs - 1)
-        awaitingCallback = false
-        current = nil
     }
 
     // MARK: - Queue/Drain
@@ -235,8 +249,13 @@ final class HEVCVideoStore {
     // Paths
     private func alignedStart(_ t: Int64) -> Int64 { (t / segmentMs) * segmentMs }
     private func segmentName(_ ms: Int64) -> String { HEVCVideoStore.segmentName(ms) }
-    private func plainURL(forStart s: Int64) -> URL { StoragePaths.videosDir().appendingPathComponent("seg-\(segmentName(s)).mov") }
-    private func finalEncURL(forStart s: Int64) -> URL { StoragePaths.videosDir().appendingPathComponent("seg-\(segmentName(s)).tse") }
+    private func plainURL(forStart s: Int64) -> URL { StoragePaths.videosDir().appendingPathComponent("\(segmentStem(s)).mov") }
+    private func finalEncURL(forStart s: Int64) -> URL { StoragePaths.videosDir().appendingPathComponent("\(segmentStem(s)).tse") }
+
+    private func segmentStem(_ ms: Int64) -> String {
+        let base = "seg-\(segmentName(ms))"
+        return namespace == "default" ? base : "\(base)-d\(namespace)"
+    }
 
     private static let df: DateFormatter = {
         let f = DateFormatter(); f.dateFormat = "yyyy-MM-dd-HH-mm-ss"; f.locale = Locale(identifier: "en_US_POSIX"); return f

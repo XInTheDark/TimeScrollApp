@@ -134,6 +134,101 @@ enum EmbeddingANNIndexBuilder {
         return EmbeddingANNIndex(metadata: metadata, clusters: clusters)
     }
 
+    /// Builds the same index without materializing the full vector corpus. The loader
+    /// is called in small pages twice: once for reservoir sampling and once for
+    /// centroid assignment/posting construction.
+    static func buildStreaming(identity: VectorSearchIdentity,
+                               stats: EmbeddingStats,
+                               batchLoader: (_ limit: Int, _ before: EmbeddingIndexEntry?) -> [EmbeddingIndexEntry]) -> EmbeddingANNIndex? {
+        let batchSize = 512
+        let clusterCount = min(stats.count, preferredClusterCount(for: stats.count))
+        guard clusterCount > 0 else { return nil }
+
+        let sampleTarget = preferredSampleCount(for: stats.count, clusterCount: clusterCount)
+        var sample: [EmbeddingIndexEntry] = []
+        sample.reserveCapacity(sampleTarget)
+        var seen = 0
+        var randomState: UInt64 = 0x9E3779B97F4A7C15
+        var cursor: EmbeddingIndexEntry?
+
+        while true {
+            let batch = batchLoader(batchSize, cursor)
+            guard !batch.isEmpty else { break }
+            for entry in batch {
+                seen += 1
+                if sample.count < sampleTarget {
+                    sample.append(entry)
+                } else {
+                    randomState = randomState &* 2862933555777941757 &+ 3037000493
+                    let replacementIndex = Int(randomState % UInt64(seen))
+                    if replacementIndex < sampleTarget {
+                        sample[replacementIndex] = entry
+                    }
+                }
+            }
+            cursor = batch.last
+        }
+
+        guard !sample.isEmpty else { return nil }
+        let vectorDim = sample[0].vector.count
+        guard vectorDim > 0 else { return nil }
+        var centroids = initialCentroids(from: sample, count: clusterCount)
+        guard !centroids.isEmpty else { return nil }
+
+        let iterations = stats.count >= 50_000 ? 3 : 4
+        for iteration in 0..<iterations {
+            centroids = refineCentroids(sample: sample, centroids: centroids, iteration: iteration)
+        }
+
+        var postings = Array(repeating: [EmbeddingANNPostingEntry](), count: centroids.count)
+        var sums = Array(repeating: Array(repeating: Float.zero, count: vectorDim), count: centroids.count)
+        var counts = Array(repeating: 0, count: centroids.count)
+        cursor = nil
+
+        while true {
+            let batch = batchLoader(batchSize, cursor)
+            guard !batch.isEmpty else { break }
+            for entry in batch where entry.vector.count == vectorDim {
+                let clusterIndex = nearestCentroidIndex(for: entry.vector, centroids: centroids)
+                postings[clusterIndex].append(
+                    EmbeddingANNPostingEntry(snapshotId: entry.snapshotId,
+                                             startedAtMs: entry.startedAtMs,
+                                             appBundleId: entry.appBundleId)
+                )
+                counts[clusterIndex] += 1
+                add(entry.vector, to: &sums[clusterIndex])
+            }
+            cursor = batch.last
+        }
+
+        var clusters: [EmbeddingANNCluster] = []
+        clusters.reserveCapacity(centroids.count)
+        for index in centroids.indices {
+            guard !postings[index].isEmpty else { continue }
+            postings[index].sort { lhs, rhs in
+                lhs.startedAtMs == rhs.startedAtMs ? lhs.snapshotId > rhs.snapshotId : lhs.startedAtMs > rhs.startedAtMs
+            }
+            let centroid = counts[index] > 0
+                ? normalizedAverage(sum: sums[index], count: counts[index])
+                : centroids[index]
+            clusters.append(EmbeddingANNCluster(centroid: centroid, items: postings[index]))
+        }
+
+        guard !clusters.isEmpty else { return nil }
+        let metadata = EmbeddingANNIndexMetadata(
+            version: EmbeddingANNIndexMetadata.currentVersion,
+            provider: identity.provider,
+            model: identity.model,
+            dim: identity.dim,
+            dbPath: identity.dbPath,
+            embeddingCount: stats.count,
+            maxUpdatedAtMs: stats.maxUpdatedAtMs,
+            clusterCount: clusters.count,
+            builtAtMs: Int64(Date().timeIntervalSince1970 * 1000)
+        )
+        return EmbeddingANNIndex(metadata: metadata, clusters: clusters)
+    }
+
     private static func preferredClusterCount(for count: Int) -> Int {
         let scaled = Int(Double(count).squareRoot() / 3.0)
         return min(64, max(16, scaled))

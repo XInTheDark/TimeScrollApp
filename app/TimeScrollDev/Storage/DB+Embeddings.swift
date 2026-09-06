@@ -159,22 +159,82 @@ extension DB {
     }
 
     func embeddingIndexEntries(requireDim: Int, requireProvider: String, requireModel: String) throws -> [EmbeddingIndexEntry] {
+        try embeddingIndexEntries(requireDim: requireDim,
+                                  requireProvider: requireProvider,
+                                  requireModel: requireModel,
+                                  limit: Int.max,
+                                  offset: 0)
+    }
+
+    func embeddingIndexEntries(requireDim: Int,
+                               requireProvider: String,
+                               requireModel: String,
+                               limit: Int,
+                               offset: Int) throws -> [EmbeddingIndexEntry] {
+        try embeddingIndexEntries(requireDim: requireDim,
+                                  requireProvider: requireProvider,
+                                  requireModel: requireModel,
+                                  limit: limit,
+                                  beforeStartedAtMs: nil,
+                                  beforeSnapshotId: nil,
+                                  offset: offset)
+    }
+
+    func embeddingIndexEntries(requireDim: Int,
+                               requireProvider: String,
+                               requireModel: String,
+                               limit: Int,
+                               beforeStartedAtMs: Int64?,
+                               beforeSnapshotId: Int64?) throws -> [EmbeddingIndexEntry] {
+        try embeddingIndexEntries(requireDim: requireDim,
+                                  requireProvider: requireProvider,
+                                  requireModel: requireModel,
+                                  limit: limit,
+                                  beforeStartedAtMs: beforeStartedAtMs,
+                                  beforeSnapshotId: beforeSnapshotId,
+                                  offset: nil)
+    }
+
+    private func embeddingIndexEntries(requireDim: Int,
+                                       requireProvider: String,
+                                       requireModel: String,
+                                       limit: Int,
+                                       beforeStartedAtMs: Int64?,
+                                       beforeSnapshotId: Int64?,
+                                       offset: Int?) throws -> [EmbeddingIndexEntry] {
         try onQueueSync {
             try openIfNeeded()
             guard let db = db else { return [] }
-            let sql = """
+            var sql = """
             SELECT s.id, s.started_at_ms, s.app_bundle_id, e.vec, e.dim
             FROM ts_embedding e
             JOIN ts_snapshot s ON s.id = e.snapshot_id
             WHERE e.dim = ? AND e.provider = ? AND e.model = ?
-            ORDER BY s.started_at_ms DESC;
             """
+            if beforeStartedAtMs != nil, beforeSnapshotId != nil {
+                sql += " AND (s.started_at_ms < ? OR (s.started_at_ms = ? AND s.id < ?))"
+            }
+            sql += " ORDER BY s.started_at_ms DESC, s.id DESC LIMIT ?"
+            if offset != nil {
+                sql += " OFFSET ?"
+            }
+            sql += ";"
             var stmt: OpaquePointer?
             defer { sqlite3_finalize(stmt) }
             guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return [] }
             sqlite3_bind_int(stmt, 1, Int32(requireDim))
             sqlite3_bind_text(stmt, 2, requireProvider, -1, SQLITE_TRANSIENT)
             sqlite3_bind_text(stmt, 3, requireModel, -1, SQLITE_TRANSIENT)
+            var bindIndex: Int32 = 4
+            if let beforeStartedAtMs, let beforeSnapshotId {
+                sqlite3_bind_int64(stmt, bindIndex, beforeStartedAtMs); bindIndex += 1
+                sqlite3_bind_int64(stmt, bindIndex, beforeStartedAtMs); bindIndex += 1
+                sqlite3_bind_int64(stmt, bindIndex, beforeSnapshotId); bindIndex += 1
+            }
+            sqlite3_bind_int64(stmt, bindIndex, Int64(max(0, limit))); bindIndex += 1
+            if let offset {
+                sqlite3_bind_int64(stmt, bindIndex, Int64(max(0, offset)))
+            }
             var rows: [EmbeddingIndexEntry] = []
             while sqlite3_step(stmt) == SQLITE_ROW {
                 let snapshotId = sqlite3_column_int64(stmt, 0)
@@ -219,6 +279,8 @@ extension DB {
     func embeddingCandidates(appBundleIds: [String]? = nil,
                               startMs: Int64? = nil,
                               endMs: Int64? = nil,
+                              captureKinds: [CaptureKind]? = nil,
+                              audioSourceKinds: [AudioSourceKind]? = nil,
                               limit: Int = 2000,
                               offset: Int = 0,
                               requireDim: Int,
@@ -228,9 +290,10 @@ extension DB {
             try openIfNeeded()
             guard let db = db else { return [] }
             var sql = """
-            SELECT s.id, s.started_at_ms, s.path, s.app_bundle_id, s.app_name, s.thumb_path, e.vec, e.dim
+            SELECT s.id, s.started_at_ms, s.ended_at_ms, s.path, s.app_bundle_id, s.app_name, s.thumb_path, s.capture_kind, s.source_kind, s.audio_asset_id, a.duration_ms, e.vec, e.dim
             FROM ts_embedding e
             JOIN ts_snapshot s ON s.id = e.snapshot_id
+            LEFT JOIN ts_audio_asset a ON a.id = s.audio_asset_id
             WHERE e.dim = ? AND e.provider = ? AND e.model = ?
             """
             if let s = startMs { sql += " AND s.started_at_ms >= \(s)" }
@@ -239,6 +302,10 @@ extension DB {
                 let placeholders = Array(repeating: "?", count: ids.count).joined(separator: ",")
                 sql += " AND s.app_bundle_id IN (\(placeholders))"
             }
+            appendCaptureFilterSQL(to: &sql,
+                                   alias: "s",
+                                   captureKinds: captureKinds,
+                                   audioSourceKinds: audioSourceKinds)
             sql += " ORDER BY s.started_at_ms DESC LIMIT ? OFFSET ?;"
             var stmt: OpaquePointer?
             defer { sqlite3_finalize(stmt) }
@@ -250,27 +317,24 @@ extension DB {
             if let ids = appBundleIds, !ids.isEmpty {
                 for bid in ids { sqlite3_bind_text(stmt, idx, bid, -1, SQLITE_TRANSIENT); idx += 1 }
             }
+            bindCaptureFilters(stmt: stmt,
+                               index: &idx,
+                               captureKinds: captureKinds,
+                               audioSourceKinds: audioSourceKinds)
             sqlite3_bind_int(stmt, idx, Int32(limit)); idx += 1
             sqlite3_bind_int(stmt, idx, Int32(offset))
             var rows: [EmbeddingCandidate] = []
             while sqlite3_step(stmt) == SQLITE_ROW {
-                let id = sqlite3_column_int64(stmt, 0)
-                let ts = sqlite3_column_int64(stmt, 1)
-                let path = String(cString: sqlite3_column_text(stmt, 2))
-                let bid = sqlite3_column_text(stmt, 3).map { String(cString: $0) }
-                let name = sqlite3_column_text(stmt, 4).map { String(cString: $0) }
-                let thumb = sqlite3_column_text(stmt, 5).map { String(cString: $0) }
-                // vec blob
-                let blobPtr = sqlite3_column_blob(stmt, 6)
-                let blobLen = Int(sqlite3_column_bytes(stmt, 6))
-                let dim = Int(sqlite3_column_int(stmt, 7))
+                guard let row = makeSearchRowUnified(from: stmt) else { continue }
+                let blobPtr = sqlite3_column_blob(stmt, 11)
+                let blobLen = Int(sqlite3_column_bytes(stmt, 11))
+                let dim = Int(sqlite3_column_int(stmt, 12))
                 var vector: [Float] = []
                 if let ptr = blobPtr, blobLen >= dim * MemoryLayout<Float>.size {
                     let count = blobLen / MemoryLayout<Float>.size
                     vector = Array(UnsafeBufferPointer(start: ptr.assumingMemoryBound(to: Float.self), count: count))
                 }
-                let res = SearchResult(id: id, startedAtMs: ts, path: path, appBundleId: bid, appName: name, thumbPath: thumb, content: "")
-                rows.append(EmbeddingCandidate(result: res, vector: vector, dim: dim))
+                rows.append(EmbeddingCandidate(result: makeSearchResult(from: row), vector: vector, dim: dim))
             }
             return rows
         }
@@ -285,9 +349,10 @@ extension DB {
             guard let db = db, !snapshotIds.isEmpty else { return [] }
             let placeholders = Array(repeating: "?", count: snapshotIds.count).joined(separator: ",")
             let sql = """
-            SELECT s.id, s.started_at_ms, s.path, s.app_bundle_id, s.app_name, s.thumb_path, e.vec, e.dim
+            SELECT s.id, s.started_at_ms, s.ended_at_ms, s.path, s.app_bundle_id, s.app_name, s.thumb_path, s.capture_kind, s.source_kind, s.audio_asset_id, a.duration_ms, e.vec, e.dim
             FROM ts_embedding e
             JOIN ts_snapshot s ON s.id = e.snapshot_id
+            LEFT JOIN ts_audio_asset a ON a.id = s.audio_asset_id
             WHERE e.dim = ? AND e.provider = ? AND e.model = ? AND s.id IN (\(placeholders))
             ORDER BY s.started_at_ms DESC;
             """
@@ -304,28 +369,16 @@ extension DB {
             }
             var rows: [EmbeddingCandidate] = []
             while sqlite3_step(stmt) == SQLITE_ROW {
-                let id = sqlite3_column_int64(stmt, 0)
-                let ts = sqlite3_column_int64(stmt, 1)
-                let path = String(cString: sqlite3_column_text(stmt, 2))
-                let bid = sqlite3_column_text(stmt, 3).map { String(cString: $0) }
-                let name = sqlite3_column_text(stmt, 4).map { String(cString: $0) }
-                let thumb = sqlite3_column_text(stmt, 5).map { String(cString: $0) }
-                let blobPtr = sqlite3_column_blob(stmt, 6)
-                let blobLen = Int(sqlite3_column_bytes(stmt, 6))
-                let dim = Int(sqlite3_column_int(stmt, 7))
+                guard let row = makeSearchRowUnified(from: stmt) else { continue }
+                let blobPtr = sqlite3_column_blob(stmt, 11)
+                let blobLen = Int(sqlite3_column_bytes(stmt, 11))
+                let dim = Int(sqlite3_column_int(stmt, 12))
                 var vector: [Float] = []
                 if let ptr = blobPtr, blobLen >= dim * MemoryLayout<Float>.size {
                     let count = blobLen / MemoryLayout<Float>.size
                     vector = Array(UnsafeBufferPointer(start: ptr.assumingMemoryBound(to: Float.self), count: count))
                 }
-                let result = SearchResult(id: id,
-                                          startedAtMs: ts,
-                                          path: path,
-                                          appBundleId: bid,
-                                          appName: name,
-                                          thumbPath: thumb,
-                                          content: "")
-                rows.append(EmbeddingCandidate(result: result, vector: vector, dim: dim))
+                rows.append(EmbeddingCandidate(result: makeSearchResult(from: row), vector: vector, dim: dim))
             }
             return rows
         }

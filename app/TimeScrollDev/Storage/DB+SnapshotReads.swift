@@ -6,6 +6,41 @@ import SQLite3
 #endif
 
 extension DB {
+    func pathsNeedingCompaction(cutoffMs: Int64, profile: String) throws -> [String] {
+        try onQueueSync {
+            try openIfNeeded()
+            guard let db = db else { return [] }
+            var stmt: OpaquePointer?
+            defer { sqlite3_finalize(stmt) }
+            let sql = "SELECT path FROM ts_snapshot WHERE started_at_ms < ? AND COALESCE(compaction_profile, '') != ?;"
+            guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return [] }
+            sqlite3_bind_int64(stmt, 1, cutoffMs)
+            sqlite3_bind_text(stmt, 2, profile, -1, SQLITE_TRANSIENT)
+            var paths = Set<String>()
+            while sqlite3_step(stmt) == SQLITE_ROW {
+                if let c = sqlite3_column_text(stmt, 0) {
+                    paths.insert(String(cString: c))
+                }
+            }
+            return paths.sorted()
+        }
+    }
+
+    func markCompacted(path: String, profile: String) {
+        _ = try? onQueueSync {
+            try openIfNeeded()
+            guard let db = db else { return }
+            var stmt: OpaquePointer?
+            defer { sqlite3_finalize(stmt) }
+            guard sqlite3_prepare_v2(db, "UPDATE ts_snapshot SET compaction_profile=? WHERE path=?;", -1, &stmt, nil) == SQLITE_OK else {
+                return
+            }
+            sqlite3_bind_text(stmt, 1, profile, -1, SQLITE_TRANSIENT)
+            sqlite3_bind_text(stmt, 2, path, -1, SQLITE_TRANSIENT)
+            _ = sqlite3_step(stmt)
+        }
+    }
+
     func pathsOlderThan(cutoffMs: Int64) throws -> [String] {
         try onQueueSync {
             try openIfNeeded()
@@ -119,6 +154,7 @@ extension DB {
         let startedAtMs: Int64
         let path: String
         let thumbPath: String?
+        let captureKind: CaptureKind
     }
 
     func listSnapshots(limit: Int = 50) throws -> [SnapshotRow] {
@@ -142,15 +178,16 @@ extension DB {
         }
     }
 
-    func listPlaintextSnapshots(limit: Int = 10_000) throws -> [SnapshotRow] {
+    func listPlaintextSnapshots(limit: Int = 10_000, afterID: Int64 = 0) throws -> [SnapshotRow] {
         try onQueueSync {
             try openIfNeeded()
             guard let db = db else { return [] }
             var stmt: OpaquePointer?
             defer { sqlite3_finalize(stmt) }
-            let sql = "SELECT id, started_at_ms, path FROM ts_snapshot WHERE path NOT LIKE '%.tse' ORDER BY started_at_ms ASC LIMIT ?;"
-            if sqlite3_prepare_v2(db, sql, -1, &stmt, nil) != SQLITE_OK { return [] }
-            sqlite3_bind_int(stmt, 1, Int32(limit))
+            let sql = "SELECT id, started_at_ms, path FROM ts_snapshot WHERE path NOT LIKE '%.tse' AND id > ? ORDER BY id ASC LIMIT ?;"
+            if sqlite3_prepare_v2(db, sql, -1, &stmt, nil) != SQLITE_OK { throw NSError(domain: "TS.DB", code: 18) }
+            sqlite3_bind_int64(stmt, 1, afterID)
+            sqlite3_bind_int(stmt, 2, Int32(limit))
             var rows: [SnapshotRow] = []
             while sqlite3_step(stmt) == SQLITE_ROW {
                 let id = sqlite3_column_int64(stmt, 0)
@@ -168,7 +205,7 @@ extension DB {
             guard let db = db else { return [] }
             var stmt: OpaquePointer?
             defer { sqlite3_finalize(stmt) }
-            let sql = "SELECT id, started_at_ms, path, thumb_path FROM ts_snapshot ORDER BY started_at_ms ASC;"
+            let sql = "SELECT id, started_at_ms, path, thumb_path, capture_kind FROM ts_snapshot ORDER BY started_at_ms ASC;"
             guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return [] }
             var rows: [EmbeddingRebuildRow] = []
             while sqlite3_step(stmt) == SQLITE_ROW {
@@ -176,7 +213,12 @@ extension DB {
                 let startedAtMs = sqlite3_column_int64(stmt, 1)
                 let path = String(cString: sqlite3_column_text(stmt, 2))
                 let thumbPath = sqlite3_column_text(stmt, 3).map { String(cString: $0) }
-                rows.append(EmbeddingRebuildRow(id: id, startedAtMs: startedAtMs, path: path, thumbPath: thumbPath))
+                let captureKind = captureKindValue(from: sqlite3_column_text(stmt, 4))
+                rows.append(EmbeddingRebuildRow(id: id,
+                                                startedAtMs: startedAtMs,
+                                                path: path,
+                                                thumbPath: thumbPath,
+                                                captureKind: captureKind))
             }
             return rows
         }

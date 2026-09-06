@@ -17,7 +17,10 @@ struct TimeScrollApp: App {
     init() {
         UserDefaults.standard.register(defaults: [
             "ui.timeline.compressed": true,
-            "ui.timeline.invertScrollDirection": false
+            "ui.timeline.invertScrollDirection": false,
+            "ui.timeline.showScreenStrips": true,
+            "ui.timeline.showAudioStrips": true,
+            "ui.timeline.height": 116.0
         ])
         // Ensure App Group defaults are ready before any StoragePaths usage
         StoragePaths.syncSharedDefaultsFromStandard()

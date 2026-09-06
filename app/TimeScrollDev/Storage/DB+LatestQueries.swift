@@ -33,22 +33,29 @@ extension DB {
                      offset: Int = 0,
                      appBundleIds: [String]? = nil,
                      startMs: Int64? = nil,
-                     endMs: Int64? = nil) throws -> [SnapshotMeta] {
+                     endMs: Int64? = nil,
+                     captureKinds: [CaptureKind]? = nil,
+                     audioSourceKinds: [AudioSourceKind]? = nil) throws -> [SnapshotMeta] {
         try onQueueSync {
             try openIfNeeded()
             guard let db = db else { return [] }
             var sql = """
-            SELECT id, started_at_ms, path, app_bundle_id, app_name, thumb_path
-            FROM ts_snapshot
+            SELECT s.id, s.started_at_ms, s.ended_at_ms, s.path, s.app_bundle_id, s.app_name, s.thumb_path, s.capture_kind, s.source_kind, s.audio_asset_id, a.duration_ms
+            FROM ts_snapshot s
+            LEFT JOIN ts_audio_asset a ON a.id = s.audio_asset_id
             WHERE 1=1
             """
-            if let s = startMs { sql += " AND started_at_ms >= \(s)" }
-            if let e = endMs { sql += " AND started_at_ms <= \(e)" }
+            if let s = startMs { sql += " AND s.started_at_ms >= \(s)" }
+            if let e = endMs { sql += " AND s.started_at_ms <= \(e)" }
             if let ids = appBundleIds, !ids.isEmpty {
                 let placeholders = Array(repeating: "?", count: ids.count).joined(separator: ",")
-                sql += " AND app_bundle_id IN (\(placeholders))"
+                sql += " AND s.app_bundle_id IN (\(placeholders))"
             }
-            sql += " ORDER BY started_at_ms DESC LIMIT ? OFFSET ?;"
+            appendCaptureFilterSQL(to: &sql,
+                                   alias: "s",
+                                   captureKinds: captureKinds,
+                                   audioSourceKinds: audioSourceKinds)
+            sql += " ORDER BY s.started_at_ms DESC LIMIT ? OFFSET ?;"
             var stmt: OpaquePointer?
             defer { sqlite3_finalize(stmt) }
             guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return [] }
@@ -59,17 +66,17 @@ extension DB {
                     idx += 1
                 }
             }
+            bindCaptureFilters(stmt: stmt,
+                               index: &idx,
+                               captureKinds: captureKinds,
+                               audioSourceKinds: audioSourceKinds)
             sqlite3_bind_int(stmt, idx, Int32(limit)); idx += 1
             sqlite3_bind_int(stmt, idx, Int32(offset))
             var rows: [SnapshotMeta] = []
             while sqlite3_step(stmt) == SQLITE_ROW {
-                let id = sqlite3_column_int64(stmt, 0)
-                let ts = sqlite3_column_int64(stmt, 1)
-                let path = String(cString: sqlite3_column_text(stmt, 2))
-                let bid = sqlite3_column_text(stmt, 3).map { String(cString: $0) }
-                let name = sqlite3_column_text(stmt, 4).map { String(cString: $0) }
-                let thumb = sqlite3_column_text(stmt, 5).map { String(cString: $0) }
-                rows.append(SnapshotMeta(id: id, startedAtMs: ts, path: path, appBundleId: bid, appName: name, thumbPath: thumb))
+                if let row = makeSearchRowUnified(from: stmt) {
+                    rows.append(makeSnapshotMeta(from: row))
+                }
             }
             return rows
         }
@@ -82,17 +89,16 @@ extension DB {
             guard let db = db else { return nil }
             var stmt: OpaquePointer?
             defer { sqlite3_finalize(stmt) }
-            let sql = "SELECT id, started_at_ms, path, app_bundle_id, app_name, thumb_path FROM ts_snapshot WHERE id=? LIMIT 1;"
+            let sql = """
+            SELECT s.id, s.started_at_ms, s.ended_at_ms, s.path, s.app_bundle_id, s.app_name, s.thumb_path, s.capture_kind, s.source_kind, s.audio_asset_id, a.duration_ms
+            FROM ts_snapshot s
+            LEFT JOIN ts_audio_asset a ON a.id = s.audio_asset_id
+            WHERE s.id=? LIMIT 1;
+            """
             guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return nil }
             sqlite3_bind_int64(stmt, 1, id)
             if sqlite3_step(stmt) == SQLITE_ROW {
-                let id = sqlite3_column_int64(stmt, 0)
-                let ts = sqlite3_column_int64(stmt, 1)
-                let path = String(cString: sqlite3_column_text(stmt, 2))
-                let bid = sqlite3_column_text(stmt, 3).map { String(cString: $0) }
-                let name = sqlite3_column_text(stmt, 4).map { String(cString: $0) }
-                let thumb = sqlite3_column_text(stmt, 5).map { String(cString: $0) }
-                return SnapshotMeta(id: id, startedAtMs: ts, path: path, appBundleId: bid, appName: name, thumbPath: thumb)
+                return makeSearchRowUnified(from: stmt).map(makeSnapshotMeta)
             }
             return nil
         }
@@ -143,18 +149,18 @@ extension DB {
                            offset: Int = 0,
                            appBundleIds: [String]? = nil,
                            startMs: Int64? = nil,
-                           endMs: Int64? = nil) throws -> [SearchResult] {
+                           endMs: Int64? = nil,
+                           captureKinds: [CaptureKind]? = nil,
+                           audioSourceKinds: [AudioSourceKind]? = nil) throws -> [SearchResult] {
         let rows = try latestUnified(limit: limit,
                                      offset: offset,
                                      appBundleIds: appBundleIds,
                                      startMs: startMs,
                                      endMs: endMs,
+                                     captureKinds: captureKinds,
+                                     audioSourceKinds: audioSourceKinds,
                                      includeContent: false)
-        let results = rows.map { r in
-            SearchResult(id: r.id, startedAtMs: r.startedAtMs, path: r.path,
-                         appBundleId: r.appBundleId, appName: r.appName, thumbPath: r.thumbPath,
-                         content: "")
-        }
+        let results = rows.map { makeSearchResult(from: $0) }
         return try hydrateSearchResultContents(results)
     }
 
@@ -164,16 +170,18 @@ extension DB {
                                appBundleIds: [String]?,
                                startMs: Int64?,
                                endMs: Int64?,
+                               captureKinds: [CaptureKind]?,
+                               audioSourceKinds: [AudioSourceKind]?,
                                includeContent: Bool) throws -> [SearchRowUnified] {
         try onQueueSync {
             try openIfNeeded()
             guard let db = db else { return [] }
             let selectClause = includeContent
-                ? "SELECT s.id, s.started_at_ms, s.path, s.app_bundle_id, s.app_name, s.thumb_path, t.content"
-                : "SELECT s.id, s.started_at_ms, s.path, s.app_bundle_id, s.app_name, s.thumb_path"
+                ? "SELECT s.id, s.started_at_ms, s.ended_at_ms, s.path, s.app_bundle_id, s.app_name, s.thumb_path, s.capture_kind, s.source_kind, s.audio_asset_id, a.duration_ms, t.content"
+                : "SELECT s.id, s.started_at_ms, s.ended_at_ms, s.path, s.app_bundle_id, s.app_name, s.thumb_path, s.capture_kind, s.source_kind, s.audio_asset_id, a.duration_ms"
             let fromClause = includeContent
-                ? "FROM ts_snapshot s LEFT JOIN ts_text t ON t.rowid = s.id"
-                : "FROM ts_snapshot s"
+                ? "FROM ts_snapshot s LEFT JOIN ts_audio_asset a ON a.id = s.audio_asset_id LEFT JOIN ts_text t ON t.rowid = s.id"
+                : "FROM ts_snapshot s LEFT JOIN ts_audio_asset a ON a.id = s.audio_asset_id"
             var sql = """
             \(selectClause)
             \(fromClause)
@@ -185,6 +193,10 @@ extension DB {
                 let placeholders = Array(repeating: "?", count: ids.count).joined(separator: ",")
                 sql += " AND s.app_bundle_id IN (\(placeholders))"
             }
+            appendCaptureFilterSQL(to: &sql,
+                                   alias: "s",
+                                   captureKinds: captureKinds,
+                                   audioSourceKinds: audioSourceKinds)
             sql += " ORDER BY s.started_at_ms DESC LIMIT ? OFFSET ?;"
             var stmt: OpaquePointer?
             defer { sqlite3_finalize(stmt) }
@@ -196,25 +208,17 @@ extension DB {
                     idx += 1
                 }
             }
+            bindCaptureFilters(stmt: stmt,
+                               index: &idx,
+                               captureKinds: captureKinds,
+                               audioSourceKinds: audioSourceKinds)
             sqlite3_bind_int(stmt, idx, Int32(limit)); idx += 1
             sqlite3_bind_int(stmt, idx, Int32(offset))
             var rows: [SearchRowUnified] = []
             while sqlite3_step(stmt) == SQLITE_ROW {
-                let id = sqlite3_column_int64(stmt, 0)
-                let ts = sqlite3_column_int64(stmt, 1)
-                let path = String(cString: sqlite3_column_text(stmt, 2))
-                let bid = sqlite3_column_text(stmt, 3).map { String(cString: $0) }
-                let name = sqlite3_column_text(stmt, 4).map { String(cString: $0) }
-                let thumb = sqlite3_column_text(stmt, 5).map { String(cString: $0) }
-                let content: String?
-                if includeContent {
-                    content = sqlite3_column_text(stmt, 6).map { String(cString: $0) } ?? ""
-                } else {
-                    content = nil
+                if let row = makeSearchRowUnified(from: stmt, contentColumn: includeContent ? 11 : nil) {
+                    rows.append(row)
                 }
-                rows.append(SearchRowUnified(id: id, startedAtMs: ts, path: path,
-                                             appBundleId: bid, appName: name, thumbPath: thumb,
-                                             content: content))
             }
             return rows
         }

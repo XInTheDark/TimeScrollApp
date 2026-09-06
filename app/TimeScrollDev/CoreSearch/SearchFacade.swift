@@ -89,8 +89,10 @@ public final class SearchFacade {
             
             // Mirror unlocked flag so helpers looking at defaults behave consistently
             let std = UserDefaults.standard
+            StoragePaths.setShared(UUID().uuidString, forKey: "vault.mediaGeneration")
             std.set(true, forKey: "vault.isUnlocked")
             StoragePaths.setShared(true, forKey: "vault.isUnlocked")
+            DistributedNotificationCenter.default().postNotificationName(VaultMediaAccess.didChange, object: nil, userInfo: nil, deliverImmediately: true)
             
             // Open with the unwrapped key
             SQLCipherBridge.shared.openWithKey(key)
@@ -108,6 +110,10 @@ public final class SearchFacade {
     }
 
     public func run(_ a: SearchArgs, ocrLimit: Int = 50_000) async throws -> [RowOut] {
+        let accessURL = StoragePaths.dbURL()
+        guard let access = VaultMediaAccess.token(for: accessURL) else {
+            throw NSError(domain: "TimeScroll.Vault", code: 1, userInfo: [NSLocalizedDescriptionKey: "Vault locked."])
+        }
         do {
             try openDatabaseOrThrow()
         } catch {
@@ -150,7 +156,7 @@ public final class SearchFacade {
                                             limit: limit, offset: 0)
         }
 
-        return rows.map { r in
+        let results = rows.map { r in
             let ts = Self.isoF.string(from: Date(timeIntervalSince1970: TimeInterval(r.startedAtMs)/1000))
             let app = r.appName ?? r.appBundleId ?? "Unknown"
             // reasonably high OCR limit as requested
@@ -165,6 +171,10 @@ public final class SearchFacade {
             }
             return RowOut(timeISO8601: ts, app: app, ocrText: String(content), imagePNG: png)
         }
+        guard VaultMediaAccess.isCurrent(access, for: accessURL) else {
+            throw NSError(domain: "TimeScroll.Vault", code: 1, userInfo: [NSLocalizedDescriptionKey: "Vault locked during search."])
+        }
+        return results
     }
 
     // Lightweight diagnostics for MCP logging
@@ -177,6 +187,10 @@ public final class SearchFacade {
     private static func imagePNG(for r: SearchResult, maxPixel: Int = 512) -> Data? {
         let url = URL(fileURLWithPath: r.path)
         let ext = url.pathExtension.lowercased()
+
+        if ext == "tse", let header = try? FileCrypter.shared.peekTSEHeader(at: url), header.mime.hasPrefix("image/") {
+            return ThumbnailCache.shared.thumbnail(for: url, maxPixel: CGFloat(maxPixel)).flatMap { nsImageToPNG($0) }
+        }
 
         // HEVC segments or sealed videos
         if ["mov","mp4","tse"].contains(ext) {

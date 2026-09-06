@@ -20,7 +20,7 @@ final class StorageMigrationTests: XCTestCase {
         let started: Int64 = Int64(Date().timeIntervalSince1970 * 1000)
         let oldPath = oldRoot.appendingPathComponent("Snapshots/day/img.png").path
         let oldThumb = oldRoot.appendingPathComponent("Snapshots/day/thumb.png").path
-        let id = try DB.shared.insertSnapshot(startedAtMs: started, path: oldPath, text: "text", appBundleId: nil, appName: nil, boxes: [], bytes: nil, width: nil, height: nil, format: nil, hash64: nil, thumbPath: oldThumb)
+        _ = try DB.shared.insertSnapshot(startedAtMs: started, path: oldPath, text: "text", appBundleId: nil, appName: nil, boxes: [], bytes: nil, width: nil, height: nil, format: nil, hash64: nil, thumbPath: oldThumb)
 
         // Verify it was inserted and contains the old prefix
         var rows = try DB.shared.listPlaintextSnapshots(limit: 10)
@@ -54,7 +54,7 @@ final class StorageMigrationTests: XCTestCase {
         let started: Int64 = Int64(Date().timeIntervalSince1970 * 1000)
         let oldPath = oldRoot.appendingPathComponent("Snapshots/day/img2.png").path
         let oldThumb = oldRoot.appendingPathComponent("Snapshots/day/thumb2.png").path
-        let id = try DB.shared.insertSnapshot(startedAtMs: started, path: oldPath, text: "text", appBundleId: nil, appName: nil, boxes: [], bytes: nil, width: nil, height: nil, format: nil, hash64: nil, thumbPath: oldThumb)
+        _ = try DB.shared.insertSnapshot(startedAtMs: started, path: oldPath, text: "text", appBundleId: nil, appName: nil, boxes: [], bytes: nil, width: nil, height: nil, format: nil, hash64: nil, thumbPath: oldThumb)
 
         var rows = try DB.shared.listPlaintextSnapshots(limit: 10)
         XCTAssertTrue(rows.contains { $0.path == oldPath })
@@ -63,7 +63,8 @@ final class StorageMigrationTests: XCTestCase {
         XCTAssertTrue(changed >= 1)
 
         rows = try DB.shared.listPlaintextSnapshots(limit: 10)
-        XCTAssertTrue(rows.contains { $0.path.hasPrefix(newRoot.path) })
+        let currentSnapshotsRoot = StoragePaths.snapshotsDir().path
+        XCTAssertTrue(rows.contains { $0.path.hasPrefix(currentSnapshotsRoot) })
 
         try? DB.shared.purgeRowsOlderThan(cutoffMs: Int64(Date().timeIntervalSince1970 * 1000) + 1000, deleteFiles: false)
         try? fm.removeItem(at: oldRoot)

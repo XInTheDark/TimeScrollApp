@@ -7,6 +7,15 @@ final class Indexer {
     private init() {}
 
     private let ocr = OCRService()
+    private let ocrQueue = DispatchQueue(label: "TimeScroll.Indexer.OCR", qos: .utility)
+    private var ocrCooldownUntil: TimeInterval = 0
+    private let cooldownLock = NSLock()
+
+    var isOCRCoolingDown: Bool {
+        cooldownLock.lock()
+        defer { cooldownLock.unlock() }
+        return Date().timeIntervalSince1970 < ocrCooldownUntil
+    }
 
     struct SnapshotExtraMeta {
         let bytes: Int64
@@ -16,21 +25,17 @@ final class Indexer {
         let hash64: Int64
     }
 
-    // Thermal cooldown window for OCR (no baseline throttle)
-    private let cooldownQueue = DispatchQueue(label: "TimeScroll.OCRCooldown")
-    private var ocrCooldownUntil: TimeInterval = 0
-
     func setOCRCooldown(seconds: Double) {
         guard seconds > 0 else { return }
-        cooldownQueue.sync {
-            let until = Date().timeIntervalSince1970 + seconds
-            ocrCooldownUntil = max(ocrCooldownUntil, until) // extend but never shorten
-        }
+        cooldownLock.lock()
+        defer { cooldownLock.unlock() }
+        let until = Date().timeIntervalSince1970 + seconds
+        ocrCooldownUntil = max(ocrCooldownUntil, until)
     }
 
     @discardableResult
-    func insertStub(startedAtMs: Int64, savedURL: URL, extra: SnapshotExtraMeta, appBundleId: String?, appName: String?, thumbPath: String? = nil, textRefId: Int64? = nil) -> Int64 {
-        let id = (try? DB.shared.insertSnapshot(
+    func insertStub(startedAtMs: Int64, savedURL: URL, extra: SnapshotExtraMeta, appBundleId: String?, appName: String?, thumbPath: String? = nil, textRefId: Int64? = nil) throws -> Int64 {
+        try DB.shared.insertSnapshot(
             startedAtMs: startedAtMs,
             path: savedURL.path,
             text: "",
@@ -44,18 +49,19 @@ final class Indexer {
             hash64: extra.hash64,
             thumbPath: thumbPath,
             textRefId: textRefId
-        )) ?? 0
-        return id
+        )
     }
 
     func completeOCR(snapshotId: Int64, pixelBuffer: CVPixelBuffer) {
-        // Respect thermal cooldown only
-        var blocked = false
-        cooldownQueue.sync {
-            blocked = Date().timeIntervalSince1970 < ocrCooldownUntil
+        guard snapshotId > 0 else { return }
+        ocrQueue.sync {
+            // Admission pauses during cooldown. Finish already-saved captures instead
+            // of retaining their stream-pool buffers in a deferred queue.
+            performOCR(snapshotId: snapshotId, pixelBuffer: pixelBuffer)
         }
-        guard !blocked else { return }
+    }
 
+    private func performOCR(snapshotId: Int64, pixelBuffer: CVPixelBuffer) {
         do {
             let result = try ocr.recognize(from: pixelBuffer)
             try DB.shared.updateFTS(rowId: snapshotId, content: result.text)

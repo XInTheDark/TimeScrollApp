@@ -7,11 +7,14 @@ enum SnapshotImageLoader {
     private static let ciContext = CIContext(options: nil)
 
     static func loadPixelBuffer(for row: DB.EmbeddingRebuildRow) -> CVPixelBuffer? {
+        if let buffer = loadPixelBuffer(from: URL(fileURLWithPath: row.path), startedAtMs: row.startedAtMs) {
+            return buffer
+        }
         if let thumbPath = row.thumbPath,
            let buffer = loadPixelBuffer(from: URL(fileURLWithPath: thumbPath), startedAtMs: row.startedAtMs) {
             return buffer
         }
-        return loadPixelBuffer(from: URL(fileURLWithPath: row.path), startedAtMs: row.startedAtMs)
+        return nil
     }
 
     private static func loadPixelBuffer(from url: URL, startedAtMs: Int64) -> CVPixelBuffer? {

@@ -38,6 +38,22 @@ final class EmbeddingService {
         reloadFromSettings(eagerProviderSetup: !Thread.isMainThread)
     }
 
+    struct DocumentEmbedding {
+        let vector: [Float]
+        let providerID: String
+        let modelID: String
+    }
+
+    private struct StateSnapshot {
+        let provider: Provider
+        let model: String?
+        let nlProvider: NLEmbeddingProvider?
+        let ollamaProvider: OllamaEmbeddingProvider?
+        let mobileclipProvider: MobileCLIP2EmbeddingProvider?
+    }
+
+    private let stateLock = NSRecursiveLock()
+
     private(set) var aiEnabled: Bool
     private(set) var threshold: Double
     private(set) var maxCandidates: Int
@@ -49,6 +65,8 @@ final class EmbeddingService {
         private var mobileclipProvider: MobileCLIP2EmbeddingProvider?
 
     var dim: Int {
+        stateLock.lock()
+        defer { stateLock.unlock() }
         switch selectedProvider {
         case .appleNL: return nlProvider?.dim ?? 0
         case .ollama: return ollamaProvider?.dim ?? 0
@@ -57,7 +75,11 @@ final class EmbeddingService {
     }
 
     // Reload selection from UserDefaults — used after settings change
-    func reloadFromSettings(eagerProviderSetup: Bool = !Thread.isMainThread) {
+    func reloadFromSettings(eagerProviderSetup: Bool = !Thread.isMainThread, onlyIfSelectionChanged: Bool = false) {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        let previousProvider = selectedProvider
+        let previousModel = selectedModel
         let d = UserDefaults.standard
         aiEnabled = (d.object(forKey: "settings.aiEmbeddingsEnabled") != nil) ? d.bool(forKey: "settings.aiEmbeddingsEnabled") : false
         threshold = (d.object(forKey: "settings.aiThreshold") != nil) ? d.double(forKey: "settings.aiThreshold") : 0.5
@@ -71,6 +93,11 @@ final class EmbeddingService {
             selectedProvider = .appleNL
         }
         selectedModel = Self.selectedModel(from: d, provider: selectedProvider)
+
+        if onlyIfSelectionChanged, previousProvider == selectedProvider, previousModel == selectedModel {
+            // Retry unavailable providers, including those created lazily on the main thread.
+            if dim > 0 { return }
+        }
 
         switch selectedProvider {
         case .appleNL:
@@ -90,23 +117,47 @@ final class EmbeddingService {
         }
     }
 
-    var providerID: String { selectedProvider.rawValue }
+    var providerID: String {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return selectedProvider.rawValue
+    }
     var modelID: String {
-        switch selectedProvider {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return Self.resolvedModelID(provider: selectedProvider, selectedModel: selectedModel)
+    }
+
+    private static func resolvedModelID(provider: Provider, selectedModel: String?) -> String {
+        switch provider {
         case .appleNL:
             return "apple-nl-en"
         case .ollama:
-            return selectedModel ?? Self.defaultModel(for: .ollama)
+            return selectedModel ?? defaultModel(for: .ollama)
         case .mobileclip2:
-            return selectedModel ?? Self.defaultModel(for: .mobileclip2)
+            return selectedModel ?? defaultModel(for: .mobileclip2)
         }
     }
 
+    private func stateSnapshot() -> StateSnapshot {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return StateSnapshot(provider: selectedProvider,
+                             model: selectedModel,
+                             nlProvider: nlProvider,
+                             ollamaProvider: ollamaProvider,
+                             mobileclipProvider: mobileclipProvider)
+    }
+
     var supportsImageDocuments: Bool {
-        selectedProvider == .mobileclip2
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return selectedProvider == .mobileclip2
     }
 
     var effectiveThreshold: Double {
+        stateLock.lock()
+        defer { stateLock.unlock() }
         if selectedProvider == .mobileclip2, abs(threshold - 0.30) < 0.0001 {
             return 0.15
         }
@@ -118,23 +169,29 @@ final class EmbeddingService {
     }
 
     func embedWithStats(_ text: String, usage: Usage = .document) -> (vec: [Float], known: Int, total: Int) {
+        embedWithStats(text, usage: usage, state: stateSnapshot())
+    }
+
+    private func embedWithStats(_ text: String,
+                                usage: Usage,
+                                state: StateSnapshot) -> (vec: [Float], known: Int, total: Int) {
         // If text is very long, break into multiple chunks and average embeddings.
         let (raw, known, total): ([Float], Int, Int)
 
         // Use provider-agnostic long-text embedding util when text exceeds a threshold.
         let maxInput = 2_000
-        if selectedProvider != .mobileclip2, text.count > maxInput {
-            (raw, known, total) = Self.embedLongTextWithStats(text: text, maxInput: maxInput, maxChunks: 10, overlapPct: 0.10, provider: selectedProvider, nlProvider: nlProvider, ollamaProvider: ollamaProvider, usage: usage)
+        if state.provider != .mobileclip2, text.count > maxInput {
+            (raw, known, total) = Self.embedLongTextWithStats(text: text, maxInput: maxInput, maxChunks: 10, overlapPct: 0.10, provider: state.provider, nlProvider: state.nlProvider, ollamaProvider: state.ollamaProvider, usage: usage)
         } else {
-            switch selectedProvider {
+            switch state.provider {
             case .appleNL:
-                guard let p = nlProvider else { return ([], 0, 0) }
+                guard let p = state.nlProvider else { return ([], 0, 0) }
                 (raw, known, total) = p.embedWithStats(text: text)
             case .ollama:
-                guard let p = ollamaProvider else { return ([], 0, 0) }
+                guard let p = state.ollamaProvider else { return ([], 0, 0) }
                 (raw, known, total) = p.embedWithStats(text: text, usage: usage)
             case .mobileclip2:
-                guard let p = mobileclipProvider else { return ([], 0, 0) }
+                guard let p = state.mobileclipProvider else { return ([], 0, 0) }
                 (raw, known, total) = p.embedTextWithStats(text: text)
             }
         }
@@ -144,25 +201,38 @@ final class EmbeddingService {
             var sum: Float = 0; for x in raw { sum += x*x }
             let norm = sqrtf(sum)
             let head = raw.prefix(8).map { String(format: "%.4f", $0) }.joined(separator: ", ")
-            let model = selectedModel ?? selectedProvider.rawValue
-            print("[AI][Embed] provider=\(selectedProvider.rawValue) model=\(model) dim=\(raw.count) known=\(known)/\(total) norm=\(String(format: "%.4f", norm)) head=[\(head)]")
+            let model = state.model ?? state.provider.rawValue
+            print("[AI][Embed] provider=\(state.provider.rawValue) model=\(model) dim=\(raw.count) known=\(known)/\(total) norm=\(String(format: "%.4f", norm)) head=[\(head)]")
         }
         return (Self.l2normalize(raw), known, total)
     }
 
     func embedDocument(pixelBuffer: CVPixelBuffer, extractedText: String?) -> [Float] {
-        switch selectedProvider {
+        embedDocument(pixelBuffer: pixelBuffer, extractedText: extractedText, state: stateSnapshot())
+    }
+
+    private func embedDocument(pixelBuffer: CVPixelBuffer, extractedText: String?, state: StateSnapshot) -> [Float] {
+        switch state.provider {
         case .appleNL:
             guard let extractedText, !extractedText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return [] }
-            return embed(extractedText, usage: .document)
+            return embedWithStats(extractedText, usage: .document, state: state).vec
         case .ollama:
             guard let extractedText, !extractedText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return [] }
-            return embed(extractedText, usage: .document)
+            return embedWithStats(extractedText, usage: .document, state: state).vec
         case .mobileclip2:
-            guard let provider = mobileclipProvider else { return [] }
+            guard let provider = state.mobileclipProvider else { return [] }
             let includeText = UserDefaults.standard.bool(forKey: "settings.multimodalIncludeExtractedText")
             return provider.embedDocument(pixelBuffer: pixelBuffer, extractedText: extractedText, includeText: includeText)
         }
+    }
+
+    func embedDocumentWithIdentity(pixelBuffer: CVPixelBuffer, extractedText: String?) -> DocumentEmbedding? {
+        let state = stateSnapshot()
+        let vector = embedDocument(pixelBuffer: pixelBuffer, extractedText: extractedText, state: state)
+        guard !vector.isEmpty else { return nil }
+        return DocumentEmbedding(vector: vector,
+                                 providerID: state.provider.rawValue,
+                                 modelID: Self.resolvedModelID(provider: state.provider, selectedModel: state.model))
     }
 
     private static func selectedModel(from defaults: UserDefaults, provider: Provider) -> String? {
@@ -569,6 +639,18 @@ final class OllamaEmbeddingProvider {
             dimCache = parsed
         }
     }
+
+#if DEBUG
+    static func clearCachedDimsForTesting(preserveDefaults: Bool = false) {
+        metadataQueue.sync(flags: .barrier) {
+            dimCache = [:]
+            hasLoadedCache = false
+            if !preserveDefaults {
+                UserDefaults.standard.removeObject(forKey: dimDefaultsKey)
+            }
+        }
+    }
+#endif
 
     private static func fetchEmbeddingLength(model: String, baseURL: String) -> Int? {
         guard let url = URL(string: "\(baseURL)/api/show") else { return nil }

@@ -16,6 +16,7 @@ struct TSEHeader: Codable {
 final class FileCrypter {
     static let shared = FileCrypter()
     private init() {}
+    private let snapshotWriteLock = NSLock()
 
     func encryptSnapshot(encoded: EncodedImage, timestampMs: Int64) throws -> URL {
     let fek = SymmetricKey(size: .bits256)
@@ -50,7 +51,10 @@ final class FileCrypter {
     blob.append(sealedBox.ciphertext)
     sealedBox.tag.withUnsafeBytes { blob.append(contentsOf: $0) }
 
-        // Write atomically to Snapshots dir with .tse
+        // Reserve the filename and write atomically while holding one process-wide lock.
+        // Multiple capture streams can otherwise choose the same timestamp-based path.
+        snapshotWriteLock.lock()
+        defer { snapshotWriteLock.unlock() }
         return try StoragePaths.withSecurityScope {
             let (dir, base) = try outputLocation(timestampMs: timestampMs)
             let url = dir.appendingPathComponent(base + ".tse")

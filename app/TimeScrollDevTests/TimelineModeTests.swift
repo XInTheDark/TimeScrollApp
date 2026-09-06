@@ -7,13 +7,12 @@ import Testing
 @testable import TimeScroll
 
 struct TimelineModeTests {
-    @Test @MainActor func mode_switches_on_query_change() async throws {
+    @Test @MainActor func query_tracks_applied_search_text() {
         let vm = TimelineModel()
-        #expect({ if case .latest = vm.mode { return true } else { return false } }())
-        vm.onQueryChanged("hello")
-        #expect({ if case .searching = vm.mode { return true } else { return false } }())
-        vm.onQueryChanged("")
-        #expect({ if case .latest = vm.mode { return true } else { return false } }())
+        #expect(vm.query.isEmpty)
+        vm.query = "hello"
+        #expect(vm.query == "hello")
+        vm.query = ""
+        #expect(vm.query.isEmpty)
     }
 }
-

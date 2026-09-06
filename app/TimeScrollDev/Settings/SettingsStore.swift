@@ -18,6 +18,13 @@ final class SettingsStore: ObservableObject {
     nonisolated static let defaultDegradeMaxLongEdge: Int = 1200
     nonisolated static let defaultDegradeQuality: Double = 0.5
     nonisolated static let defaultCaptureScale: Double = 0.8
+    nonisolated static let defaultAudioFeatureEnabled: Bool = false
+    nonisolated static let defaultCaptureScreenEnabled: Bool = true
+    nonisolated static let defaultCaptureAudioEnabled: Bool = true
+    nonisolated static let defaultCaptureMicrophoneEnabled: Bool = false
+    nonisolated static let defaultCaptureSystemAudioEnabled: Bool = false
+    nonisolated static let defaultWhisperModelID: String = "base"
+    nonisolated static let defaultAudioSegmentDurationSeconds: Int = 15
 
     private init() {
         load()
@@ -65,6 +72,15 @@ final class SettingsStore: ObservableObject {
     @Published var captureScale: Double = SettingsStore.defaultCaptureScale { didSet { if !isLoading { save() } } }  // 0.5...1.0
     // Displays: capture first or all
     @Published var captureDisplayMode: DisplayCaptureMode = .first { didSet { if !isLoading { save() } } }
+    // Optional audio capture
+    @Published var audioFeatureEnabled: Bool = SettingsStore.defaultAudioFeatureEnabled { didSet { if !isLoading { save() } } }
+    @Published var captureScreenEnabled: Bool = SettingsStore.defaultCaptureScreenEnabled { didSet { if !isLoading { save() } } }
+    @Published var captureAudioEnabled: Bool = SettingsStore.defaultCaptureAudioEnabled { didSet { if !isLoading { save() } } }
+    @Published var captureMicrophoneEnabled: Bool = SettingsStore.defaultCaptureMicrophoneEnabled { didSet { if !isLoading { save() } } }
+    @Published var captureSystemAudioEnabled: Bool = SettingsStore.defaultCaptureSystemAudioEnabled { didSet { if !isLoading { save() } } }
+    @Published var selectedAudioInputDeviceID: String = "" { didSet { if !isLoading { save() } } }
+    @Published var whisperModelID: String = SettingsStore.defaultWhisperModelID { didSet { if !isLoading { save() } } }
+    @Published var audioSegmentDurationSeconds: Int = SettingsStore.defaultAudioSegmentDurationSeconds { didSet { if !isLoading { save() } } }
 
     // App behavior
     @Published var startMinimized: Bool = false { didSet { if !isLoading { save() } } }
@@ -157,6 +173,45 @@ final class SettingsStore: ObservableObject {
         // Load capture scale if present
         let capScale = defaults.double(forKey: "settings.captureScale"); if capScale > 0 { captureScale = capScale }
         if let raw = defaults.string(forKey: "settings.captureDisplayMode"), let v = DisplayCaptureMode(rawValue: raw) { captureDisplayMode = v }
+        if defaults.object(forKey: "settings.audioFeatureEnabled") != nil {
+            audioFeatureEnabled = defaults.bool(forKey: "settings.audioFeatureEnabled")
+        } else {
+            audioFeatureEnabled = Self.defaultAudioFeatureEnabled
+        }
+        if defaults.object(forKey: "settings.captureScreenEnabled") != nil {
+            captureScreenEnabled = defaults.bool(forKey: "settings.captureScreenEnabled")
+        } else {
+            captureScreenEnabled = Self.defaultCaptureScreenEnabled
+        }
+        if defaults.object(forKey: "settings.captureMicrophoneEnabled") != nil {
+            captureMicrophoneEnabled = defaults.bool(forKey: "settings.captureMicrophoneEnabled")
+        } else {
+            captureMicrophoneEnabled = Self.defaultCaptureMicrophoneEnabled
+        }
+        if defaults.object(forKey: "settings.captureSystemAudioEnabled") != nil {
+            captureSystemAudioEnabled = defaults.bool(forKey: "settings.captureSystemAudioEnabled")
+        } else {
+            captureSystemAudioEnabled = Self.defaultCaptureSystemAudioEnabled
+        }
+        if defaults.object(forKey: "settings.captureAudioEnabled") != nil {
+            captureAudioEnabled = defaults.bool(forKey: "settings.captureAudioEnabled")
+        } else {
+            captureAudioEnabled = captureMicrophoneEnabled || captureSystemAudioEnabled
+        }
+        if let audioInputID = defaults.string(forKey: "settings.selectedAudioInputDeviceID") {
+            selectedAudioInputDeviceID = audioInputID
+        }
+        if let whisperModel = defaults.string(forKey: "settings.whisperModelID"), !whisperModel.isEmpty {
+            whisperModelID = whisperModel
+        } else {
+            whisperModelID = Self.defaultWhisperModelID
+        }
+        let audioSegmentDuration = defaults.integer(forKey: "settings.audioSegmentDurationSeconds")
+        if audioSegmentDuration > 0 {
+            audioSegmentDurationSeconds = audioSegmentDuration
+        } else {
+            audioSegmentDurationSeconds = Self.defaultAudioSegmentDurationSeconds
+        }
 
         // App behavior
         if defaults.object(forKey: "settings.startMinimized") != nil { startMinimized = defaults.bool(forKey: "settings.startMinimized") }
@@ -274,6 +329,14 @@ final class SettingsStore: ObservableObject {
         // Save capture scale
         defaults.set(captureScale, forKey: "settings.captureScale")
         defaults.set(captureDisplayMode.rawValue, forKey: "settings.captureDisplayMode")
+        defaults.set(audioFeatureEnabled, forKey: "settings.audioFeatureEnabled")
+        defaults.set(captureScreenEnabled, forKey: "settings.captureScreenEnabled")
+        defaults.set(captureAudioEnabled, forKey: "settings.captureAudioEnabled")
+        defaults.set(captureMicrophoneEnabled, forKey: "settings.captureMicrophoneEnabled")
+        defaults.set(captureSystemAudioEnabled, forKey: "settings.captureSystemAudioEnabled")
+        defaults.set(selectedAudioInputDeviceID, forKey: "settings.selectedAudioInputDeviceID")
+        defaults.set(whisperModelID, forKey: "settings.whisperModelID")
+        defaults.set(audioSegmentDurationSeconds, forKey: "settings.audioSegmentDurationSeconds")
 
         // App behavior
         defaults.set(startMinimized, forKey: "settings.startMinimized")

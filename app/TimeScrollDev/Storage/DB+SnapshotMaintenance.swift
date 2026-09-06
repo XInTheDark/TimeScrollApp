@@ -24,19 +24,19 @@ extension DB {
             let cutoff = Int64(Date().addingTimeInterval(-Double(days) * 86400).timeIntervalSince1970 * 1000)
             // Collect file paths to delete before removing DB rows
             var stmt: OpaquePointer?
-            var pathsToHandle: [String] = []
+            var pathsToHandle = Set<String>()
             defer { sqlite3_finalize(stmt) }
             if sqlite3_prepare_v2(db, "SELECT path FROM ts_snapshot WHERE started_at_ms < ?;", -1, &stmt, nil) == SQLITE_OK {
                 sqlite3_bind_int64(stmt, 1, cutoff)
                 while sqlite3_step(stmt) == SQLITE_ROW {
                     if let cstr = sqlite3_column_text(stmt, 0) {
-                        pathsToHandle.append(String(cString: cstr))
+                        pathsToHandle.insert(String(cString: cstr))
                     }
                 }
             }
             // Move each path to backup if enabled; otherwise delete.
             let fm = FileManager.default
-            for p in pathsToHandle {
+            for p in pathsToHandle where !isHEVCSegmentPath(p) {
                 let srcURL = URL(fileURLWithPath: p)
                 let archived = StoragePaths.archiveSnapshotToBackupIfEnabled(srcURL)
                 if !archived { _ = try? fm.removeItem(at: srcURL) }
@@ -52,7 +52,30 @@ extension DB {
             DELETE FROM ts_text_store WHERE id NOT IN (SELECT DISTINCT text_store_id FROM ts_snapshot WHERE text_store_id IS NOT NULL);
             """
             _ = sqlite3_exec(db, sql, nil, nil, nil)
+            removeUnreferencedHEVCSegments(pathsToHandle, db: db)
+            purgeOrphanedAudioAssets()
         }
+    }
+
+    private func removeUnreferencedHEVCSegments(_ paths: Set<String>, db: OpaquePointer) {
+        let fm = FileManager.default
+        for path in paths where isHEVCSegmentPath(path) {
+            var stmt: OpaquePointer?
+            defer { sqlite3_finalize(stmt) }
+            guard sqlite3_prepare_v2(db, "SELECT 1 FROM ts_snapshot WHERE path=? LIMIT 1;", -1, &stmt, nil) == SQLITE_OK else {
+                continue
+            }
+            sqlite3_bind_text(stmt, 1, path, -1, SQLITE_TRANSIENT)
+            guard sqlite3_step(stmt) != SQLITE_ROW else { continue }
+            let url = URL(fileURLWithPath: path)
+            let archived = StoragePaths.archiveSnapshotToBackupIfEnabled(url)
+            if !archived { _ = try? fm.removeItem(at: url) }
+        }
+    }
+
+    private func isHEVCSegmentPath(_ path: String) -> Bool {
+        let ext = URL(fileURLWithPath: path).pathExtension.lowercased()
+        return ext == "mov" || ext == "tse"
     }
 
     // Delete rows older than a specific cutoff, optionally skipping on-disk deletions.
@@ -88,6 +111,7 @@ extension DB {
             DELETE FROM ts_text_store WHERE id NOT IN (SELECT DISTINCT text_store_id FROM ts_snapshot WHERE text_store_id IS NOT NULL);
             """
             _ = sqlite3_exec(db, sql, nil, nil, nil)
+            purgeOrphanedAudioAssets()
         }
     }
 
@@ -121,6 +145,7 @@ extension DB {
             _ = sqlite3_exec(db, "DELETE FROM ts_embedding WHERE snapshot_id=\(id);", nil, nil, nil)
             _ = sqlite3_exec(db, "DELETE FROM ts_snapshot WHERE id=\(id);", nil, nil, nil)
             _ = sqlite3_exec(db, "DELETE FROM ts_text_store WHERE id NOT IN (SELECT DISTINCT text_store_id FROM ts_snapshot WHERE text_store_id IS NOT NULL);", nil, nil, nil)
+            purgeOrphanedAudioAssets()
         }
     }
 }

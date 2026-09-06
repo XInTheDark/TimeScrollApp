@@ -74,9 +74,11 @@ extension StoragePaths {
         // Persist bookmark + display path
         if let data = try? url.bookmarkData(options: [.withSecurityScope], includingResourceValuesForKeys: nil, relativeTo: nil) {
             setShared(data, forKey: bookmarkKey)
-            setShared(url.path, forKey: storageDisplayPathKey)
-            synchronizeShared()
+        } else {
+            removeSharedObject(forKey: bookmarkKey)
         }
+        setShared(url.path, forKey: storageDisplayPathKey)
+        synchronizeShared()
         // Write diagnostics marker in the App Group
         let tmpMarker = groupMarkerFile.appendingPathExtension("tmp")
         try? (url.path + "\n").write(to: tmpMarker, atomically: true, encoding: .utf8)

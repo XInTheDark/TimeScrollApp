@@ -3,7 +3,8 @@ import CoreVideo
 
 extension FrameOutput {
     func processText(snapshotId: Int64, retainedPixelBuffer: Unmanaged<CVPixelBuffer>) {
-        ocrQueue.async { [weak self] in
+        // Keep capture admission occupied until text processing releases this buffer.
+        ocrQueue.sync { [weak self] in
             guard let self else {
                 retainedPixelBuffer.release()
                 return
@@ -38,8 +39,6 @@ extension FrameOutput {
                 if UserDefaults.standard.bool(forKey: "settings.debugMode") {
                     print("[Capture] Deduplicating text, hamming=\(distance), refId=\(last.id)")
                 }
-                // Store reference to the ANCHOR snapshot
-                try? DB.shared.updateSnapshotTextRef(rowId: snapshotId, refId: last.id)
                 isDuplicate = true
             }
         }
@@ -47,11 +46,13 @@ extension FrameOutput {
         if !isDuplicate {
             // This is a new anchor
             lastCapturedFingerprint = (snapshotId, fingerprint)
-            do {
-                try DB.shared.updateFTS(rowId: snapshotId, content: text)
-            } catch {
-                // Swallow errors; debug log if needed
-            }
+        }
+        do {
+            // Text storage deduplicates payloads by hash, while each snapshot keeps its
+            // own FTS rows so a search can return the correct timestamp.
+            try DB.shared.updateFTS(rowId: snapshotId, content: text)
+        } catch {
+            // Swallow errors; debug log if needed
         }
         SnapshotEmbeddingWriter.shared.storeCurrentEmbeddingIfNeeded(snapshotId: snapshotId, pixelBuffer: pixelBuffer, extractedText: text)
     }

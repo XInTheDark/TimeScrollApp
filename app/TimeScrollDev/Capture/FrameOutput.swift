@@ -8,7 +8,7 @@ final class FrameOutput: NSObject, SCStreamOutput {
     // Cadence gating
     var lastEvaluatedPTS: CMTime = .invalid
     var lastPersistedPTS: CMTime = .invalid
-    var evaluating = false
+    private let evaluationGate = DispatchSemaphore(value: 1)
 
     // Adaptive interval
     var currentInterval: CFTimeInterval = 0
@@ -28,6 +28,7 @@ final class FrameOutput: NSObject, SCStreamOutput {
     let onSnapshot: (URL) -> Void
     let encoder = ImageEncoder()
     let hasher = ImageHasher()
+    let hevcStore: HEVCVideoStore
 
     // Dedup/adaptive
     var lastHash: UInt64?
@@ -49,8 +50,11 @@ final class FrameOutput: NSObject, SCStreamOutput {
         case skippedWhileLocked
     }
 
-    init(onSnapshot: @escaping (URL) -> Void, onProbeIntervalChanged: @escaping (CFTimeInterval) -> Void = { _ in }) {
+    init(onSnapshot: @escaping (URL) -> Void,
+         hevcStore: HEVCVideoStore,
+         onProbeIntervalChanged: @escaping (CFTimeInterval) -> Void = { _ in }) {
         self.onSnapshot = onSnapshot
+        self.hevcStore = hevcStore
         self.onProbeIntervalChanged = onProbeIntervalChanged
         super.init()
         currentInterval = baseInterval
@@ -71,6 +75,9 @@ final class FrameOutput: NSObject, SCStreamOutput {
 
     func stream(_ stream: SCStream, didOutputSampleBuffer sb: CMSampleBuffer, of outputType: SCStreamOutputType) {
         guard outputType == .screen, let pixelBuffer = sb.imageBuffer else { return }
+        guard evaluationGate.wait(timeout: .now()) == .success else { return }
+        var handedOff = false
+        defer { if !handedOff { evaluationGate.signal() } }
 
         // Lightweight thermal governance check (every ~1s)
         applyThermalGovernorIfNeeded()
@@ -89,11 +96,11 @@ final class FrameOutput: NSObject, SCStreamOutput {
             let delta = CMTimeGetSeconds(CMTimeSubtract(pts, lastEvaluatedPTS))
             if delta < currentInterval { return }
         }
-        if evaluating { return }
+        let processing = UserDefaults.standard.string(forKey: "settings.textProcessingMode") ?? SettingsStore.defaultTextProcessingMode.rawValue
+        if processing == SettingsStore.TextProcessingMode.ocr.rawValue, Indexer.shared.isOCRCoolingDown { return }
 
         // Privacy handled via SCContentFilter exclusions at the stream level.
 
-        evaluating = true
         lastEvaluatedPTS = pts
 
         // Snapshot background-readable settings
@@ -109,6 +116,12 @@ final class FrameOutput: NSObject, SCStreamOutput {
         let allowWhileLocked = (defaults.object(forKey: "settings.captureWhileLocked") != nil) ? defaults.bool(forKey: "settings.captureWhileLocked") : true
         let unlockedFlag = defaults.bool(forKey: "vault.isUnlocked")
 
+        // When capture while locked is disabled, avoid hashing or encoding frames.
+        // Keep lastHash unchanged so the current screen is captured after unlock.
+        if vaultOn && !unlockedFlag && !allowWhileLocked {
+            return
+        }
+
         // IMPORTANT: Compute hash directly from the pixel buffer (cheap, uses CI) before making any CGImage.
         var hashVal: UInt64 = 0
         if dedupEnabled {
@@ -121,7 +134,7 @@ final class FrameOutput: NSObject, SCStreamOutput {
                     if fmt == .hevc {
                         let tsMs = Int64(Date().timeIntervalSince1970 * 1000)
                         if !vaultOn || (vaultOn && (unlockedFlag ? true : allowWhileLocked)) {
-                            HEVCVideoStore.shared.append(pixelBuffer: pixelBuffer, timestampMs: tsMs, encrypt: vaultOn)
+                            self.hevcStore.append(pixelBuffer: pixelBuffer, timestampMs: tsMs, encrypt: vaultOn)
                         }
                     }
                     if adaptive {
@@ -129,7 +142,6 @@ final class FrameOutput: NSObject, SCStreamOutput {
                         currentInterval = min(maxInterval, baseInterval * CFTimeInterval(pow(1.5, Double(stableCount))))
                         reportProbeIntervalIfNeeded()
                     }
-                    evaluating = false
                     return
                 }
             }
@@ -137,15 +149,14 @@ final class FrameOutput: NSObject, SCStreamOutput {
 
         // Retain the pixel buffer to safely use it across queues.
         let retainedPixelBuffer = Unmanaged.passRetained(pixelBuffer)
+        handedOff = true
+        let gate = evaluationGate
         workQueue.async { [weak self] in
+            defer { gate.signal() }
             guard let self else {
                 retainedPixelBuffer.release()
                 return
             }
-            defer {
-                self.evaluating = false
-            }
-
             // Persist directly from the pixel buffer to avoid CGImage creation
             let pb = retainedPixelBuffer.takeUnretainedValue()
             do {
@@ -169,11 +180,21 @@ final class FrameOutput: NSObject, SCStreamOutput {
                 )
 
                 switch outcome {
-                case .queuedWhileLocked, .skippedWhileLocked:
+                case .queuedWhileLocked:
+                    // The encrypted snapshot and its metadata are safely queued. Treat it
+                    // as an accepted capture so an unchanged locked screen is deduplicated.
+                    self.lastHash = hashVal
+                    self.stableCount = 0
+                    self.currentInterval = self.baseInterval
+                    self.lastPersistedPTS = pts
+                    self.reportProbeIntervalIfNeeded()
+                    retainedPixelBuffer.release()
+                    return
+                case .skippedWhileLocked:
                     retainedPixelBuffer.release()
                     return
                 case let .saved(url, bytes, width, height, thumbPath):
-                    let rowId = Indexer.shared.insertStub(
+                    let rowId = try Indexer.shared.insertStub(
                         startedAtMs: tsMs,
                         savedURL: url,
                         extra: Indexer.SnapshotExtraMeta(
@@ -205,5 +226,11 @@ final class FrameOutput: NSObject, SCStreamOutput {
                 // swallow for now
             }
         }
+    }
+
+    func shutdown() {
+        workQueue.sync {}
+        ocrQueue.sync {}
+        hevcStore.shutdown()
     }
 }

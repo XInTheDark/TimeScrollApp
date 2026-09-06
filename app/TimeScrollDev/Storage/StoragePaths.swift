@@ -52,9 +52,30 @@ enum StoragePaths {
     /// Returns the current storage root URL. If a security-scoped bookmark is stored,
     /// this resolves it; otherwise returns ~/Library/Application Support/TimeScroll.
     static func currentRoot() -> URL {
+        // An older build could persist both a bookmark and display path under the
+        // manually-addressed Group Containers directory. Resolve that known path
+        // before touching the bookmark: on ad-hoc builds, resolving it is what
+        // repeatedly triggers macOS's "access data from other apps" prompt.
+        if let rawPath = sharedString(forKey: storageDisplayPathKey) {
+            let trimmed = rawPath.trimmingCharacters(in: .whitespacesAndNewlines)
+            let normalized = normalizeStoragePathIfNeeded(trimmed)
+            if normalized != trimmed {
+                removeSharedObject(forKey: bookmarkKey)
+                setShared(normalized, forKey: storageDisplayPathKey)
+                synchronizeShared()
+                return URL(fileURLWithPath: normalized, isDirectory: true)
+            }
+        }
         if let bd = sharedData(forKey: bookmarkKey) {
             var stale = false
             if let url = try? URL(resolvingBookmarkData: bd, options: [.withSecurityScope], relativeTo: nil, bookmarkDataIsStale: &stale) {
+                let normalized = normalizeStoragePathIfNeeded(url.path)
+                if normalized != url.path {
+                    removeSharedObject(forKey: bookmarkKey)
+                    setShared(normalized, forKey: storageDisplayPathKey)
+                    synchronizeShared()
+                    return URL(fileURLWithPath: normalized, isDirectory: true)
+                }
                 if stale {
                     _ = refreshBookmark(for: url)
                 }
@@ -90,6 +111,9 @@ enum StoragePaths {
 
     /// Ingest queue directory under the current root (for encrypted mode).
     static func ingestQueueDir() -> URL { currentRoot().appendingPathComponent("IngestQueue", isDirectory: true) }
+
+    /// Audio capture directory under the current root.
+    static func audioDir() -> URL { currentRoot().appendingPathComponent("Audio", isDirectory: true) }
 
     /// Vault directory under the current root (keys and related state).
     static func vaultDir() -> URL { currentRoot().appendingPathComponent("Vault", isDirectory: true) }

@@ -17,6 +17,7 @@ extension AppDelegate {
         NotificationCenter.default.addObserver(forName: NSApplication.didBecomeActiveNotification, object: nil, queue: .main) { [weak self] _ in
             Task { @MainActor in
                 self?.updateActivationPolicy()
+                await AppState.shared.retryNewlyAuthorizedSourcesIfNeeded()
             }
         }
         // Polling approach is unnecessary; just update on demand using a KVO of windows and toggles below.
@@ -51,6 +52,14 @@ extension AppDelegate {
     // MARK: - Sleep/Wake handling
     func installSleepWakeObservers() {
         let nc = NSWorkspace.shared.notificationCenter
+        let sleepToken = nc.addObserver(forName: NSWorkspace.willSleepNotification, object: nil, queue: .main) { _ in
+            Task { @MainActor in
+                if SettingsStore.shared.autoLockOnSleep {
+                    await VaultManager.shared.lock()
+                }
+            }
+        }
+        powerNotiTokens.append(sleepToken)
         let handler: (Notification) -> Void = { [weak self] _ in
             guard let self else { return }
             let now = Date().timeIntervalSince1970
@@ -58,9 +67,11 @@ extension AppDelegate {
             self.lastWakeRestartAt = now
             Task { @MainActor in
                 try? await Task.sleep(nanoseconds: 800_000_000)
+                if SettingsStore.shared.autoLockOnSleep, VaultManager.shared.isUnlocked {
+                    await VaultManager.shared.lock()
+                }
                 await AppState.shared.restartCaptureIfRunning()
                 self.refreshMenu()
-                if SettingsStore.shared.autoLockOnSleep { VaultManager.shared.lock() }
             }
         }
         let token = nc.addObserver(forName: NSWorkspace.didWakeNotification, object: nil, queue: .main, using: handler)
@@ -82,7 +93,10 @@ extension AppDelegate {
         let d = UserDefaults.standard
         let auto = d.object(forKey: "settings.startRecordingOnStart") != nil ? d.bool(forKey: "settings.startRecordingOnStart") : true
         guard auto else { return }
-        guard Permissions.isScreenRecordingGranted() else { return }
+
+        let selection = CaptureModeSelection(defaults: d)
+        guard selection.hasAnyCaptureEnabled else { return }
+
         Task { @MainActor in
             await AppState.shared.startCaptureIfNeeded()
             refreshMenu()

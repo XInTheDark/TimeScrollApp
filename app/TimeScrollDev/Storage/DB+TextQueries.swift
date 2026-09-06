@@ -9,7 +9,7 @@ import SQLite3
 
 extension DB {
     func updateFTS(rowId: Int64, content: String) throws {
-        try onQueueSync {
+        try withWriteSavepoint {
             try openIfNeeded()
             guard let db = db else { return }
             try storeTextArtifacts(rowId: rowId, content: content, db: db)
@@ -69,10 +69,15 @@ extension DB {
                 let content = try resolvedTextContent(snapshotId: result.id, db: db, visited: &visited, cache: &cache) ?? result.content
                 return SearchResult(id: result.id,
                                     startedAtMs: result.startedAtMs,
+                                    endedAtMs: result.endedAtMs,
                                     path: result.path,
                                     appBundleId: result.appBundleId,
                                     appName: result.appName,
                                     thumbPath: result.thumbPath,
+                                    captureKind: result.captureKind,
+                                    audioSourceKind: result.audioSourceKind,
+                                    audioAssetId: result.audioAssetId,
+                                    audioDurationMs: result.audioDurationMs,
                                     content: content)
             }
         }

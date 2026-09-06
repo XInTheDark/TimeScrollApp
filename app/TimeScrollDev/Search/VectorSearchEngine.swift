@@ -12,6 +12,8 @@ final class VectorSearchEngine {
                        appBundleIds: [String]?,
                        startMs: Int64?,
                        endMs: Int64?,
+                       captureKinds: [CaptureKind]?,
+                       audioSourceKinds: [AudioSourceKind]?,
                        limit: Int,
                        offset: Int) -> [SearchResult] {
         guard !queryVector.isEmpty, service.dim > 0 else { return [] }
@@ -30,7 +32,10 @@ final class VectorSearchEngine {
         let strategy: String
         let rawResults: [SearchResult]
 
-        if EmbeddingANNIndexBuilder.shouldBuildIndex(for: stats.count),
+        let hasMediaFilters = (captureKinds?.isEmpty == false) || (audioSourceKinds?.isEmpty == false)
+
+        if !hasMediaFilters,
+           EmbeddingANNIndexBuilder.shouldBuildIndex(for: stats.count),
            let index = EmbeddingANNIndexStore.shared.readyIndex(identity: identity, stats: stats) {
             strategy = "ann"
             rawResults = annSearch(queryVector: queryVector,
@@ -56,6 +61,8 @@ final class VectorSearchEngine {
                                      appBundleIds: appBundleIds,
                                      startMs: startMs,
                                      endMs: endMs,
+                                     captureKinds: captureKinds,
+                                     audioSourceKinds: audioSourceKinds,
                                      limit: limit,
                                      offset: offset,
                                      fullScan: fullScan)
@@ -78,6 +85,8 @@ private extension VectorSearchEngine {
                      appBundleIds: [String]?,
                      startMs: Int64?,
                      endMs: Int64?,
+                     captureKinds: [CaptureKind]?,
+                     audioSourceKinds: [AudioSourceKind]?,
                      limit: Int,
                      offset: Int,
                      fullScan: Bool) -> [SearchResult] {
@@ -87,6 +96,8 @@ private extension VectorSearchEngine {
         let candidates = (try? DB.shared.embeddingCandidates(appBundleIds: appBundleIds,
                                                              startMs: startMs,
                                                              endMs: endMs,
+                                                             captureKinds: captureKinds,
+                                                             audioSourceKinds: audioSourceKinds,
                                                              limit: fetchLimit,
                                                              offset: 0,
                                                              requireDim: service.dim,

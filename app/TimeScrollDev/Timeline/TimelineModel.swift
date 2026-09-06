@@ -7,11 +7,16 @@ final class TimelineModel: ObservableObject {
     // Filters
     @Published var query: String = ""
     @Published var selectedAppBundleIds: Set<String> = []
+    @Published var selectedCaptureKinds: Set<CaptureKind> = []
+    @Published var selectedAudioSourceKinds: Set<AudioSourceKind> = []
     @Published var startMs: Int64? = nil
     @Published var endMs: Int64? = nil
 
     // Data
-    @Published private(set) var metas: [SnapshotMeta] = [] // DESC by time
+    @Published private(set) var metas: [SnapshotMeta] = [] { // DESC by time
+        didSet { dataRevision &+= 1 }
+    }
+    private(set) var dataRevision: UInt64 = 0
     @Published private(set) var segments: [TimelineSegment] = [] // chronological
     @Published var selectedIndex: Int = -1
     @Published var jumpToEndToken: Int = 0
@@ -25,7 +30,7 @@ final class TimelineModel: ObservableObject {
 
     // Hover state (for preview)
     @Published var hoverTimeMs: Int64? = nil
-    // Loading state for timeline fetch
+    @Published var playbackTimeMs: Int64? = nil
     @Published var isLoading: Bool = false
 
     private var timesAsc: [Int64] = []
@@ -33,23 +38,19 @@ final class TimelineModel: ObservableObject {
 
     var minTimeMs: Int64 { metas.last?.startedAtMs ?? 0 }
     var maxTimeMs: Int64 { metas.first?.startedAtMs ?? 0 }
+    var selected: SnapshotMeta? { metas.indices.contains(selectedIndex) ? metas[selectedIndex] : nil }
 
     init() {
-        // Always start the session with the overlay in the default position.
-        // Users can drag it during a session, but on new window/app launch it resets.
         overlayOffsetX = 0
         overlayOffsetY = 220
     }
-    var selected: SnapshotMeta? { metas.indices.contains(selectedIndex) ? metas[selectedIndex] : nil }
 
     func load(limit: Int = 1000) {
         requestToken &+= 1
         let token = requestToken
         isLoading = true
-        // Allow UI to update and show the spinner
         Task { @MainActor in await Task.yield() }
 
-        // Capture inputs on the main actor; background work must not touch main-actor singletons.
         let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
         let previousSelectedId = selected?.id
         let settings = SettingsStore.shared
@@ -57,35 +58,50 @@ final class TimelineModel: ObservableObject {
         let ia = settings.intelligentAccuracy
         let fuzz = settings.fuzziness
         let appIds = selectedAppBundleIds.isEmpty ? nil : Array(selectedAppBundleIds)
+        let captureKinds = selectedCaptureKinds.isEmpty ? nil : Array(selectedCaptureKinds)
+        let audioSourceKinds = selectedAudioSourceKinds.isEmpty ? nil : Array(selectedAudioSourceKinds)
         let start = startMs
         let end = endMs
-        DispatchQueue.global(qos: .userInitiated).async { [limit, trimmed, appIds, start, end, useAI, fuzz, ia] in
+
+        DispatchQueue.global(qos: .userInitiated).async { [limit, trimmed, appIds, captureKinds, audioSourceKinds, start, end, useAI, fuzz, ia] in
             let searchSvc = SearchService()
             let list: [SnapshotMeta]
             if trimmed.isEmpty {
-                list = searchSvc.latestMetas(limit: limit,
-                                             appBundleIds: appIds,
-                                             startMs: start,
-                                             endMs: end)
+                list = searchSvc.latestMetas(
+                    limit: limit,
+                    appBundleIds: appIds,
+                    startMs: start,
+                    endMs: end,
+                    captureKinds: captureKinds,
+                    audioSourceKinds: audioSourceKinds
+                )
             } else if useAI {
-                list = searchSvc.searchAIMetas(trimmed,
-                                               appBundleIds: appIds,
-                                               startMs: start,
-                                               endMs: end,
-                                               limit: limit)
+                list = searchSvc.searchAIMetas(
+                    trimmed,
+                    appBundleIds: appIds,
+                    startMs: start,
+                    endMs: end,
+                    captureKinds: captureKinds,
+                    audioSourceKinds: audioSourceKinds,
+                    limit: limit
+                )
             } else {
-                list = searchSvc.searchMetas(trimmed,
-                                             fuzziness: fuzz,
-                                             intelligentAccuracy: ia,
-                                             appBundleIds: appIds,
-                                             startMs: start,
-                                             endMs: end,
-                                             limit: limit)
+                list = searchSvc.searchMetas(
+                    trimmed,
+                    fuzziness: fuzz,
+                    intelligentAccuracy: ia,
+                    appBundleIds: appIds,
+                    startMs: start,
+                    endMs: end,
+                    captureKinds: captureKinds,
+                    audioSourceKinds: audioSourceKinds,
+                    limit: limit
+                )
             }
 
             let sorted = list.sorted { $0.startedAtMs > $1.startedAtMs }
             DispatchQueue.main.async { [weak self] in
-                guard let self = self else { return }
+                guard let self else { return }
                 guard token == self.requestToken else { return }
                 self.metas = sorted
                 if self.followLatest {
@@ -109,121 +125,160 @@ final class TimelineModel: ObservableObject {
     func refreshSegments() {
         segments.removeAll()
         guard !metas.isEmpty else { return }
+
         let asc = metas.sorted { $0.startedAtMs < $1.startedAtMs }
-        // Treat long idle periods as a new strip even if the user returns to the same app.
-        // This keeps the visual timeline honest and gives compressed mode a real gap to shrink.
         let inactivityBreakMs: Int64 = 60_000
 
-        var segApp = asc.first!.appBundleId
-        var segName = asc.first!.appName
-        var segStart = asc.first!.startedAtMs
-        var lastTime = segStart
+        var current = asc[0]
+        var segmentKey = TimelineSegmentKey(meta: current)
+        var segStart = current.startedAtMs
+        var lastEnd = resolvedEndMs(for: current)
         var nonAppAccum: Int64 = 0
-        if asc.count > 1 {
-            for i in 1..<asc.count {
-                let cur = asc[i]
-                let prev = asc[i - 1]
-                let dt = max(0, cur.startedAtMs - prev.startedAtMs)
-                if dt > inactivityBreakMs {
-                    segments.append(TimelineSegment(appBundleId: segApp,
-                                                    appName: segName,
-                                                    startMs: segStart,
-                                                    endMs: lastTime,
-                                                    toleratedNonAppMs: Int64((0.10 * Double(lastTime - segStart)).rounded(.up)),
-                                                    actualNonAppMs: nonAppAccum))
-                    segApp = cur.appBundleId
-                    segName = cur.appName
-                    segStart = cur.startedAtMs
-                    lastTime = cur.startedAtMs
-                    nonAppAccum = 0
-                } else if cur.appBundleId == segApp {
-                    lastTime = cur.startedAtMs
-                } else {
-                    let provisional = max(1, cur.startedAtMs - segStart)
-                    let allowed = Int64((0.10 * Double(provisional)).rounded(.up))
-                    if nonAppAccum + dt <= allowed {
-                        nonAppAccum += dt
-                        lastTime = cur.startedAtMs
-                    } else {
-                        segments.append(TimelineSegment(appBundleId: segApp,
-                                                        appName: segName,
-                                                        startMs: segStart,
-                                                        endMs: lastTime,
-                                                        toleratedNonAppMs: Int64((0.10 * Double(lastTime - segStart)).rounded(.up)),
-                                                        actualNonAppMs: nonAppAccum))
-                        // start new
-                        segApp = cur.appBundleId
-                        segName = cur.appName
-                        segStart = cur.startedAtMs
-                        lastTime = cur.startedAtMs
-                        nonAppAccum = 0
-                    }
-                }
+
+        func appendCurrentSegment() {
+            segments.append(
+                TimelineSegment(
+                    appBundleId: current.appBundleId,
+                    appName: current.appName,
+                    captureKind: current.captureKind,
+                    audioSourceKind: current.audioSourceKind,
+                    startMs: segStart,
+                    endMs: max(lastEnd, segStart),
+                    toleratedNonAppMs: Int64((0.10 * Double(max(0, lastEnd - segStart))).rounded(.up)),
+                    actualNonAppMs: nonAppAccum
+                )
+            )
+        }
+
+        guard asc.count > 1 else {
+            appendCurrentSegment()
+            return
+        }
+
+        for index in 1..<asc.count {
+            let item = asc[index]
+            let itemKey = TimelineSegmentKey(meta: item)
+            let previous = asc[index - 1]
+            let dt = max(0, item.startedAtMs - previous.startedAtMs)
+
+            if dt > inactivityBreakMs {
+                appendCurrentSegment()
+                current = item
+                segmentKey = itemKey
+                segStart = item.startedAtMs
+                lastEnd = resolvedEndMs(for: item)
+                nonAppAccum = 0
+                continue
+            }
+
+            if itemKey == segmentKey {
+                current = item
+                lastEnd = max(lastEnd, resolvedEndMs(for: item))
+                continue
+            }
+
+            let provisional = max(1, item.startedAtMs - segStart)
+            let allowed = Int64((0.10 * Double(provisional)).rounded(.up))
+            if nonAppAccum + dt <= allowed {
+                nonAppAccum += dt
+                lastEnd = max(lastEnd, resolvedEndMs(for: item))
+            } else {
+                appendCurrentSegment()
+                current = item
+                segmentKey = itemKey
+                segStart = item.startedAtMs
+                lastEnd = resolvedEndMs(for: item)
+                nonAppAccum = 0
             }
         }
-        segments.append(TimelineSegment(appBundleId: segApp,
-                                        appName: segName,
-                                        startMs: segStart,
-                                        endMs: lastTime,
-                                        toleratedNonAppMs: Int64((0.10 * Double(lastTime - segStart)).rounded(.up)),
-                                        actualNonAppMs: nonAppAccum))
+
+        appendCurrentSegment()
     }
 
     private func rebuildAscCache() {
-        timesAsc = metas.map { $0.startedAtMs }.sorted()
+        timesAsc = metas.map(\.startedAtMs).sorted()
     }
 
     private func defaultMsPerPoint() -> Double {
         let span = max(1, Double(max(0, maxTimeMs - minTimeMs)))
-        return max(span / 5000.0, 1.0) // at least 1 ms/pt
+        return max(span / 5000.0, 1.0)
     }
 
-    func indexNearest(to timeMs: Int64) -> Int? {
+    func resolvedEndMs(for meta: SnapshotMeta) -> Int64 {
+        if let endedAtMs = meta.endedAtMs {
+            return max(meta.startedAtMs, endedAtMs)
+        }
+        if let audioDurationMs = meta.audioDurationMs {
+            return meta.startedAtMs + max(0, audioDurationMs)
+        }
+        return meta.startedAtMs
+    }
+
+    func audioMeta(overlapping timeMs: Int64) -> SnapshotMeta? {
+        metas
+            .filter { $0.captureKind == .audio }
+            .first { meta in
+                let endMs = resolvedEndMs(for: meta)
+                return timeMs >= meta.startedAtMs && timeMs <= endMs
+            }
+    }
+
+    func indexNearest(to timeMs: Int64,
+                      preferredCaptureKind: CaptureKind? = nil,
+                      visibleCaptureKinds: Set<CaptureKind>? = nil,
+                      startedAtRange: ClosedRange<Int64>? = nil) -> Int? {
         guard !metas.isEmpty else { return nil }
-        let times = timesAsc
-        if times.isEmpty { return 0 }
-        var lo = 0
-        var hi = times.count - 1
-        var mid = 0
-        while lo <= hi {
-            mid = (lo + hi) / 2
-            let t = times[mid]
-            if t == timeMs { break }
-            if t < timeMs { lo = mid + 1 } else { hi = mid - 1 }
+
+        let allowedKinds = visibleCaptureKinds?.isEmpty == false
+            ? visibleCaptureKinds!
+            : Set(CaptureKind.allCases)
+
+        var candidateIndices = metas.indices.filter { allowedKinds.contains(metas[$0].captureKind) }
+        if let startedAtRange {
+            candidateIndices = candidateIndices.filter { startedAtRange.contains(metas[$0].startedAtMs) }
         }
-        let c1 = max(0, min(times.count - 1, lo))
-        let c2 = max(0, min(times.count - 1, hi))
-        let bestAscIndex = abs(times[c1] - timeMs) <= abs(times[c2] - timeMs) ? c1 : c2
-        let targetTime = times[bestAscIndex]
-        // Convert to DESC index by matching time (multiple equal times are rare)
-        if let idx = metas.firstIndex(where: { $0.startedAtMs == targetTime }) {
-            return idx
+        if candidateIndices.isEmpty {
+            candidateIndices = Array(metas.indices)
         }
-        // Fallback linear
-        var bestIdx = 0
-        var bestDelta = Int64.max
-        for (i, m) in metas.enumerated() {
-            let d = abs(m.startedAtMs - timeMs)
-            if d < bestDelta { bestDelta = d; bestIdx = i }
+
+        if let preferredCaptureKind {
+            let preferredIndices = candidateIndices.filter { metas[$0].captureKind == preferredCaptureKind }
+            if !preferredIndices.isEmpty {
+                candidateIndices = preferredIndices
+            }
         }
-        return bestIdx
+
+        return candidateIndices.min { lhs, rhs in
+            let lhsDelta = abs(metas[lhs].startedAtMs - timeMs)
+            let rhsDelta = abs(metas[rhs].startedAtMs - timeMs)
+            if lhsDelta == rhsDelta {
+                return metas[lhs].startedAtMs > metas[rhs].startedAtMs
+            }
+            return lhsDelta < rhsDelta
+        }
     }
 
-    func jump(to timeMs: Int64) {
-        if let idx = indexNearest(to: timeMs) {
+    func jump(to timeMs: Int64,
+              preferredCaptureKind: CaptureKind? = nil,
+              visibleCaptureKinds: Set<CaptureKind>? = nil) {
+        if let idx = indexNearest(to: timeMs,
+                                  preferredCaptureKind: preferredCaptureKind,
+                                  visibleCaptureKinds: visibleCaptureKinds) {
             selectedIndex = idx
         }
     }
 
-    // Open a specific snapshot by id by loading a time window around it and selecting it.
     func openSnapshot(id: Int64, anchorStartedAtMs: Int64? = nil, spanMs: Int64 = 6 * 60 * 60 * 1000) {
-        // User-initiated navigation should pause live-follow so the view doesn't snap back.
         followLatest = false
         requestToken &+= 1
         let token = requestToken
         isLoading = true
+
         let appIds = selectedAppBundleIds.isEmpty ? nil : Array(selectedAppBundleIds)
-        DispatchQueue.global(qos: .userInitiated).async { [spanMs, appIds] in
+        let captureKinds = selectedCaptureKinds.isEmpty ? nil : Array(selectedCaptureKinds)
+        let audioSourceKinds = selectedAudioSourceKinds.isEmpty ? nil : Array(selectedAudioSourceKinds)
+
+        DispatchQueue.global(qos: .userInitiated).async { [spanMs, appIds, captureKinds, audioSourceKinds] in
             let anchorTime: Int64?
             if let anchorStartedAtMs {
                 anchorTime = anchorStartedAtMs
@@ -233,22 +288,26 @@ final class TimelineModel: ObservableObject {
 
             guard let anchorTime else {
                 DispatchQueue.main.async { [weak self] in
-                    guard let self = self, token == self.requestToken else { return }
+                    guard let self, token == self.requestToken else { return }
                     self.isLoading = false
                 }
                 return
             }
 
-            let s = max(0, anchorTime - spanMs)
-            let e = anchorTime + spanMs
-            let list = (try? DB.shared.latestMetas(limit: 5000,
-                                                   appBundleIds: appIds,
-                                                   startMs: s,
-                                                   endMs: e)) ?? []
+            let start = max(0, anchorTime - spanMs)
+            let end = anchorTime + spanMs
+            let list = (try? DB.shared.latestMetas(
+                limit: 5000,
+                appBundleIds: appIds,
+                startMs: start,
+                endMs: end,
+                captureKinds: captureKinds,
+                audioSourceKinds: audioSourceKinds
+            )) ?? []
             let sorted = list.sorted { $0.startedAtMs > $1.startedAtMs }
 
             DispatchQueue.main.async { [weak self] in
-                guard let self = self else { return }
+                guard let self else { return }
                 guard token == self.requestToken else { return }
                 self.metas = sorted
                 self.selectedIndex = self.metas.firstIndex(where: { $0.id == id }) ?? (self.metas.isEmpty ? -1 : 0)
@@ -259,8 +318,13 @@ final class TimelineModel: ObservableObject {
         }
     }
 
-    func prev() { if selectedIndex + 1 < metas.count { selectedIndex += 1 } }
-    func next() { if selectedIndex - 1 >= 0 { selectedIndex -= 1 } }
+    func prev() {
+        if selectedIndex + 1 < metas.count { selectedIndex += 1 }
+    }
+
+    func next() {
+        if selectedIndex - 1 >= 0 { selectedIndex -= 1 }
+    }
 
     func deleteSnapshot(id: Int64) {
         guard metas.contains(where: { $0.id == id }) else { return }
@@ -279,7 +343,7 @@ final class TimelineModel: ObservableObject {
             }
 
             DispatchQueue.main.async { [weak self] in
-                guard let self = self else { return }
+                guard let self else { return }
                 guard token == self.requestToken else { return }
                 self.isLoading = false
 
@@ -304,18 +368,32 @@ final class TimelineModel: ObservableObject {
         if metas.isEmpty {
             selectedIndex = -1
         } else {
-            // Keep selection at same visual position if possible
-            let newIdx = min(idx, metas.count - 1)
-            selectedIndex = newIdx
+            selectedIndex = min(idx, metas.count - 1)
         }
         rebuildAscCache()
         refreshSegments()
     }
 }
 
+private struct TimelineSegmentKey: Hashable {
+    let appBundleId: String?
+    let appName: String?
+    let captureKind: CaptureKind
+    let audioSourceKind: AudioSourceKind?
+
+    init(meta: SnapshotMeta) {
+        appBundleId = meta.appBundleId
+        appName = meta.appName
+        captureKind = meta.captureKind
+        audioSourceKind = meta.audioSourceKind
+    }
+}
+
 struct TimelineSegment: Hashable {
     let appBundleId: String?
     let appName: String?
+    let captureKind: CaptureKind
+    let audioSourceKind: AudioSourceKind?
     let startMs: Int64
     let endMs: Int64
     let toleratedNonAppMs: Int64

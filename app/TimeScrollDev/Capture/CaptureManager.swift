@@ -67,6 +67,7 @@ final class CaptureManager: NSObject {
             let stream = SCStream(filter: filter, configuration: cfg, delegate: streamDelegate)
             let output = FrameOutput(
                 onSnapshot: onSnapshot,
+                hevcStore: HEVCVideoStore(namespace: String(display.displayID)),
                 onProbeIntervalChanged: { [weak self] probeInterval in
                     self?.scheduleProbeIntervalUpdate(probeInterval, for: streamIndex)
                 }
@@ -93,11 +94,19 @@ final class CaptureManager: NSObject {
         for stream in streams {
             try? await stream.stopCapture()
         }
+        flushWriters()
         streams.removeAll()
         streamConfigurations.removeAll()
         configuredProbeIntervals.removeAll()
         outputs.removeAll()
         capturedDisplays.removeAll()
+    }
+
+    /// Best-effort fallback for process termination after normal shutdown was skipped.
+    func flushWriters() {
+        for output in outputs {
+            output.shutdown()
+        }
     }
 
     private static func probeInterval(forCaptureInterval interval: Double) -> Double {

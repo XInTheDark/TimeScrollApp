@@ -13,6 +13,7 @@ final class VaultManager: ObservableObject {
 
     private var inactivityTimer: Timer?
     private var defaultsObserver: NSObjectProtocol?
+    private var lockInProgress = false
 
     private init() {
         loadPrefs()
@@ -42,21 +43,25 @@ final class VaultManager: ObservableObject {
         queuedCount = d.integer(forKey: "vault.queuedCount")
     }
 
-    func setVaultEnabled(_ enabled: Bool) {
+    func setVaultEnabled(_ enabled: Bool) async {
+        let resumeCapture = enabled != isVaultEnabled && AppState.shared.isCapturing
+        if resumeCapture { await AppState.shared.stopCaptureIfNeeded() }
+        if enabled {
+            try? KeyStore.shared.ensureKEK()
+            try? KeyStore.shared.createAndWrapDbKeyIfMissing()
+        }
+        if enabled != isVaultEnabled {
+            await AppState.shared.pauseAudioForVaultLock()
+        }
         isVaultEnabled = enabled
         let d = UserDefaults.standard
         d.set(enabled, forKey: "settings.vaultEnabled")
+        StoragePaths.setShared(enabled, forKey: "settings.vaultEnabled")
         d.synchronize()
         if enabled {
             // Close any existing plaintext DB connection so migration can safely replace the file
             DB.shared.close()
-            // Ensure key material exists
-            try? KeyStore.shared.ensureKEK()
-            try? KeyStore.shared.createAndWrapDbKeyIfMissing()
-            // Attempt to migrate existing plaintext files to encrypted .tse in the background
-            Task.detached { [weak self] in
-                await self?.migrateFilesIfNeeded()
-            }
+            // File migration resumes after authenticated unlock.
         } else {
             // When disabling, perform reverse DB migration so plaintext DB continues to work
             if let key = try? KeyStore.shared.unwrapDbKey() {
@@ -64,8 +69,10 @@ final class VaultManager: ObservableObject {
                 SQLCipherBridge.shared.close()
                 SQLCipherBridge.shared.migrateEncryptedToPlaintextIfNeeded(withKey: key)
             }
-            lock()
+            performLock()
+            await AppState.shared.resumeAudioAfterVaultUnlockIfNeeded()
         }
+        if resumeCapture { await AppState.shared.startCaptureIfNeeded() }
     }
 
     func unlock(presentingWindow: NSWindow? = nil) async {
@@ -80,26 +87,41 @@ final class VaultManager: ObservableObject {
             SQLCipherBridge.shared.migratePlaintextIfNeeded(withKey: key)
 
             SQLCipherBridge.shared.openWithKey(key)
+            VaultFileMigration.schedule()
 
             // Notify usage tracker so it can retroactively create a pending session
             UsageTracker.shared.onVaultUnlocked()
             IngestQueue.shared.startIngestIfNeeded()
             scheduleInactivityTimer()
+            await AppState.shared.resumeAudioAfterVaultUnlockIfNeeded()
         } catch {
             fputs("[VaultManager] unlock failed: \(error.localizedDescription)\n", stderr)
             // Keep locked
         }
     }
 
-    func lock() {
+    func lock() async {
+        guard isUnlocked, !lockInProgress else { return }
+        lockInProgress = true
+        await AppState.shared.pauseAudioForVaultLock()
+        await AudioSegmentProcessor.shared.pauseForVaultLock()
+        performLock()
+        lockInProgress = false
+    }
+
+    func lockAfterCaptureStoppedForTermination() {
+        performLock()
+    }
+
+    private func performLock() {
         guard isUnlocked else { return }
+        isUnlocked = false
+        persistUnlocked(false)
+        ThumbnailCache.shared.clear()
         IngestQueue.shared.stop()
         SQLCipherBridge.shared.close()
         KeyStore.shared.forgetSession()
-        ThumbnailCache.shared.clear()
         EmbeddingANNIndexStore.shared.clearMemory()
-        isUnlocked = false
-        persistUnlocked(false)
         inactivityTimer?.invalidate()
         inactivityTimer = nil
     }
@@ -115,12 +137,14 @@ final class VaultManager: ObservableObject {
     }
 
     private func persistUnlocked(_ v: Bool) {
+        StoragePaths.setShared(UUID().uuidString, forKey: "vault.mediaGeneration")
         // Write to both standard and App Group so UI and helper processes agree
         let std = UserDefaults.standard
         std.set(v, forKey: "vault.isUnlocked")
         std.synchronize()
         StoragePaths.setShared(v, forKey: "vault.isUnlocked")
         StoragePaths.synchronizeShared()
+        DistributedNotificationCenter.default().postNotificationName(VaultMediaAccess.didChange, object: nil, userInfo: nil, deliverImmediately: true)
     }
 
     private func scheduleInactivityTimer() {
@@ -129,33 +153,7 @@ final class VaultManager: ObservableObject {
         let minutes = d.integer(forKey: "settings.autoLockInactivityMinutes")
         guard minutes > 0 else { return }
         inactivityTimer = Timer.scheduledTimer(withTimeInterval: TimeInterval(minutes * 60), repeats: false) { [weak self] _ in
-            Task { @MainActor in self?.lock() }
-        }
-    }
-}
-
-extension VaultManager {
-    private func migrateFilesIfNeeded() async {
-        // Open DB with SQLCipher if possible; otherwise normal open
-        SQLCipherBridge.shared.openWithUnwrappedKeySilently()
-        guard let rows = try? DB.shared.listPlaintextSnapshots(limit: 10000) else { return }
-        if rows.isEmpty { return }
-        for row in rows {
-            autoreleasepool {
-                do {
-                    let url = URL(fileURLWithPath: row.path)
-                    guard let data = try? Data(contentsOf: url) else { return }
-                    // Build EncodedImage approximation for header fields
-                    let fmt = url.pathExtension.lowercased()
-                    let enc = EncodedImage(data: data, format: fmt == "jpeg" ? "jpg" : fmt, width: 0, height: 0)
-                    let encURL = try FileCrypter.shared.encryptSnapshot(encoded: enc, timestampMs: row.startedAtMs)
-                    // Replace original file atomically and update DB path
-                    _ = try? FileManager.default.removeItem(at: url)
-                    try DB.shared.updateSnapshotPath(oldPath: row.path, newPath: encURL.path, bytes: Int64(data.count), format: enc.format)
-                } catch {
-                    // Skip on error
-                }
-            }
+            Task { @MainActor in await self?.lock() }
         }
     }
 }

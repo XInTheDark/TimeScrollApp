@@ -154,6 +154,7 @@ final class AXTextExtractor {
         DispatchQueue.concurrentPerform(iterations: windowTasks.count) { idx in
             let task = windowTasks[idx]
             let windowStart = DispatchTime.now().uptimeMilliseconds
+            let hardDeadline = windowStart + limits.hardTimeBudgetMs
 
             var seenText = Set<String>()
             var textBuf = String()
@@ -176,20 +177,28 @@ final class AXTextExtractor {
 
             // Also traverse focused element
             var focusedRef: CFTypeRef?
-            if AXUIElementCopyAttributeValue(task.appAX, kAXFocusedUIElementAttribute as CFString, &focusedRef) == .success,
+            if DispatchTime.now().uptimeMilliseconds < hardDeadline,
+               self.setMessagingTimeout(for: task.appAX, startTime: windowStart, limits: limits),
+               AXUIElementCopyAttributeValue(task.appAX, kAXFocusedUIElementAttribute as CFString, &focusedRef) == .success,
                let focused = focusedRef {
                 let focusedElement = focused as! AXUIElement
 
                 var focusedRoleRef: CFTypeRef?
-                _ = AXUIElementCopyAttributeValue(focusedElement, kAXRoleAttribute as CFString, &focusedRoleRef)
+                if self.setMessagingTimeout(for: focusedElement, startTime: windowStart, limits: limits) {
+                    _ = AXUIElementCopyAttributeValue(focusedElement, kAXRoleAttribute as CFString, &focusedRoleRef)
+                }
                 let focusedRole = focusedRoleRef as? String ?? ""
 
                 if debugMode {
                     print("[AX] [\(idx)] Also traversing focused element (role=\(focusedRole))")
                 }
 
-                if focusedRole == kAXTextAreaRole as String || focusedRole == kAXTextFieldRole as String {
-                    if let docValue: String = self.getAXAttr(focusedElement, kAXValueAttribute as CFString) {
+                if DispatchTime.now().uptimeMilliseconds < hardDeadline,
+                   focusedRole == kAXTextAreaRole as String || focusedRole == kAXTextFieldRole as String {
+                    if let docValue: String = self.getAXAttr(focusedElement,
+                                                             kAXValueAttribute as CFString,
+                                                             startTime: windowStart,
+                                                             limits: limits) {
                         if !docValue.isEmpty && docValue.count > 10 {
                             if debugMode {
                                 print("[AX] [\(idx)]   -> document value: \(docValue.count) chars")
@@ -199,11 +208,13 @@ final class AXTextExtractor {
                     }
                 }
 
-                self.traverse(focusedElement,
-                              depth: 0,
-                              limits: limits,
-                              startTime: windowStart,
-                              onText: addText)
+                if DispatchTime.now().uptimeMilliseconds < hardDeadline {
+                    self.traverse(focusedElement,
+                                  depth: 0,
+                                  limits: limits,
+                                  startTime: windowStart,
+                                  onText: addText)
+                }
             }
 
             // Truncate middle if exceeds limit
@@ -252,10 +263,12 @@ final class AXTextExtractor {
 
         // Early exit if approaching time budget
         let elapsed = DispatchTime.now().uptimeMilliseconds - startTime
+        if elapsed > limits.hardTimeBudgetMs { return }
         if elapsed > limits.softTimeBudgetMs { return }
 
         // Get role
         var roleRef: CFTypeRef?
+        guard setMessagingTimeout(for: element, startTime: startTime, limits: limits) else { return }
         _ = AXUIElementCopyAttributeValue(element, kAXRoleAttribute as CFString, &roleRef)
         let role = roleRef as? String ?? ""
 
@@ -265,7 +278,9 @@ final class AXTextExtractor {
         // Skip secure text fields by subrole
         if role == kAXTextFieldRole as String || role == kAXTextAreaRole as String {
             var subroleRef: CFTypeRef?
-            _ = AXUIElementCopyAttributeValue(element, kAXSubroleAttribute as CFString, &subroleRef)
+            if setMessagingTimeout(for: element, startTime: startTime, limits: limits) {
+                _ = AXUIElementCopyAttributeValue(element, kAXSubroleAttribute as CFString, &subroleRef)
+            }
             if let sr = subroleRef as? String, sr == "AXSecureTextField" {
                 return
             }
@@ -282,7 +297,10 @@ final class AXTextExtractor {
         }
 
         // 1. AXValue - primary text content (text fields, static text, web content, etc.)
-        if let v: String = getAXAttr(element, kAXValueAttribute as CFString) {
+        if let v: String = getAXAttr(element,
+                                     kAXValueAttribute as CFString,
+                                     startTime: startTime,
+                                     limits: limits) {
             if !v.isEmpty && !isLikelyMask(v) && v.count > 1 {
                 if shouldLog {
                     print("[AX]   -> value: \(v.prefix(100))")
@@ -294,7 +312,10 @@ final class AXTextExtractor {
 
         // 2. AXTitle - titles and labels (buttons, windows, links, headings)
         if !foundText {
-            if let t: String = getAXAttr(element, kAXTitleAttribute as CFString) {
+            if let t: String = getAXAttr(element,
+                                         kAXTitleAttribute as CFString,
+                                         startTime: startTime,
+                                         limits: limits) {
                 if !t.isEmpty && t.count > 1 {
                     if shouldLog {
                         print("[AX]   -> title: \(t.prefix(100))")
@@ -307,7 +328,10 @@ final class AXTextExtractor {
 
         // 3. AXDescription - accessible descriptions (for icons, images with alt text)
         if !foundText {
-            if let d: String = getAXAttr(element, kAXDescriptionAttribute as CFString) {
+            if let d: String = getAXAttr(element,
+                                         kAXDescriptionAttribute as CFString,
+                                         startTime: startTime,
+                                         limits: limits) {
                 if !d.isEmpty && !isLikelyMask(d) && d.count > 2 {
                     if shouldLog {
                         print("[AX]   -> desc: \(d.prefix(100))")
@@ -319,7 +343,8 @@ final class AXTextExtractor {
 
         // Recurse children with limit to prevent runaway in deeply nested web content
         var childrenRef: CFTypeRef?
-        if AXUIElementCopyAttributeValue(element, kAXChildrenAttribute as CFString, &childrenRef) == .success,
+        if setMessagingTimeout(for: element, startTime: startTime, limits: limits),
+           AXUIElementCopyAttributeValue(element, kAXChildrenAttribute as CFString, &childrenRef) == .success,
            let children = childrenRef as? [AXUIElement] {
             if shouldLog {
                 print("[AX] depth=\(depth) role=\(role) has \(children.count) children")
@@ -334,12 +359,26 @@ final class AXTextExtractor {
         }
     }
 
-    private func getAXAttr<T>(_ element: AXUIElement, _ attr: CFString) -> T? {
+    private func getAXAttr<T>(_ element: AXUIElement,
+                              _ attr: CFString,
+                              startTime: Int,
+                              limits: Limits) -> T? {
+        guard setMessagingTimeout(for: element, startTime: startTime, limits: limits) else { return nil }
         var v: AnyObject?
         if AXUIElementCopyAttributeValue(element, attr, &v) == .success {
             return v as? T
         }
         return nil
+    }
+
+    private func setMessagingTimeout(for element: AXUIElement,
+                                     startTime: Int,
+                                     limits: Limits) -> Bool {
+        let elapsed = DispatchTime.now().uptimeMilliseconds - startTime
+        let remaining = limits.hardTimeBudgetMs - elapsed
+        guard remaining > 0 else { return false }
+        _ = AXUIElementSetMessagingTimeout(element, Float(remaining) / 1_000)
+        return true
     }
 
     private func isLikelyMask(_ s: String) -> Bool {

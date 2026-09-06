@@ -1,5 +1,6 @@
 import Foundation
 import AppKit
+import Combine
 #if canImport(Sparkle)
 import Sparkle
 #endif
@@ -29,7 +30,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     var onboardingWC: NSWindowController?
     var updateNotiTokens: [NSObjectProtocol] = []
     var powerNotiTokens: [NSObjectProtocol] = []
+    var captureStateCancellables: Set<AnyCancellable> = []
     var lastWakeRestartAt: TimeInterval = 0
+    var terminationPreparationStarted = false
     #if canImport(Sparkle)
     var updaterController: SPUStandardUpdaterController!
     var updatesDelegate: UpdatesDelegate!
@@ -43,6 +46,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Seed App Group defaults so the MCP helper can see storage bookmarks/paths immediately
         StoragePaths.syncSharedDefaultsFromStandard()
         setupStatusItem()
+        installStatusItemObservers()
 
         // Sparkle updater (if available)
         #if canImport(Sparkle)
@@ -75,8 +79,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self?.installUpdateNotificationObservers()
             self?.installSleepWakeObservers()
             StorageMaintenanceManager.shared.start()
-            // Show onboarding if permissions are missing; otherwise honor auto-start
-            if !Permissions.isScreenRecordingGranted() {
+            // Show onboarding when the currently configured capture/text modes still need permissions.
+            let captureSelection = CaptureModeSelection(settings: SettingsStore.shared)
+            let hasRequiredPermissions = Permissions.hasRequiredCapturePermissions(
+                for: captureSelection,
+                textProcessingMode: SettingsStore.shared.textProcessingMode
+            )
+            if !hasRequiredPermissions {
                 self?.showOnboardingWindow()
             } else {
                 self?.applyAutoStartCaptureIfNeeded()
@@ -84,6 +93,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // Prompt unlock if vault is enabled
             if SettingsStore.shared.vaultEnabled {
                 Task { await VaultManager.shared.unlock(presentingWindow: NSApp.keyWindow) }
+            } else {
+                Task { await AudioSegmentProcessor.shared.resumePendingWork() }
             }
         }
     }
@@ -93,15 +104,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         updateNotiTokens.removeAll()
         for token in powerNotiTokens { NotificationCenter.default.removeObserver(token) }
         powerNotiTokens.removeAll()
+        captureStateCancellables.removeAll()
+    }
+
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        guard !terminationPreparationStarted else { return .terminateLater }
+        terminationPreparationStarted = true
+        Task { @MainActor in
+            await AppState.shared.shutdown()
+            if SettingsStore.shared.vaultEnabled {
+                VaultManager.shared.lockAfterCaptureStoppedForTermination()
+            }
+            sender.reply(toApplicationShouldTerminate: true)
+        }
+        return .terminateLater
     }
 
     func applicationWillTerminate(_ notification: Notification) {
-        if SettingsStore.shared.vaultEnabled {
-            VaultManager.shared.lock()
-        }
         SettingsStore.shared.flush()
         // Ensure any open HEVC writers are flushed (best-effort with timeout)
-        HEVCVideoStore.shared.shutdown(timeout: 2.0)
+        AppState.shared.captureManager.flushWriters()
         StorageMaintenanceManager.shared.stop()
         UsageTracker.shared.appWillTerminate()
         UserDefaults.standard.synchronize()

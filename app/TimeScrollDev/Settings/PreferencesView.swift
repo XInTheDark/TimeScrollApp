@@ -14,6 +14,8 @@ struct PreferencesView: View {
                 .tabItem { Label("Security", systemImage: "lock") }
             SearchPane(settings: settings)
                 .tabItem { Label("Search", systemImage: "magnifyingglass") }
+            AudioPane(settings: settings)
+                .tabItem { Label("Audio", systemImage: "waveform") }
             MCPSettingsPane()
                 .tabItem { Label("MCP", systemImage: "bolt.horizontal") }
             StoragePane(settings: settings)

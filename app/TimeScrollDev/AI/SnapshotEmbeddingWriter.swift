@@ -17,23 +17,23 @@ final class SnapshotEmbeddingWriter {
         guard aiEnabled else { return }
 
         let service = EmbeddingService.shared
-        service.reloadFromSettings()
+        service.reloadFromSettings(onlyIfSelectionChanged: true)
         guard service.dim > 0 else { return }
 
-        let vector = service.embedDocument(pixelBuffer: pixelBuffer, extractedText: extractedText)
-        guard !vector.isEmpty else { return }
+        guard let embedding = service.embedDocumentWithIdentity(pixelBuffer: pixelBuffer, extractedText: extractedText) else { return }
+        let vector = embedding.vector
 
         do {
             let updatedAtMs = try DB.shared.upsertEmbedding(
                 snapshotId: snapshotId,
                 dim: vector.count,
                 vec: vector,
-                provider: service.providerID,
-                model: service.modelID
+                provider: embedding.providerID,
+                model: embedding.modelID
             )
             if let meta = try? DB.shared.snapshotMetaById(snapshotId) {
-                let identity = VectorSearchIdentity(provider: service.providerID,
-                                                    model: service.modelID,
+                let identity = VectorSearchIdentity(provider: embedding.providerID,
+                                                    model: embedding.modelID,
                                                     dim: vector.count,
                                                     dbPath: DB.shared.dbURL?.path ?? StoragePaths.dbURL().path)
                 EmbeddingANNIndexStore.shared.recordUpsert(identity: identity,
@@ -45,11 +45,11 @@ final class SnapshotEmbeddingWriter {
             }
             if defaults.bool(forKey: "settings.debugMode") {
                 let head = vector.prefix(8).map { String(format: "%.4f", $0) }.joined(separator: ", ")
-                print("[AI][Store] snapshotId=\(snapshotId) provider=\(service.providerID) model=\(service.modelID) dim=\(vector.count) head=[\(head)]")
+                print("[AI][Store] snapshotId=\(snapshotId) provider=\(embedding.providerID) model=\(embedding.modelID) dim=\(vector.count) head=[\(head)]")
             }
         } catch {
             if defaults.bool(forKey: "settings.debugMode") {
-                print("[AI][Store][Error] snapshotId=\(snapshotId) provider=\(service.providerID) model=\(service.modelID) err=\(error.localizedDescription)")
+                print("[AI][Store][Error] snapshotId=\(snapshotId) provider=\(embedding.providerID) model=\(embedding.modelID) err=\(error.localizedDescription)")
             }
         }
     }
@@ -81,7 +81,7 @@ final class SnapshotEmbeddingWriter {
         for (index, row) in rows.enumerated() {
             autoreleasepool {
                 let extractedText = try? DB.shared.textContent(snapshotId: row.id)
-                if service.supportsImageDocuments {
+                if service.supportsImageDocuments, row.captureKind == .screen {
                     if let pixelBuffer = SnapshotImageLoader.loadPixelBuffer(for: row) {
                         let vector = service.embedDocument(pixelBuffer: pixelBuffer, extractedText: extractedText ?? nil)
                         if !vector.isEmpty {

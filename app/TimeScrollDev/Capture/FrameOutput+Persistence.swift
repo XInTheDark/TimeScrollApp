@@ -35,14 +35,16 @@ extension FrameOutput {
         appName: String?
     ) throws -> PersistOutcome {
         let unlocked = UserDefaults.standard.bool(forKey: "vault.isUnlocked")
+        if vaultOn && !unlocked && !allowWhileLocked {
+            return .skippedWhileLocked
+        }
         switch fmt {
         case .hevc:
             let width = CVPixelBufferGetWidth(pixelBuffer)
             let height = CVPixelBufferGetHeight(pixelBuffer)
             if vaultOn && !unlocked {
-                guard allowWhileLocked else { return .skippedWhileLocked }
-                HEVCVideoStore.shared.append(pixelBuffer: pixelBuffer, timestampMs: tsMs, encrypt: true)
-                let targetURL = HEVCVideoStore.shared.urlFor(timestampMs: tsMs, encrypt: true)
+                hevcStore.append(pixelBuffer: pixelBuffer, timestampMs: tsMs, encrypt: true)
+                let targetURL = hevcStore.urlFor(timestampMs: tsMs, encrypt: true)
                 let bytes = (try? targetURL.resourceValues(forKeys: [.fileSizeKey]).fileSize).map { Int64($0) } ?? 0
                 let procRaw = UserDefaults.standard.string(forKey: "settings.textProcessingMode") ?? SettingsStore.defaultTextProcessingMode.rawValue
                 let proc = SettingsStore.TextProcessingMode(rawValue: procRaw) ?? SettingsStore.defaultTextProcessingMode
@@ -68,8 +70,8 @@ extension FrameOutput {
                 )
                 return .queuedWhileLocked
             } else {
-                HEVCVideoStore.shared.append(pixelBuffer: pixelBuffer, timestampMs: tsMs, encrypt: vaultOn)
-                let url = HEVCVideoStore.shared.urlFor(timestampMs: tsMs, encrypt: vaultOn)
+                hevcStore.append(pixelBuffer: pixelBuffer, timestampMs: tsMs, encrypt: vaultOn)
+                let url = hevcStore.urlFor(timestampMs: tsMs, encrypt: vaultOn)
                 let bytes = (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize).map { Int64($0) } ?? 0
                 let thumb = makePosterThumbIfPossible(pixelBuffer: pixelBuffer, tsMs: tsMs, maxEdge: maxEdge, quality: quality, encrypt: vaultOn)
                 return .saved(url: url, bytes: bytes, width: width, height: height, thumbPath: thumb)
@@ -79,7 +81,6 @@ extension FrameOutput {
             let encoded = try encoder.encode(pixelBuffer: pixelBuffer, format: fmt, maxLongEdge: maxEdge, quality: quality)
 
             if vaultOn && !unlocked {
-                guard allowWhileLocked else { return .skippedWhileLocked }
                 let encURL = try FileCrypter.shared.encryptSnapshot(encoded: encoded, timestampMs: tsMs)
                 let procRaw = UserDefaults.standard.string(forKey: "settings.textProcessingMode") ?? SettingsStore.defaultTextProcessingMode.rawValue
                 let proc = SettingsStore.TextProcessingMode(rawValue: procRaw) ?? SettingsStore.defaultTextProcessingMode
@@ -123,7 +124,8 @@ extension FrameOutput {
         // Skip poster work during thermal backoff window
         if Date().timeIntervalSince1970 < suppressPostersUntil { return nil }
         do {
-            let poster = try encoder.encode(pixelBuffer: pixelBuffer, format: .heic, maxLongEdge: maxEdge, quality: quality)
+            let posterEdge = maxEdge > 0 ? min(maxEdge, 320) : 320
+            let poster = try encoder.encode(pixelBuffer: pixelBuffer, format: .heic, maxLongEdge: posterEdge, quality: quality)
             if encrypt {
                 let encURL = try FileCrypter.shared.encryptSnapshot(encoded: poster, timestampMs: tsMs)
                 return encURL.path

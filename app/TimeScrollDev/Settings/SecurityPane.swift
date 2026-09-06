@@ -37,9 +37,12 @@ struct SecurityPane: View {
                     }
                     // Fallback
                     settings.vaultEnabled = newVal
-                    Task { @MainActor in VaultManager.shared.setVaultEnabled(newVal) }
+                    Task { @MainActor in await VaultManager.shared.setVaultEnabled(newVal) }
                 }))
-                Toggle("Allow capture while locked", isOn: $settings.captureWhileLocked)
+                Toggle("Allow screen capture while locked", isOn: $settings.captureWhileLocked)
+                Text("Audio capture pauses while the vault is locked and resumes after unlock.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
             }
             Section(header: Text("Auto-lock")) {
                 Toggle("Lock on sleep/wake", isOn: $settings.autoLockOnSleep)
@@ -55,7 +58,7 @@ struct SecurityPane: View {
                 HStack(spacing: 12) {
                     Button("Unlock…") { Task { await vault.unlock(presentingWindow: NSApp.keyWindow) } }
                         .disabled(!settings.vaultEnabled || vault.isUnlocked)
-                    Button("Lock") { vault.lock() }
+                    Button("Lock") { Task { await vault.lock() } }
                         .disabled(!settings.vaultEnabled || !vault.isUnlocked)
                 }
                 if settings.vaultEnabled && vault.queuedCount > 0 {
@@ -86,7 +89,7 @@ struct SecurityPane: View {
             }, onContinue: {
                 // Turn off encryption and lock the vault immediately
                 settings.vaultEnabled = false
-                Task { @MainActor in VaultManager.shared.setVaultEnabled(false) }
+                Task { @MainActor in await VaultManager.shared.setVaultEnabled(false) }
                 pendingDisableVault = false
                 showVaultDisableSheet = false
             })
@@ -107,7 +110,7 @@ struct SecurityPane: View {
                 },
                 onContinue: {
                     settings.vaultEnabled = true
-                    Task { @MainActor in VaultManager.shared.setVaultEnabled(true) }
+                    Task { @MainActor in await VaultManager.shared.setVaultEnabled(true) }
                     pendingEnableVault = false
                     showVaultEntitlementWarning = false
                 }

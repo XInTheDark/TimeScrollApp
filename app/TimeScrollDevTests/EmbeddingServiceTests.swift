@@ -1,3 +1,4 @@
+import Foundation
 import Testing
 @testable import TimeScroll
 
@@ -6,7 +7,7 @@ struct EmbeddingServiceTests {
         let json = """
         [ { "name": "foo" }, { "name": "snowflake-arctic-embed:33m" }, { "id": "bar-id" } ]
         """.data(using: .utf8)!
-        let parsed = EmbeddingService.OllamaEmbeddingProvider.parseModelsFromData(json)
+        let parsed = OllamaEmbeddingProvider.parseModelsFromData(json)
         #expect(parsed.contains("foo"))
         #expect(parsed.contains("snowflake-arctic-embed:33m"))
         #expect(parsed.contains("bar-id"))
@@ -16,7 +17,7 @@ struct EmbeddingServiceTests {
         let json = """
         { "models": [ {"name": "alpha"}, {"name":"beta-embed"} ] }
         """.data(using: .utf8)!
-        let parsed = EmbeddingService.OllamaEmbeddingProvider.parseModelsFromData(json)
+        let parsed = OllamaEmbeddingProvider.parseModelsFromData(json)
         #expect(parsed.contains("alpha"))
         #expect(parsed.contains("beta-embed"))
     }
@@ -41,7 +42,7 @@ struct EmbeddingServiceTests {
             }
         }
         """.data(using: .utf8)!
-        let length = EmbeddingService.OllamaEmbeddingProvider.parseEmbeddingLength(from: json)
+        let length = OllamaEmbeddingProvider.parseEmbeddingLength(from: json)
         #expect(length == 384)
     }
 
@@ -54,7 +55,7 @@ struct EmbeddingServiceTests {
         for c in chunks { #expect(c.count <= 2000) }
 
         // Ensure sampling selects middle portion when the source produces many windows
-        let many = String(repeating: "x", count: 7000)
+        let many = String(repeating: "x", count: 11_000)
         let windows = EmbeddingService.chunkText(many, maxInput: 2000, overlapPct: 0.10, maxChunks: 5)
         #expect(windows.count == 5)
     }
@@ -75,30 +76,30 @@ struct EmbeddingServiceTests {
 
     @Test func ollama_provider_persists_dims_between_sessions() throws {
         let defaults = UserDefaults.standard
-        EmbeddingService.OllamaEmbeddingProvider.clearCachedDimsForTesting()
+        OllamaEmbeddingProvider.clearCachedDimsForTesting()
         defaults.removeObject(forKey: "embedding.ollamaDims")
 
         var fetchCount = 0
-        let fetcher: EmbeddingService.OllamaEmbeddingProvider.MetadataFetcher = { _, _ in
+        let fetcher: OllamaEmbeddingProvider.MetadataFetcher = { _, _ in
             fetchCount += 1
             return 768
         }
 
-        let first = EmbeddingService.OllamaEmbeddingProvider(model: "unit-model", baseURL: "http://unit.test", metadataFetcher: fetcher)
+        let first = OllamaEmbeddingProvider(model: "unit-model", baseURL: "http://unit.test", metadataFetcher: fetcher)
         #expect(first.dim == 768)
         #expect(fetchCount == 1)
 
-        EmbeddingService.OllamaEmbeddingProvider.clearCachedDimsForTesting(preserveDefaults: true)
+        OllamaEmbeddingProvider.clearCachedDimsForTesting(preserveDefaults: true)
         fetchCount = 0
 
-        let cached = EmbeddingService.OllamaEmbeddingProvider(model: "unit-model", baseURL: "http://unit.test", metadataFetcher: { model, baseURL in
+        let cached = OllamaEmbeddingProvider(model: "unit-model", baseURL: "http://unit.test", metadataFetcher: { _, _ in
             fetchCount += 1
             return nil
         })
         #expect(cached.dim == 768)
         #expect(fetchCount == 0)
 
-        EmbeddingService.OllamaEmbeddingProvider.clearCachedDimsForTesting()
+        OllamaEmbeddingProvider.clearCachedDimsForTesting()
         defaults.removeObject(forKey: "embedding.ollamaDims")
     }
 }

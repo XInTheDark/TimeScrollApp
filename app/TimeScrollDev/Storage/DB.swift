@@ -13,20 +13,30 @@ let SQLITE_TRANSIENT = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
 struct SnapshotMeta: Identifiable, Hashable {
     let id: Int64
     let startedAtMs: Int64
+    let endedAtMs: Int64?
     let path: String
     let appBundleId: String?
     let appName: String?
     let thumbPath: String?
+    let captureKind: CaptureKind
+    let audioSourceKind: AudioSourceKind?
+    let audioAssetId: Int64?
+    let audioDurationMs: Int64?
 }
 
 // Search result row including raw text content for snippet building in UI
 struct SearchResult: Identifiable, Hashable {
     let id: Int64
     let startedAtMs: Int64
+    let endedAtMs: Int64?
     let path: String
     let appBundleId: String?
     let appName: String?
     let thumbPath: String?
+    let captureKind: CaptureKind
+    let audioSourceKind: AudioSourceKind?
+    let audioAssetId: Int64?
+    let audioDurationMs: Int64?
     let content: String
 }
 
@@ -45,6 +55,30 @@ final class DB {
             return try block()
         }
         return try queue.sync { try block() }
+    }
+
+    func withWriteSavepoint<T>(_ block: () throws -> T) throws -> T {
+        try onQueueSync {
+            try openIfNeeded()
+            guard let db else { throw NSError(domain: "TS.DB", code: 3) }
+            func execute(_ sql: String) throws {
+                let result = sqlite3_exec(db, sql, nil, nil, nil)
+                guard result == SQLITE_OK else {
+                    throw NSError(domain: "TS.DB", code: Int(result), userInfo: [NSLocalizedDescriptionKey: String(cString: sqlite3_errmsg(db))])
+                }
+            }
+            // SQLite stacks identically named savepoints, so nested text writes remain atomic.
+            try execute("SAVEPOINT snapshot_write;")
+            do {
+                let value = try block()
+                try execute("RELEASE SAVEPOINT snapshot_write;")
+                return value
+            } catch {
+                try? execute("ROLLBACK TO SAVEPOINT snapshot_write;")
+                try? execute("RELEASE SAVEPOINT snapshot_write;")
+                throw error
+            }
+        }
     }
 
     struct OCRBoxRow {
@@ -173,11 +207,32 @@ final class DB {
         CREATE TABLE IF NOT EXISTS ts_snapshot (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             started_at_ms INTEGER NOT NULL,
+            ended_at_ms INTEGER,
             path TEXT NOT NULL,
             app_bundle_id TEXT,
             app_name TEXT,
             text_ref_id INTEGER,
-            text_store_id INTEGER
+            text_store_id INTEGER,
+            capture_kind TEXT NOT NULL DEFAULT 'screen',
+            source_kind TEXT,
+            audio_asset_id INTEGER,
+            compaction_profile TEXT
+        );
+        CREATE TABLE IF NOT EXISTS ts_audio_asset (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            started_at_ms INTEGER NOT NULL,
+            ended_at_ms INTEGER NOT NULL,
+            path TEXT NOT NULL,
+            source_kind TEXT NOT NULL,
+            bytes INTEGER,
+            duration_ms INTEGER,
+            mime TEXT NOT NULL DEFAULT 'audio/mp4',
+            sample_rate INTEGER,
+            channels INTEGER,
+            transcript_json BLOB,
+            transcription_status TEXT NOT NULL DEFAULT 'completed',
+            transcription_error TEXT,
+            transcription_model_id TEXT
         );
         -- L2-normalized sentence embeddings for semantic search
         CREATE TABLE IF NOT EXISTS ts_embedding (
@@ -218,8 +273,14 @@ final class DB {
         // Indices for faster joins and scans
         _ = sqlite3_exec(db, "CREATE INDEX IF NOT EXISTS idx_ts_snapshot_started_at_ms ON ts_snapshot(started_at_ms DESC);", nil, nil, nil)
         _ = sqlite3_exec(db, "CREATE INDEX IF NOT EXISTS idx_ts_snapshot_app_bundle_started_at_ms ON ts_snapshot(app_bundle_id, started_at_ms DESC);", nil, nil, nil)
+        _ = sqlite3_exec(db, "CREATE INDEX IF NOT EXISTS idx_ts_snapshot_capture_kind_started_at_ms ON ts_snapshot(capture_kind, started_at_ms DESC);", nil, nil, nil)
+        _ = sqlite3_exec(db, "CREATE INDEX IF NOT EXISTS idx_ts_snapshot_source_kind_started_at_ms ON ts_snapshot(source_kind, started_at_ms DESC);", nil, nil, nil)
+        _ = sqlite3_exec(db, "CREATE INDEX IF NOT EXISTS idx_ts_snapshot_audio_asset_id ON ts_snapshot(audio_asset_id);", nil, nil, nil)
         _ = sqlite3_exec(db, "CREATE INDEX IF NOT EXISTS idx_ts_snapshot_text_store_id ON ts_snapshot(text_store_id);", nil, nil, nil)
         _ = sqlite3_exec(db, "CREATE INDEX IF NOT EXISTS idx_ts_ocr_boxes_snapshot_id ON ts_ocr_boxes(snapshot_id);", nil, nil, nil)
+        _ = sqlite3_exec(db, "CREATE INDEX IF NOT EXISTS idx_ts_audio_asset_started_at_ms ON ts_audio_asset(started_at_ms DESC);", nil, nil, nil)
+        _ = sqlite3_exec(db, "CREATE INDEX IF NOT EXISTS idx_ts_audio_asset_source_kind ON ts_audio_asset(source_kind);", nil, nil, nil)
+        _ = sqlite3_exec(db, "CREATE INDEX IF NOT EXISTS idx_ts_audio_asset_transcription_status ON ts_audio_asset(transcription_status);", nil, nil, nil)
         _ = sqlite3_exec(db, "CREATE UNIQUE INDEX IF NOT EXISTS idx_ts_embedding_identity ON ts_embedding(snapshot_id, provider, model);", nil, nil, nil)
         _ = sqlite3_exec(db, "CREATE INDEX IF NOT EXISTS idx_ts_embedding_dim ON ts_embedding(dim);", nil, nil, nil)
         _ = sqlite3_exec(db, "CREATE INDEX IF NOT EXISTS idx_ts_embedding_model ON ts_embedding(model);", nil, nil, nil)
@@ -266,6 +327,9 @@ final class DB {
     private func migrateIfNeeded() throws {
         guard let db = db else { return }
         if tableExists("ts_snapshot") {
+            if !columnExists("ts_snapshot", column: "ended_at_ms") {
+                _ = sqlite3_exec(db, "ALTER TABLE ts_snapshot ADD COLUMN ended_at_ms INTEGER;", nil, nil, nil)
+            }
             if !columnExists("ts_snapshot", column: "app_bundle_id") {
                 _ = sqlite3_exec(db, "ALTER TABLE ts_snapshot ADD COLUMN app_bundle_id TEXT;", nil, nil, nil)
             }
@@ -297,6 +361,48 @@ final class DB {
             if !columnExists("ts_snapshot", column: "text_store_id") {
                 _ = sqlite3_exec(db, "ALTER TABLE ts_snapshot ADD COLUMN text_store_id INTEGER;", nil, nil, nil)
             }
+            if !columnExists("ts_snapshot", column: "capture_kind") {
+                _ = sqlite3_exec(db, "ALTER TABLE ts_snapshot ADD COLUMN capture_kind TEXT NOT NULL DEFAULT 'screen';", nil, nil, nil)
+            }
+            if !columnExists("ts_snapshot", column: "source_kind") {
+                _ = sqlite3_exec(db, "ALTER TABLE ts_snapshot ADD COLUMN source_kind TEXT;", nil, nil, nil)
+            }
+            if !columnExists("ts_snapshot", column: "audio_asset_id") {
+                _ = sqlite3_exec(db, "ALTER TABLE ts_snapshot ADD COLUMN audio_asset_id INTEGER;", nil, nil, nil)
+            }
+            if !columnExists("ts_snapshot", column: "compaction_profile") {
+                _ = sqlite3_exec(db, "ALTER TABLE ts_snapshot ADD COLUMN compaction_profile TEXT;", nil, nil, nil)
+            }
+        }
+        if !tableExists("ts_audio_asset") {
+            let sql = """
+            CREATE TABLE ts_audio_asset (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                started_at_ms INTEGER NOT NULL,
+                ended_at_ms INTEGER NOT NULL,
+                path TEXT NOT NULL,
+                source_kind TEXT NOT NULL,
+                bytes INTEGER,
+                duration_ms INTEGER,
+                mime TEXT NOT NULL DEFAULT 'audio/mp4',
+                sample_rate INTEGER,
+                channels INTEGER,
+                transcript_json BLOB,
+                transcription_status TEXT NOT NULL DEFAULT 'completed',
+                transcription_error TEXT,
+                transcription_model_id TEXT
+            );
+            """
+            _ = sqlite3_exec(db, sql, nil, nil, nil)
+        }
+        if tableExists("ts_audio_asset") && !columnExists("ts_audio_asset", column: "transcription_status") {
+            _ = sqlite3_exec(db, "ALTER TABLE ts_audio_asset ADD COLUMN transcription_status TEXT NOT NULL DEFAULT 'completed';", nil, nil, nil)
+        }
+        if tableExists("ts_audio_asset") && !columnExists("ts_audio_asset", column: "transcription_error") {
+            _ = sqlite3_exec(db, "ALTER TABLE ts_audio_asset ADD COLUMN transcription_error TEXT;", nil, nil, nil)
+        }
+        if tableExists("ts_audio_asset") && !columnExists("ts_audio_asset", column: "transcription_model_id") {
+            _ = sqlite3_exec(db, "ALTER TABLE ts_audio_asset ADD COLUMN transcription_model_id TEXT;", nil, nil, nil)
         }
         if !tableExists("ts_ocr_boxes") {
             let sql = "CREATE TABLE ts_ocr_boxes (snapshot_id INTEGER NOT NULL, text TEXT NOT NULL, x REAL NOT NULL, y REAL NOT NULL, w REAL NOT NULL, h REAL NOT NULL);"
@@ -304,6 +410,12 @@ final class DB {
         }
         _ = sqlite3_exec(db, "CREATE INDEX IF NOT EXISTS idx_ts_ocr_boxes_snapshot_id ON ts_ocr_boxes(snapshot_id);", nil, nil, nil)
         _ = sqlite3_exec(db, "CREATE INDEX IF NOT EXISTS idx_ts_snapshot_app_bundle_started_at_ms ON ts_snapshot(app_bundle_id, started_at_ms DESC);", nil, nil, nil)
+        _ = sqlite3_exec(db, "CREATE INDEX IF NOT EXISTS idx_ts_snapshot_capture_kind_started_at_ms ON ts_snapshot(capture_kind, started_at_ms DESC);", nil, nil, nil)
+        _ = sqlite3_exec(db, "CREATE INDEX IF NOT EXISTS idx_ts_snapshot_source_kind_started_at_ms ON ts_snapshot(source_kind, started_at_ms DESC);", nil, nil, nil)
+        _ = sqlite3_exec(db, "CREATE INDEX IF NOT EXISTS idx_ts_snapshot_audio_asset_id ON ts_snapshot(audio_asset_id);", nil, nil, nil)
+        _ = sqlite3_exec(db, "CREATE INDEX IF NOT EXISTS idx_ts_audio_asset_started_at_ms ON ts_audio_asset(started_at_ms DESC);", nil, nil, nil)
+        _ = sqlite3_exec(db, "CREATE INDEX IF NOT EXISTS idx_ts_audio_asset_source_kind ON ts_audio_asset(source_kind);", nil, nil, nil)
+        _ = sqlite3_exec(db, "CREATE INDEX IF NOT EXISTS idx_ts_audio_asset_transcription_status ON ts_audio_asset(transcription_status);", nil, nil, nil)
         if !tableExists("ts_text") {
             let fts = "CREATE VIRTUAL TABLE ts_text USING fts5(content, tokenize='unicode61 remove_diacritics 2');"
             _ = sqlite3_exec(db, fts, nil, nil, nil)

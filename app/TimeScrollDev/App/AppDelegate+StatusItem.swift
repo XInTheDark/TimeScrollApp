@@ -1,5 +1,6 @@
 import Foundation
 import AppKit
+import Combine
 
 extension AppDelegate {
     // MARK: - Status Item
@@ -23,6 +24,36 @@ extension AppDelegate {
         }
         item.menu = buildMenu()
         statusItem = item
+    }
+
+    func installStatusItemObservers() {
+        guard captureStateCancellables.isEmpty else { return }
+
+        AppState.shared.$isCapturing
+            .removeDuplicates()
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _ in
+                self?.syncStatusItemCaptureState()
+            }
+            .store(in: &captureStateCancellables)
+
+        AppState.shared.$isCaptureStarting
+            .removeDuplicates()
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _ in
+                self?.refreshMenu()
+            }
+            .store(in: &captureStateCancellables)
+
+        Publishers.Merge3(AppState.shared.$screenCaptureStatus,
+                          AppState.shared.$microphoneCaptureStatus,
+                          AppState.shared.$systemAudioCaptureStatus)
+            .removeDuplicates()
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _ in
+                self?.refreshMenu()
+            }
+            .store(in: &captureStateCancellables)
     }
 
     func buildMenu() -> NSMenu {
@@ -90,13 +121,16 @@ extension AppDelegate {
     }
 
     @objc func onMenuLockNow() {
-        VaultManager.shared.lock()
+        Task {
+            await VaultManager.shared.lock()
+            refreshMenu()
+        }
     }
 
     @objc func toggleCapture() {
         Task { @MainActor in
             let state = AppState.shared
-            if state.isCapturing {
+            if state.isCapturing || state.isCaptureStarting {
                 await state.stopCaptureIfNeeded()
             } else {
                 await state.startCaptureIfNeeded()
@@ -115,30 +149,57 @@ extension AppDelegate {
     }
 
     func captureStatusText() -> String {
-        let on = AppState.shared.isCapturing
-        return on ? "Capture: On" : "Capture: Off"
+        let state = AppState.shared
+        if state.isCaptureStarting { return "Capture: Starting…" }
+        let hasSourceError = state.screenCaptureStatus.errorMessage != nil
+            || state.microphoneCaptureStatus.errorMessage != nil
+            || state.systemAudioCaptureStatus.errorMessage != nil
+        guard state.isCapturing else {
+            return hasSourceError ? "Capture: Off — source issue" : "Capture: Off"
+        }
+        if state.microphoneCaptureStatus == .pausedForVault
+            || state.systemAudioCaptureStatus == .pausedForVault {
+            return "Capture: On — audio paused"
+        }
+        if hasSourceError {
+            return "Capture: On — source issue"
+        }
+        return "Capture: On"
     }
 
     func toggleCaptureTitle() -> String {
-        AppState.shared.isCapturing ? "Stop Capture" : "Start Capture"
+        (AppState.shared.isCapturing || AppState.shared.isCaptureStarting) ? "Stop Capture" : "Start Capture"
     }
 
     func refreshMenu() {
         // Rebuild the menu to refresh dynamic items
         statusItem?.menu = buildMenu()
+        syncStatusItemCaptureState()
+    }
+
+    func syncStatusItemCaptureState() {
         statusItem?.button?.appearsDisabled = false
         updateStatusItemIcon()
+        updateCaptureMenuItems()
     }
 
     func updateStatusItemIcon() {
         guard let btn = statusItem?.button else { return }
-        let isCapturing = AppState.shared.isCapturing
+        let isCapturing = AppState.shared.isCapturing || AppState.shared.isCaptureStarting
         let symbolName = isCapturing ? "record.circle.fill" : "camera.aperture"
         let symbol = NSImage(systemSymbolName: symbolName, accessibilityDescription: "TimeScroll")
         if let img = symbol {
             img.isTemplate = true
             btn.image = img
         }
+    }
+
+    private func updateCaptureMenuItems() {
+        guard let menu = statusItem?.menu else { return }
+        guard menu.items.indices.contains(0), menu.items.indices.contains(1) else { return }
+        menu.items[0].title = captureStatusText()
+        menu.items[1].title = toggleCaptureTitle()
+        menu.items[1].target = self
     }
 }
 

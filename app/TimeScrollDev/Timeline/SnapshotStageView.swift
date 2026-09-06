@@ -14,6 +14,13 @@ struct SnapshotStageView: View {
     @State private var loadToken: Int = 0
     @State private var showSpinner: Bool = false
     @State private var rectRefreshToken: Int = 0
+    @StateObject private var audioPlayback = AudioPlaybackController()
+    @State private var activeAudioMeta: SnapshotMeta?
+    @State private var activeAudioAsset: AudioAssetRecord?
+    @State private var activeAudioLoadToken: Int = 0
+    @State private var activeAudioRetrying = false
+    @State private var activeAudioRetryMessage: String?
+    @State private var showAudioTranscript = false
 
     var body: some View {
         ZStack { // center-aligned content by default
@@ -45,9 +52,11 @@ struct SnapshotStageView: View {
                 Text("No snapshots").foregroundColor(.secondary)
             }
 
-            // Center overlay with prev/time/next
             if model.selected != nil {
-                CenterOverlay(model: model, nsImage: nsImage)
+                CenterOverlay(model: model,
+                              nsImage: nsImage,
+                              audioPlayback: activeAudioMeta != nil ? audioPlayback : nil,
+                              onShowTranscript: activeAudioMeta != nil ? { showAudioTranscript = true } : nil)
                     .allowsHitTesting(true)
             }
 
@@ -70,15 +79,40 @@ struct SnapshotStageView: View {
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .onChange(of: globalQuery) { _ in
+        .onChange(of: globalQuery) {
             refreshRects()
         }
-        .onChange(of: localQuery) { _ in
+        .onChange(of: localQuery) {
             refreshRects()
         }
         .onAppear { handleSelectionChange() }
-        .onChange(of: model.selected?.id) { _ in
+        .onDisappear {
+            audioPlayback.stop()
+            model.playbackTimeMs = nil
+        }
+        .onChange(of: model.selected?.id) { _, _ in
             handleSelectionChange()
+        }
+        .onReceive(audioPlayback.$currentTime) { currentTime in
+            syncAudioPlaybackToTimeline(currentTimeSeconds: currentTime)
+        }
+        .onReceive(audioPlayback.$isPlaying) { isPlaying in
+            if !isPlaying {
+                model.playbackTimeMs = nil
+            }
+        }
+        .sheet(isPresented: $showAudioTranscript) {
+            if let activeAudioMeta {
+                AudioTranscriptSheet(meta: activeAudioMeta,
+                                     asset: activeAudioAsset,
+                                     isLoading: false,
+                                     playback: audioPlayback,
+                                     assetDurationSeconds: activeAudioDurationSeconds,
+                                     transcriptText: activeAudioTranscriptText,
+                                     isRetrying: activeAudioRetrying,
+                                     retryMessage: activeAudioRetryMessage,
+                                     onRetry: retryActiveAudioTranscription)
+            }
         }
     }
 
@@ -86,6 +120,97 @@ struct SnapshotStageView: View {
         loadSelectedIfNeeded()
         rects = []
         refreshRects()
+        refreshActiveAudio()
+    }
+
+    private var activeAudioDurationSeconds: Double {
+        Double(activeAudioAsset?.durationMs ?? activeAudioMeta?.audioDurationMs ?? 0) / 1000
+    }
+
+    private var activeAudioTranscriptText: String? {
+        let joined = activeAudioAsset?.transcriptSegments.map(\.text).joined(separator: " ") ?? ""
+        let trimmed = joined.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
+    }
+
+    private func syncAudioPlaybackToTimeline(currentTimeSeconds: TimeInterval) {
+        guard audioPlayback.isPlaying,
+              let audioMeta = activeAudioMeta else {
+            return
+        }
+
+        let playbackTimeMs = audioMeta.startedAtMs + Int64((currentTimeSeconds * 1000).rounded())
+        model.playbackTimeMs = playbackTimeMs
+
+        guard let selected = model.selected, selected.captureKind == .screen else { return }
+        guard let nearestScreenIndex = model.indexNearest(to: playbackTimeMs,
+                                                          preferredCaptureKind: .screen,
+                                                          visibleCaptureKinds: [.screen],
+                                                          startedAtRange: audioMeta.startedAtMs...model.resolvedEndMs(for: audioMeta)),
+              model.metas.indices.contains(nearestScreenIndex),
+              nearestScreenIndex != model.selectedIndex else {
+            return
+        }
+
+        model.selectedIndex = nearestScreenIndex
+    }
+
+    private func refreshActiveAudio() {
+        guard let selected = model.selected, selected.captureKind == .screen else {
+            activeAudioMeta = nil
+            activeAudioAsset = nil
+            audioPlayback.stop()
+            model.playbackTimeMs = nil
+            return
+        }
+
+        guard let audioMeta = model.audioMeta(overlapping: selected.startedAtMs) else {
+            activeAudioMeta = nil
+            activeAudioAsset = nil
+            audioPlayback.stop()
+            model.playbackTimeMs = nil
+            return
+        }
+
+        if activeAudioMeta?.id == audioMeta.id {
+            return
+        }
+
+        activeAudioMeta = audioMeta
+        activeAudioAsset = nil
+        activeAudioLoadToken &+= 1
+        let token = activeAudioLoadToken
+
+        DispatchQueue.global(qos: .userInitiated).async {
+            let asset = try? DB.shared.audioAsset(forSnapshotId: audioMeta.id)
+            DispatchQueue.main.async {
+                guard token == activeAudioLoadToken else { return }
+                activeAudioAsset = asset
+
+                let path = asset?.path ?? audioMeta.path
+                audioPlayback.load(url: URL(fileURLWithPath: path))
+            }
+        }
+    }
+
+    private func retryActiveAudioTranscription() {
+        guard let asset = activeAudioAsset, !activeAudioRetrying else { return }
+        let requestedModel = UserDefaults.standard.string(forKey: "settings.whisperModelID")?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let modelID = requestedModel?.isEmpty == false ? requestedModel! : SettingsStore.defaultWhisperModelID
+        activeAudioRetrying = true
+        activeAudioRetryMessage = nil
+        Task {
+            do {
+                try await AudioSegmentProcessor.shared.retry(assetID: asset.id, modelID: modelID)
+                await AudioSegmentProcessor.shared.drain()
+            } catch {
+                activeAudioRetryMessage = error.localizedDescription
+            }
+            activeAudioRetrying = false
+            activeAudioMeta = nil
+            refreshActiveAudio()
+        }
     }
 
     private func refreshRects() {
@@ -375,7 +500,8 @@ private struct DebugOverlay: View {
     private func segmentStart(from url: URL) -> Int64? {
         let name = url.deletingPathExtension().lastPathComponent
         guard name.hasPrefix("seg-") else { return nil }
-        let ts = String(name.dropFirst(4))
+        let raw = String(name.dropFirst(4))
+        let ts = String(raw.prefix(19))
         let df = DebugOverlay.cachedFormatter(pattern: "yyyy-MM-dd-HH-mm-ss")
         if let d = df.date(from: ts) { return Int64(d.timeIntervalSince1970 * 1000) }
         return nil
@@ -388,7 +514,7 @@ private struct DebugOverlay: View {
         let isVideo = ["mov","mp4"].contains(ext) || (mime?.hasPrefix("video/") ?? false)
         let segStart = isVideo ? (segmentStart(from: url) ?? 0) : 0
         let offset = isVideo ? max(0, meta.startedAtMs - segStart) : 0
-        let liveMov = StoragePaths.videosDir().appendingPathComponent("seg-\(fmtDate(segStart, pattern: "yyyy-MM-dd-HH-mm-ss")).mov")
+        let liveMov = url.deletingPathExtension().appendingPathExtension("mov")
         let liveExists = FileManager.default.fileExists(atPath: liveMov.path)
         let sealedExists = FileManager.default.fileExists(atPath: url.path)
 
@@ -435,6 +561,8 @@ private struct DebugOverlay: View {
 private struct CenterOverlay: View {
     @ObservedObject var model: TimelineModel
     var nsImage: NSImage?
+    var audioPlayback: AudioPlaybackController?
+    var onShowTranscript: (() -> Void)?
     @State private var dragStartX: Double = 0
     @State private var dragStartY: Double = 0
 
@@ -492,6 +620,33 @@ private struct CenterOverlay: View {
         let containerBg: Color = isLightBackground ? Color.black.opacity(0.5) : Color.white.opacity(0.15)
 
         HStack(spacing: 12) {
+            navigationPill(containerBg: containerBg)
+
+            if let audioPlayback, let onShowTranscript {
+                audioControls(playback: audioPlayback, containerBg: containerBg, onShowTranscript: onShowTranscript)
+            }
+        }
+        .shadow(color: Color.black.opacity(0.3), radius: 4, x: 0, y: 2)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
+        .offset(x: model.overlayOffsetX, y: model.overlayOffsetY)
+        .gesture(DragGesture(minimumDistance: 0)
+            .onChanged { v in
+                // Update live without committing to storage every tick
+                if dragStartX == 0 && dragStartY == 0 {
+                    dragStartX = model.overlayOffsetX
+                    dragStartY = model.overlayOffsetY
+                }
+                model.overlayOffsetX = dragStartX + Double(v.translation.width)
+                model.overlayOffsetY = dragStartY + Double(v.translation.height)
+            }
+            .onEnded { _ in
+                dragStartX = 0; dragStartY = 0
+            }
+        )
+    }
+
+    private func navigationPill(containerBg: Color) -> some View {
+        HStack(spacing: 12) {
             Button(action: { model.prev() }) {
                 Image(systemName: "chevron.left.circle.fill")
                     .font(.system(size: 28))
@@ -515,24 +670,38 @@ private struct CenterOverlay: View {
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
         .background(containerBg)
-        .cornerRadius(20)
-        .shadow(color: Color.black.opacity(0.3), radius: 4, x: 0, y: 2)
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
-        .offset(x: model.overlayOffsetX, y: model.overlayOffsetY)
-        .gesture(DragGesture(minimumDistance: 0)
-            .onChanged { v in
-                // Update live without committing to storage every tick
-                if dragStartX == 0 && dragStartY == 0 {
-                    dragStartX = model.overlayOffsetX
-                    dragStartY = model.overlayOffsetY
-                }
-                model.overlayOffsetX = dragStartX + Double(v.translation.width)
-                model.overlayOffsetY = dragStartY + Double(v.translation.height)
+        .clipShape(Capsule(style: .continuous))
+    }
+
+    private func audioControls(playback: AudioPlaybackController,
+                               containerBg: Color,
+                               onShowTranscript: @escaping () -> Void) -> some View {
+        HStack(spacing: 10) {
+            Button {
+                playback.togglePlayback()
+            } label: {
+                Image(systemName: playback.isPlaying ? "pause.fill" : "play.fill")
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundStyle(.white)
+                    .frame(width: 34, height: 34)
+                    .background(Color.white.opacity(0.08), in: Circle())
             }
-            .onEnded { _ in
-                dragStartX = 0; dragStartY = 0
+            .buttonStyle(.plain)
+
+            Rectangle()
+                .fill(Color.white.opacity(0.14))
+                .frame(width: 1, height: 20)
+
+            Button(action: onShowTranscript) {
+                Label("Transcript", systemImage: "quote.bubble")
+                    .foregroundStyle(.white)
             }
-        )
+            .buttonStyle(.plain)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .background(containerBg, in: Capsule(style: .continuous))
+        .fixedSize()
     }
 
     private static let df: DateFormatter = {
@@ -544,6 +713,7 @@ private struct CenterOverlay: View {
 }
 
 private struct ActionsPanel: View {
+    @EnvironmentObject private var settings: SettingsStore
     @ObservedObject var model: TimelineModel
     @Binding var localQuery: String
     let onSubmitQuery: () -> Void
@@ -556,6 +726,10 @@ private struct ActionsPanel: View {
     var body: some View {
         VStack(alignment: .trailing, spacing: 8) {
             HStack(spacing: 8) {
+                if settings.audioFeatureEnabled {
+                    TimelineStripVisibilityButton()
+                }
+
                 Button {
                     model.actionPanelExpanded.toggle()
                 } label: {
@@ -595,6 +769,102 @@ private struct ActionsPanel: View {
             }
         }
         .padding(10)
+    }
+}
+
+struct TimelineStripVisibilityButton: View {
+    @EnvironmentObject private var settings: SettingsStore
+    @AppStorage("ui.timeline.showScreenStrips") private var showScreenStrips: Bool = true
+    @AppStorage("ui.timeline.showAudioStrips") private var showAudioStrips: Bool = true
+    @State private var isPresented = false
+
+    private var effectiveAudioVisibility: Bool {
+        settings.audioFeatureEnabled && showAudioStrips
+    }
+
+    var body: some View {
+        Button {
+            isPresented.toggle()
+        } label: {
+            Image(systemName: "slider.horizontal.3")
+                .font(.system(size: 18))
+        }
+        .buttonStyle(.plain)
+        .popover(isPresented: $isPresented, arrowEdge: .top) {
+            VStack(alignment: .leading, spacing: 10) {
+                Text("Timeline Strips")
+                    .font(.headline)
+
+                Toggle("Show screen strip", isOn: screenBinding)
+                    .toggleStyle(.checkbox)
+
+                if settings.audioFeatureEnabled {
+                    Toggle("Show audio strip", isOn: audioBinding)
+                        .toggleStyle(.checkbox)
+                }
+            }
+            .padding(12)
+            .frame(width: 220)
+        }
+        .help("Choose which strips are visible in the timeline")
+    }
+
+    private var screenBinding: Binding<Bool> {
+        Binding(
+            get: { showScreenStrips },
+            set: { enabled in
+                guard enabled || effectiveAudioVisibility else {
+                    NSSound.beep()
+                    return
+                }
+                showScreenStrips = enabled
+            }
+        )
+    }
+
+    private var audioBinding: Binding<Bool> {
+        Binding(
+            get: { effectiveAudioVisibility },
+            set: { enabled in
+                guard enabled || showScreenStrips else {
+                    NSSound.beep()
+                    return
+                }
+                showAudioStrips = enabled
+            }
+        )
+    }
+}
+
+private struct SnapshotAudioAccessory: View {
+    @ObservedObject var playback: AudioPlaybackController
+    let onShowTranscript: () -> Void
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Button {
+                playback.togglePlayback()
+            } label: {
+                Image(systemName: playback.isPlaying ? "pause.fill" : "play.fill")
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundStyle(.white)
+                    .frame(width: 34, height: 34)
+                    .background(Color.black.opacity(0.48), in: Circle())
+            }
+            .buttonStyle(.plain)
+
+            Button {
+                onShowTranscript()
+            } label: {
+                Label("Transcript", systemImage: "quote.bubble")
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 9)
+                    .background(Color.black.opacity(0.48), in: Capsule(style: .continuous))
+            }
+            .buttonStyle(.plain)
+        }
+        .shadow(color: .black.opacity(0.25), radius: 6, x: 0, y: 2)
     }
 }
 

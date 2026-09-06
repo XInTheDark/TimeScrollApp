@@ -35,7 +35,7 @@ extension AppDelegate {
             let win = NSWindow(contentViewController: hosting)
             win.styleMask.insert([.titled, .closable])
             win.title = "TimeScroll Setup"
-            win.setContentSize(NSSize(width: 640, height: 380))
+            win.setContentSize(NSSize(width: 640, height: 540))
             win.isMovableByWindowBackground = true
             win.center()
             win.identifier = NSUserInterfaceItemIdentifier("OnboardingWindow")
@@ -50,15 +50,22 @@ extension AppDelegate {
     }
 
     @objc func openPreferences() {
-        // Prefer the system-standard SwiftUI Settings window if available
-        if NSApp.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil) {
-            return
+        DispatchQueue.main.async { [weak self] in
+            self?.presentPreferencesWindow()
         }
-        if NSApp.sendAction(Selector(("showPreferencesWindow:")), to: nil, from: nil) {
+    }
+
+    private func presentPreferencesWindow() {
+        prepareForForegroundWindowPresentation()
+
+        if openSystemSettingsWindowIfAvailable() {
+            DispatchQueue.main.async {
+                NSApp.activate(ignoringOtherApps: true)
+            }
             return
         }
 
-        // Fallback: create a simple, resizable window with a sensible minimum size
+        // shouldn't be needed
         if prefsWC == nil {
             let root = PreferencesView().environmentObject(SettingsStore.shared)
             let hosting = NSHostingController(rootView: root)
@@ -71,9 +78,23 @@ extension AppDelegate {
             wc.window?.isReleasedWhenClosed = false
             prefsWC = wc
         }
-        NSApp.setActivationPolicy(.regular)
         prefsWC?.showWindow(nil)
         prefsWC?.window?.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
+    }
+
+    private func prepareForForegroundWindowPresentation() {
+        NSApp.setActivationPolicy(.regular)
+        NSApp.activate(ignoringOtherApps: true)
+    }
+
+    private func openSystemSettingsWindowIfAvailable() -> Bool {
+        if NSApp.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil) {
+            return true
+        }
+        if NSApp.sendAction(Selector(("showPreferencesWindow:")), to: nil, from: nil) {
+            return true
+        }
+        return false
     }
 }

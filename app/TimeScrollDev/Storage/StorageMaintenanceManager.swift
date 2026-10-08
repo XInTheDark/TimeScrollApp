@@ -46,6 +46,15 @@ final class StorageMaintenanceManager {
 
     private func performMaintenance(forceMaintenance: Bool, afterLargeDelete: Bool) {
         let defaults = UserDefaults.standard
+        var afterLargeDelete = afterLargeDelete
+
+        // Retention runs here so it applies even when the timeline is never opened.
+        let retentionDays = defaults.integer(forKey: "settings.retentionDays") > 0
+            ? defaults.integer(forKey: "settings.retentionDays")
+            : SettingsStore.defaultRetentionDays
+        if let removed = try? DB.shared.purgeOlderThan(days: retentionDays), removed > 0 {
+            afterLargeDelete = true
+        }
 
         if defaults.object(forKey: "settings.autoCompactEnabled") != nil
             ? defaults.bool(forKey: "settings.autoCompactEnabled")
@@ -65,6 +74,7 @@ final class StorageMaintenanceManager {
         }
 
         DB.shared.pruneOldOCRBoxesIfConfigured()
+        TextIndexBackfill.shared.resumeIfNeeded()
         DB.shared.runAutomaticMaintenance(force: forceMaintenance, afterLargeDelete: afterLargeDelete)
     }
 }

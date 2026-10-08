@@ -211,7 +211,7 @@ final class EmbeddingService {
         embedDocument(pixelBuffer: pixelBuffer, extractedText: extractedText, state: stateSnapshot())
     }
 
-    private func embedDocument(pixelBuffer: CVPixelBuffer, extractedText: String?, state: StateSnapshot) -> [Float] {
+    private func embedDocument(pixelBuffer: CVPixelBuffer?, extractedText: String?, state: StateSnapshot) -> [Float] {
         switch state.provider {
         case .appleNL:
             guard let extractedText, !extractedText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return [] }
@@ -220,13 +220,13 @@ final class EmbeddingService {
             guard let extractedText, !extractedText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return [] }
             return embedWithStats(extractedText, usage: .document, state: state).vec
         case .mobileclip2:
-            guard let provider = state.mobileclipProvider else { return [] }
+            guard let provider = state.mobileclipProvider, let pixelBuffer else { return [] }
             let includeText = UserDefaults.standard.bool(forKey: "settings.multimodalIncludeExtractedText")
             return provider.embedDocument(pixelBuffer: pixelBuffer, extractedText: extractedText, includeText: includeText)
         }
     }
 
-    func embedDocumentWithIdentity(pixelBuffer: CVPixelBuffer, extractedText: String?) -> DocumentEmbedding? {
+    func embedDocumentWithIdentity(pixelBuffer: CVPixelBuffer?, extractedText: String?) -> DocumentEmbedding? {
         let state = stateSnapshot()
         let vector = embedDocument(pixelBuffer: pixelBuffer, extractedText: extractedText, state: state)
         guard !vector.isEmpty else { return nil }

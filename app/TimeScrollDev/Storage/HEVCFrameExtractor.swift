@@ -59,12 +59,13 @@ enum HEVCFrameExtractor {
             }
             return nil
         }
-        // Clamp to duration
-        var targetMs = offsetMs
+        // A live segment's newest frame is only written once the next frame arrives. Past the
+        // readable duration, fail instead of returning the previous frame under this timestamp.
+        let targetMs = offsetMs
         let dur = asset.duration
         if dur.isNumeric && dur.isValid {
             let durMs = Int64((CMTimeGetSeconds(dur) * 1000.0).rounded(.down))
-            if durMs > 1 { targetMs = min(targetMs, durMs - 1) }
+            if targetMs >= durMs { return nil }
         }
         // Pass 1: exact
         if let cg = tryWith(tBefore: .zero, tAfter: .zero, targetMs: targetMs) { return cg }

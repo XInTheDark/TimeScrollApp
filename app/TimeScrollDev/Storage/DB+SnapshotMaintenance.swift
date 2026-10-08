@@ -10,6 +10,7 @@ extension DB {
         try onQueueSync {
             try openIfNeeded()
             guard let db = db else { return }
+            _ = sqlite3_exec(db, "INSERT INTO ts_text_index(ts_text_index) VALUES('delete-all');", nil, nil, nil)
             _ = sqlite3_exec(db, "DELETE FROM ts_text;", nil, nil, nil)
             _ = sqlite3_exec(db, "DELETE FROM ts_text_chunk;", nil, nil, nil)
             _ = sqlite3_exec(db, "DELETE FROM ts_text_store;", nil, nil, nil)
@@ -17,102 +18,70 @@ extension DB {
         }
     }
 
-    func purgeOlderThan(days: Int) throws {
-        try onQueueSync {
+    /// Deletes rows older than `days`, then removes their media once the deletion is committed.
+    /// Returns the number of snapshot rows removed.
+    @discardableResult
+    func purgeOlderThan(days: Int) throws -> Int {
+        let cutoff = Int64(Date().addingTimeInterval(-Double(days) * 86400).timeIntervalSince1970 * 1000)
+        let (removedRows, unreferencedPaths) = try onQueueSync { () -> (Int, [String]) in
             try openIfNeeded()
-            guard let db = db else { return }
-            let cutoff = Int64(Date().addingTimeInterval(-Double(days) * 86400).timeIntervalSince1970 * 1000)
-            // Collect file paths to delete before removing DB rows
+            guard let db = db else { return (0, []) }
+            var candidates = Set<String>()
             var stmt: OpaquePointer?
-            var pathsToHandle = Set<String>()
             defer { sqlite3_finalize(stmt) }
-            if sqlite3_prepare_v2(db, "SELECT path FROM ts_snapshot WHERE started_at_ms < ?;", -1, &stmt, nil) == SQLITE_OK {
+            if sqlite3_prepare_v2(db, "SELECT path, thumb_path FROM ts_snapshot WHERE started_at_ms < ?;", -1, &stmt, nil) == SQLITE_OK {
                 sqlite3_bind_int64(stmt, 1, cutoff)
                 while sqlite3_step(stmt) == SQLITE_ROW {
-                    if let cstr = sqlite3_column_text(stmt, 0) {
-                        pathsToHandle.insert(String(cString: cstr))
-                    }
+                    if let c = sqlite3_column_text(stmt, 0) { candidates.insert(String(cString: c)) }
+                    if let c = sqlite3_column_text(stmt, 1) { candidates.insert(String(cString: c)) }
                 }
             }
-            // Move each path to backup if enabled; otherwise delete.
-            let fm = FileManager.default
-            for p in pathsToHandle where !isHEVCSegmentPath(p) {
-                let srcURL = URL(fileURLWithPath: p)
-                let archived = StoragePaths.archiveSnapshotToBackupIfEnabled(srcURL)
-                if !archived { _ = try? fm.removeItem(at: srcURL) }
-            }
+            guard !candidates.isEmpty else { return (0, []) }
 
-            // Delete from FTS and primary tables by cutoff
+            let expiredIds = "SELECT id FROM ts_snapshot WHERE started_at_ms < \(cutoff)"
+            let textDeletes = Self.textIndexDeletionSQL(snapshotIdsSQL: expiredIds, legacyTablesExist: Self.legacyTextTablesExist(db: db))
             let sql = """
-            DELETE FROM ts_text WHERE rowid IN (SELECT id FROM ts_snapshot WHERE started_at_ms < \(cutoff));
-            DELETE FROM ts_text_chunk WHERE snapshot_id IN (SELECT id FROM ts_snapshot WHERE started_at_ms < \(cutoff));
-            DELETE FROM ts_ocr_boxes WHERE snapshot_id IN (SELECT id FROM ts_snapshot WHERE started_at_ms < \(cutoff));
+            BEGIN IMMEDIATE;
+            \(textDeletes)
+            \(Self.ocrLayoutDeletionSQL(snapshotIdsSQL: expiredIds))
             DELETE FROM ts_embedding WHERE snapshot_id IN (SELECT id FROM ts_snapshot WHERE started_at_ms < \(cutoff));
             DELETE FROM ts_snapshot WHERE started_at_ms < \(cutoff);
             DELETE FROM ts_text_store WHERE id NOT IN (SELECT DISTINCT text_store_id FROM ts_snapshot WHERE text_store_id IS NOT NULL);
+            COMMIT;
             """
-            _ = sqlite3_exec(db, sql, nil, nil, nil)
-            removeUnreferencedHEVCSegments(pathsToHandle, db: db)
-            purgeOrphanedAudioAssets()
+            let before = sqlite3_total_changes(db)
+            guard sqlite3_exec(db, sql, nil, nil, nil) == SQLITE_OK else {
+                let message = String(cString: sqlite3_errmsg(db))
+                _ = sqlite3_exec(db, "ROLLBACK;", nil, nil, nil)
+                throw NSError(domain: "TS.DB", code: 80, userInfo: [NSLocalizedDescriptionKey: message])
+            }
+            let removed = Int(sqlite3_total_changes(db) - before)
+            // A 60 s HEVC segment can straddle the cutoff; keep media still referenced by newer rows.
+            let stillReferenced = mediaPathsReferenced(fromMs: cutoff, toMs: cutoff + 5 * 60_000, db: db)
+            return (removed, Array(candidates.subtracting(stillReferenced)))
         }
-    }
-
-    private func removeUnreferencedHEVCSegments(_ paths: Set<String>, db: OpaquePointer) {
         let fm = FileManager.default
-        for path in paths where isHEVCSegmentPath(path) {
-            var stmt: OpaquePointer?
-            defer { sqlite3_finalize(stmt) }
-            guard sqlite3_prepare_v2(db, "SELECT 1 FROM ts_snapshot WHERE path=? LIMIT 1;", -1, &stmt, nil) == SQLITE_OK else {
-                continue
-            }
-            sqlite3_bind_text(stmt, 1, path, -1, SQLITE_TRANSIENT)
-            guard sqlite3_step(stmt) != SQLITE_ROW else { continue }
+        for path in unreferencedPaths {
             let url = URL(fileURLWithPath: path)
-            let archived = StoragePaths.archiveSnapshotToBackupIfEnabled(url)
-            if !archived { _ = try? fm.removeItem(at: url) }
+            if !StoragePaths.archiveSnapshotToBackupIfEnabled(url) { _ = try? fm.removeItem(at: url) }
         }
+        purgeOrphanedAudioAssets()
+        return removedRows
     }
 
-    private func isHEVCSegmentPath(_ path: String) -> Bool {
-        let ext = URL(fileURLWithPath: path).pathExtension.lowercased()
-        return ext == "mov" || ext == "tse"
-    }
-
-    // Delete rows older than a specific cutoff, optionally skipping on-disk deletions.
-    func purgeRowsOlderThan(cutoffMs cutoff: Int64, deleteFiles: Bool) throws {
-        try onQueueSync {
-            try openIfNeeded()
-            guard let db = db else { return }
-            var pathsToHandle: [String] = []
-            if deleteFiles {
-                var stmt: OpaquePointer?
-                defer { sqlite3_finalize(stmt) }
-                if sqlite3_prepare_v2(db, "SELECT path FROM ts_snapshot WHERE started_at_ms < ?;", -1, &stmt, nil) == SQLITE_OK {
-                    sqlite3_bind_int64(stmt, 1, cutoff)
-                    while sqlite3_step(stmt) == SQLITE_ROW {
-                        if let cstr = sqlite3_column_text(stmt, 0) {
-                            pathsToHandle.append(String(cString: cstr))
-                        }
-                    }
-                }
-                let fm = FileManager.default
-                for p in pathsToHandle {
-                    let srcURL = URL(fileURLWithPath: p)
-                    let archived = StoragePaths.archiveSnapshotToBackupIfEnabled(srcURL)
-                    if !archived { _ = try? fm.removeItem(at: srcURL) }
-                }
-            }
-            let sql = """
-            DELETE FROM ts_text WHERE rowid IN (SELECT id FROM ts_snapshot WHERE started_at_ms < \(cutoff));
-            DELETE FROM ts_text_chunk WHERE snapshot_id IN (SELECT id FROM ts_snapshot WHERE started_at_ms < \(cutoff));
-            DELETE FROM ts_ocr_boxes WHERE snapshot_id IN (SELECT id FROM ts_snapshot WHERE started_at_ms < \(cutoff));
-            DELETE FROM ts_embedding WHERE snapshot_id IN (SELECT id FROM ts_snapshot WHERE started_at_ms < \(cutoff));
-            DELETE FROM ts_snapshot WHERE started_at_ms < \(cutoff);
-            DELETE FROM ts_text_store WHERE id NOT IN (SELECT DISTINCT text_store_id FROM ts_snapshot WHERE text_store_id IS NOT NULL);
-            """
-            _ = sqlite3_exec(db, sql, nil, nil, nil)
-            purgeOrphanedAudioAssets()
+    private func mediaPathsReferenced(fromMs: Int64, toMs: Int64, db: OpaquePointer) -> Set<String> {
+        var referenced = Set<String>()
+        var stmt: OpaquePointer?
+        defer { sqlite3_finalize(stmt) }
+        let sql = "SELECT path, thumb_path FROM ts_snapshot WHERE started_at_ms >= ? AND started_at_ms < ?;"
+        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return referenced }
+        sqlite3_bind_int64(stmt, 1, fromMs)
+        sqlite3_bind_int64(stmt, 2, toMs)
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            if let c = sqlite3_column_text(stmt, 0) { referenced.insert(String(cString: c)) }
+            if let c = sqlite3_column_text(stmt, 1) { referenced.insert(String(cString: c)) }
         }
+        return referenced
     }
 
     func deleteSnapshot(id: Int64) throws {
@@ -139,9 +108,8 @@ extension DB {
             if let t = thumbToDelete { _ = try? fm.removeItem(atPath: t) }
 
             // Delete associated text and boxes, then primary row
-            _ = sqlite3_exec(db, "DELETE FROM ts_text WHERE rowid=\(id);", nil, nil, nil)
-            _ = sqlite3_exec(db, "DELETE FROM ts_text_chunk WHERE snapshot_id=\(id);", nil, nil, nil)
-            _ = sqlite3_exec(db, "DELETE FROM ts_ocr_boxes WHERE snapshot_id=\(id);", nil, nil, nil)
+            _ = sqlite3_exec(db, Self.textIndexDeletionSQL(snapshotIdsSQL: "\(id)", legacyTablesExist: Self.legacyTextTablesExist(db: db)), nil, nil, nil)
+            _ = sqlite3_exec(db, Self.ocrLayoutDeletionSQL(snapshotIdsSQL: "\(id)"), nil, nil, nil)
             _ = sqlite3_exec(db, "DELETE FROM ts_embedding WHERE snapshot_id=\(id);", nil, nil, nil)
             _ = sqlite3_exec(db, "DELETE FROM ts_snapshot WHERE id=\(id);", nil, nil, nil)
             _ = sqlite3_exec(db, "DELETE FROM ts_text_store WHERE id NOT IN (SELECT DISTINCT text_store_id FROM ts_snapshot WHERE text_store_id IS NOT NULL);", nil, nil, nil)

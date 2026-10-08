@@ -47,18 +47,6 @@ extension StoragePaths {
         return path == legacy || path.hasPrefix(legacy + "/")
     }
 
-    /// Returns true when legacy sandbox data exists and should be moved into the App Group for MCP.
-    static func needsLegacyMigrationForMCP() -> Bool {
-        let legacy = legacyDefaultRoot()
-        let shared = defaultRoot()
-        let current = currentRoot()
-        // Only migrate if we are *currently* still using the legacy sandbox root
-        guard current.standardizedFileURL == legacy.standardizedFileURL else { return false }
-        guard legacy.standardizedFileURL != shared.standardizedFileURL else { return false }
-        var isDir: ObjCBool = false
-        return FileManager.default.fileExists(atPath: legacy.path, isDirectory: &isDir) && isDir.boolValue
-    }
-
     // Synchronize per-app defaults into the shared App Group defaults so helpers see the same settings.
     @MainActor
     static func syncSharedDefaultsFromStandard() {

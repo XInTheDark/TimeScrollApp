@@ -6,7 +6,7 @@ struct SecurityPane: View {
     @ObservedObject var settings: SettingsStore
     @ObservedObject var vault = VaultManager.shared
     @State private var showVaultOnboarding: Bool = false
-    @State private var showVaultEntitlementWarning: Bool = false
+    @State private var showVaultPassphrase: Bool = false
     @State private var pendingEnableVault: Bool = false
     @State private var showVaultDisableSheet: Bool = false
     @State private var pendingDisableVault: Bool = false
@@ -22,8 +22,7 @@ struct SecurityPane: View {
                             showVaultOnboarding = true
                             return
                         }
-                        // Secondary warning about current limitations
-                        showVaultEntitlementWarning = true
+                        showVaultPassphrase = true
                         return
                     } else {
                         // Intercept turning off to confirm. Keep toggle ON until confirmed.
@@ -35,9 +34,7 @@ struct SecurityPane: View {
                             return
                         }
                     }
-                    // Fallback
                     settings.vaultEnabled = newVal
-                    Task { @MainActor in await VaultManager.shared.setVaultEnabled(newVal) }
                 }))
                 Toggle("Allow screen capture while locked", isOn: $settings.captureWhileLocked)
                 Text("Audio capture pauses while the vault is locked and resumes after unlock.")
@@ -47,11 +44,7 @@ struct SecurityPane: View {
             Section(header: Text("Auto-lock")) {
                 Toggle("Lock on sleep/wake", isOn: $settings.autoLockOnSleep)
                 LabeledContent("After inactivity") {
-                    HStack(spacing: 6) {
-                        TextField("", value: $settings.autoLockInactivityMinutes, formatter: Self.intFormatter)
-                            .frame(width: 70)
-                        Text("minutes").foregroundColor(.secondary)
-                    }
+                    SettingsNumberField(value: $settings.autoLockInactivityMinutes, formatter: Self.intFormatter, unit: "minutes")
                 }
             }
             Section(header: Text("Controls")) {
@@ -61,12 +54,16 @@ struct SecurityPane: View {
                     Button("Lock") { Task { await vault.lock() } }
                         .disabled(!settings.vaultEnabled || !vault.isUnlocked)
                 }
+                if settings.vaultEnabled && vault.needsRecoveryPassphrase && !vault.isUnlocked {
+                    VaultRecoveryField()
+                }
                 if settings.vaultEnabled && vault.queuedCount > 0 {
                     Text("Queued: \(vault.queuedCount)").font(.footnote).foregroundColor(.secondary)
                 }
             }
         }
         .formStyle(.grouped)
+        .vaultErrorAlert()
         .sheet(isPresented: $showVaultOnboarding) {
             VaultOnboardingSheet(onCancel: {
                 // Revert toggle
@@ -78,7 +75,7 @@ struct SecurityPane: View {
                     UserDefaults.standard.set(true, forKey: "vault.onboardingShown")
                 }
                 showVaultOnboarding = false
-                showVaultEntitlementWarning = true
+                showVaultPassphrase = true
             })
         }
         .sheet(isPresented: $showVaultDisableSheet) {
@@ -88,33 +85,21 @@ struct SecurityPane: View {
                 showVaultDisableSheet = false
             }, onContinue: {
                 // Turn off encryption and lock the vault immediately
-                settings.vaultEnabled = false
-                Task { @MainActor in await VaultManager.shared.setVaultEnabled(false) }
+                Task { @MainActor in await VaultManager.shared.disableVault() }
                 pendingDisableVault = false
                 showVaultDisableSheet = false
             })
         }
-        .sheet(isPresented: $showVaultEntitlementWarning) {
-            EntitlementWarningSheet(
-                title: "Encrypted Vault Unstable",
-                lead: "Due to issues with app entitlements, encrypted vault is NOT working as expected right now.",
-                bullets: [
-                    "This is work in progress and may fail to store or unlock snapshots.",
-                    "Enable at your own risk while we finish entitlement fixes."
-                ],
-                continueLabel: "Enable Anyway",
-                onCancel: {
-                    settings.vaultEnabled = false
-                    pendingEnableVault = false
-                    showVaultEntitlementWarning = false
-                },
-                onContinue: {
-                    settings.vaultEnabled = true
-                    Task { @MainActor in await VaultManager.shared.setVaultEnabled(true) }
-                    pendingEnableVault = false
-                    showVaultEntitlementWarning = false
-                }
-            )
+        .sheet(isPresented: $showVaultPassphrase) {
+            VaultPassphraseSheet(onCancel: {
+                settings.vaultEnabled = false
+                pendingEnableVault = false
+                showVaultPassphrase = false
+            }, onConfirm: { passphrase in
+                showVaultPassphrase = false
+                pendingEnableVault = false
+                Task { @MainActor in await VaultManager.shared.enableVault(recoveryPassphrase: passphrase) }
+            })
         }
     }
 
@@ -193,46 +178,6 @@ private struct VaultDisableConfirmSheet: View {
             }
         }
 
-        .padding(18)
-        .frame(minWidth: 520)
-    }
-}
-
-@MainActor
-private struct EntitlementWarningSheet: View {
-    var title: String
-    var lead: String
-    var bullets: [String]
-    var continueLabel: String
-    var onCancel: () -> Void
-    var onContinue: () -> Void
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            HStack(spacing: 8) {
-                Image(systemName: "exclamationmark.triangle.fill")
-                    .font(.system(size: 28))
-                    .foregroundColor(.yellow)
-                Text(title).font(.title3).bold()
-            }
-            Text(lead)
-                .font(.headline)
-            VStack(alignment: .leading, spacing: 8) {
-                ForEach(Array(bullets.enumerated()), id: \.offset) { _, item in
-                    HStack(alignment: .top, spacing: 8) {
-                        Image(systemName: "bolt.slash")
-                            .foregroundColor(.secondary)
-                        Text(item)
-                    }
-                }
-            }
-            HStack {
-                Spacer()
-                Button("Cancel") { onCancel() }
-                Button(continueLabel) { onContinue() }
-                    .keyboardShortcut(.defaultAction)
-            }
-        }
         .padding(18)
         .frame(minWidth: 520)
     }

@@ -18,6 +18,7 @@ struct OnboardingView: View {
 
     // Step 2: Vault
     @State private var enableVault = false
+    @State private var showVaultPassphrase = false
 
     // Step 3: AI features
     @AppStorage("settings.mcpEnabled") private var mcpEnabled: Bool = false
@@ -68,6 +69,16 @@ struct OnboardingView: View {
         .padding(24)
         .frame(width: 620, height: 520)
         .animation(.easeInOut, value: currentStep)
+        .sheet(isPresented: $showVaultPassphrase) {
+            VaultPassphraseSheet(onCancel: {
+                showVaultPassphrase = false
+                enableVault = false
+                startCaptureAndClose()
+            }, onConfirm: { passphrase in
+                showVaultPassphrase = false
+                startCaptureAndClose(vaultPassphrase: passphrase)
+            })
+        }
         .onAppear {
             useDirectMode = settings.textProcessingMode == .accessibility
             enableAudioFeature = settings.audioFeatureEnabled
@@ -254,7 +265,7 @@ struct OnboardingView: View {
                     VStack(alignment: .leading, spacing: 4) {
                         Text("Encrypted Vault")
                             .font(.headline)
-                        Text("Protect your captures with encryption. Your data will be secured with a private key, and you'll need to authenticate to access it.")
+                        Text("Protect your captures with encryption. You unlock with Touch ID or your Mac password, and you'll set a recovery passphrase.")
                             .font(.subheadline)
                             .foregroundStyle(.secondary)
                     }
@@ -536,7 +547,12 @@ struct OnboardingView: View {
         hasMicrophone = Permissions.isMicrophoneGranted()
     }
 
-    private func startCaptureAndClose() {
+    private func startCaptureAndClose(vaultPassphrase: String? = nil) {
+        // Turning the vault on needs a recovery passphrase first.
+        if wentThroughFullFlow, enableVault, !VaultManager.shared.isVaultEnabled, vaultPassphrase == nil {
+            showVaultPassphrase = true
+            return
+        }
         if wentThroughFullFlow {
             settings.textProcessingMode = useDirectMode ? .accessibility : .ocr
             settings.audioFeatureEnabled = enableAudioFeature
@@ -544,16 +560,16 @@ struct OnboardingView: View {
             settings.captureAudioEnabled = enableAudioFeature && (captureMicrophone || captureSystemAudio)
             settings.captureMicrophoneEnabled = captureMicrophone
             settings.captureSystemAudioEnabled = captureSystemAudio
-            settings.vaultEnabled = enableVault
             settings.aiModeOn = aiModeEnabled
             settings.onboardingCompleted = true
         }
 
         Task { @MainActor in
             if wentThroughFullFlow {
-                await VaultManager.shared.setVaultEnabled(enableVault)
-                if enableVault {
-                    await VaultManager.shared.unlock(presentingWindow: NSApp.keyWindow)
+                if let vaultPassphrase {
+                    await VaultManager.shared.enableVault(recoveryPassphrase: vaultPassphrase)
+                } else if !enableVault, VaultManager.shared.isVaultEnabled {
+                    await VaultManager.shared.disableVault()
                 }
             }
             await AppState.shared.startCaptureIfNeeded()

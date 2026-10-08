@@ -78,25 +78,25 @@ struct StoragePane: View {
                         }
                     }
                     .labelsHidden()
-                    .frame(maxWidth: 140)
+                    .fixedSize()
                 }
 
                 LabeledContent("Max long edge") {
-                    HStack {
-                        Slider(value: Binding(get: { Double(settings.maxLongEdge) }, set: { settings.maxLongEdge = Int($0) }), in: 0...3000, step: 100)
-                        Text(settings.maxLongEdge == 0 ? "Original" : "\(settings.maxLongEdge) px")
-                            .monospacedDigit()
-                            .frame(width: 82, alignment: .trailing)
-                    }
+                    SettingsSlider(
+                        value: Binding(get: { Double(settings.maxLongEdge) }, set: { settings.maxLongEdge = Int($0) }),
+                        in: 0...3000,
+                        step: 100,
+                        valueText: settings.maxLongEdge == 0 ? "Original" : "\(settings.maxLongEdge) px"
+                    )
                 }
 
                 LabeledContent("Quality") {
-                    HStack {
-                        Slider(value: $settings.lossyQuality, in: 0.3...0.9, step: 0.05)
-                        Text(String(format: "%.2f", settings.lossyQuality))
-                            .monospacedDigit()
-                            .frame(width: 44, alignment: .trailing)
-                    }
+                    SettingsSlider(
+                        value: $settings.lossyQuality,
+                        in: 0.3...0.9,
+                        step: 0.05,
+                        valueText: String(format: "%.2f", settings.lossyQuality)
+                    )
                 }
             } header: {
                 Text("Encoding")
@@ -112,27 +112,23 @@ struct StoragePane: View {
                 DisclosureGroup("Details", isExpanded: $showReductionDetails) {
                     VStack(alignment: .leading, spacing: 12) {
                         LabeledContent("Dedup sensitivity") {
-                            HStack {
-                                Slider(
-                                    value: Binding(get: { Double(settings.dedupHammingThreshold) }, set: { settings.dedupHammingThreshold = Int($0) }),
-                                    in: 0...16,
-                                    step: 1
-                                )
-                                .disabled(!settings.dedupEnabled)
-                                Text("\(settings.dedupHammingThreshold)")
-                                    .monospacedDigit()
-                                    .frame(width: 28, alignment: .trailing)
-                            }
+                            SettingsSlider(
+                                value: Binding(get: { Double(settings.dedupHammingThreshold) }, set: { settings.dedupHammingThreshold = Int($0) }),
+                                in: 0...16,
+                                step: 1,
+                                valueText: "\(settings.dedupHammingThreshold)"
+                            )
+                            .disabled(!settings.dedupEnabled)
                         }
 
                         LabeledContent("Max sampling interval") {
-                            HStack {
-                                Slider(value: $settings.adaptiveMaxInterval, in: 5.0...30.0, step: 5.0)
-                                    .disabled(!settings.adaptiveSampling)
-                                Text(String(format: "%.0f s", settings.adaptiveMaxInterval))
-                                    .monospacedDigit()
-                                    .frame(width: 42, alignment: .trailing)
-                            }
+                            SettingsSlider(
+                                value: $settings.adaptiveMaxInterval,
+                                in: 5.0...30.0,
+                                step: 5.0,
+                                valueText: String(format: "%.0f s", settings.adaptiveMaxInterval)
+                            )
+                            .disabled(!settings.adaptiveSampling)
                         }
                     }
                     .padding(.top, 8)
@@ -160,30 +156,25 @@ struct StoragePane: View {
                     DisclosureGroup("Compaction settings", isExpanded: $showCompactionDetails) {
                         VStack(alignment: .leading, spacing: 12) {
                             LabeledContent("Degrade after") {
-                                HStack(spacing: 6) {
-                                    TextField("", value: $settings.degradeAfterDays, formatter: Self.intFormatter)
-                                        .frame(width: 70)
-                                    Text("days")
-                                        .foregroundColor(.secondary)
-                                }
+                                SettingsNumberField(value: $settings.degradeAfterDays, formatter: Self.intFormatter, unit: "days")
                             }
 
                             LabeledContent("Degrade size") {
-                                HStack {
-                                    Slider(value: Binding(get: { Double(settings.degradeMaxLongEdge) }, set: { settings.degradeMaxLongEdge = Int($0) }), in: 600...2000, step: 100)
-                                    Text("\(settings.degradeMaxLongEdge) px")
-                                        .monospacedDigit()
-                                        .frame(width: 64, alignment: .trailing)
-                                }
+                                SettingsSlider(
+                                    value: Binding(get: { Double(settings.degradeMaxLongEdge) }, set: { settings.degradeMaxLongEdge = Int($0) }),
+                                    in: 600...2000,
+                                    step: 100,
+                                    valueText: "\(settings.degradeMaxLongEdge) px"
+                                )
                             }
 
                             LabeledContent("Degrade quality") {
-                                HStack {
-                                    Slider(value: $settings.degradeQuality, in: 0.3...0.8, step: 0.05)
-                                    Text(String(format: "%.2f", settings.degradeQuality))
-                                        .monospacedDigit()
-                                        .frame(width: 44, alignment: .trailing)
-                                }
+                                SettingsSlider(
+                                    value: $settings.degradeQuality,
+                                    in: 0.3...0.8,
+                                    step: 0.05,
+                                    valueText: String(format: "%.2f", settings.degradeQuality)
+                                )
                             }
                         }
                         .padding(.top, 8)

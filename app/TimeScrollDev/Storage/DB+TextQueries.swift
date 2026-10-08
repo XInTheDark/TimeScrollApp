@@ -8,36 +8,21 @@ import SQLite3
 #endif
 
 extension DB {
-    func updateFTS(rowId: Int64, content: String) throws {
+    /// Stores a snapshot's text and indexes it. `indexedContent` (when given) is what goes into
+    /// the full-text index instead of the whole text, e.g. only lines new since an anchor snapshot.
+    func updateFTS(rowId: Int64, content: String, indexedContent: String? = nil) throws {
         try withWriteSavepoint {
             try openIfNeeded()
             guard let db = db else { return }
-            try storeTextArtifacts(rowId: rowId, content: content, db: db)
+            try storeTextArtifacts(rowId: rowId, content: content, indexedContent: indexedContent, db: db)
         }
     }
 
     func textContent(snapshotId: Int64) throws -> String? {
-        try onQueueSync { () -> String? in
-            try openIfNeeded(); guard let db = db else { return nil }
+        try onReadQueueSync { db -> String? in
             var cache: [Int64: String?] = [:]
             var visited: Set<Int64> = []
             return try resolvedTextContent(snapshotId: snapshotId, db: db, visited: &visited, cache: &cache)
-        }
-    }
-
-    func updateSnapshotTextRef(rowId: Int64, refId: Int64) throws {
-        try onQueueSync {
-            try openIfNeeded()
-            guard let db = db else { return }
-            var stmt: OpaquePointer?
-            defer { sqlite3_finalize(stmt) }
-            let sql = "UPDATE ts_snapshot SET text_ref_id=?, text_store_id=NULL WHERE id=?;"
-            if sqlite3_prepare_v2(db, sql, -1, &stmt, nil) != SQLITE_OK { throw NSError(domain: "TS.DB", code: 200) }
-            sqlite3_bind_int64(stmt, 1, refId)
-            sqlite3_bind_int64(stmt, 2, rowId)
-            if sqlite3_step(stmt) != SQLITE_DONE { throw NSError(domain: "TS.DB", code: 201) }
-            try deletePreviewText(rowId: rowId, db: db)
-            try replaceTextChunks(rowId: rowId, chunks: [], db: db)
         }
     }
 
@@ -47,21 +32,15 @@ extension DB {
             guard let db = db else { return 0 }
             var stmt: OpaquePointer?
             defer { sqlite3_finalize(stmt) }
-            let sql = """
-            SELECT COUNT(*)
-            FROM ts_snapshot s
-            WHERE EXISTS (SELECT 1 FROM ts_text_chunk c WHERE c.snapshot_id = s.id)
-               OR EXISTS (SELECT 1 FROM ts_text t WHERE t.rowid = s.id AND length(t.content) > 0);
-            """
+            let sql = "SELECT COUNT(*) FROM ts_snapshot WHERE text_store_id IS NOT NULL OR text_ref_id IS NOT NULL;"
             if sqlite3_prepare_v2(db, sql, -1, &stmt, nil) != SQLITE_OK { return 0 }
             return sqlite3_step(stmt) == SQLITE_ROW ? Int(sqlite3_column_int64(stmt, 0)) : 0
         }
     }
 
     func hydrateSearchResultContents(_ results: [SearchResult]) throws -> [SearchResult] {
-        try onQueueSync {
-            try openIfNeeded()
-            guard let db = db, !results.isEmpty else { return results }
+        guard !results.isEmpty else { return results }
+        return try onReadQueueSync { db in
 
             var cache: [Int64: String?] = [:]
             return try results.map { result in
@@ -85,8 +64,9 @@ extension DB {
 
 }
 
-private extension DB {
-    func storeTextArtifacts(rowId: Int64, content: String, db: OpaquePointer) throws {
+/// Text storage internals, shared with `TextIndexBackfill`.
+extension DB {
+    func storeTextArtifacts(rowId: Int64, content: String, indexedContent: String? = nil, db: OpaquePointer) throws {
         let normalized = content.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !normalized.isEmpty else {
             try clearTextArtifacts(rowId: rowId, clearReference: false, db: db)
@@ -96,8 +76,9 @@ private extension DB {
         let stored = TextStorageCodec.encode(content)
         let storeId = try upsertTextStore(payload: stored, db: db)
         try updateSnapshotTextStoreId(rowId: rowId, textStoreId: storeId, db: db)
-        try updatePreviewText(rowId: rowId, preview: IndexedTextProjection.preview(from: content), db: db)
-        try replaceTextChunks(rowId: rowId, chunks: IndexedTextProjection.chunks(from: content), db: db)
+        // Full text lives once in ts_text_store; the contentless index only holds postings.
+        deleteLegacyPreviewText(rowId: rowId, db: db)
+        try Self.indexText(rowId: rowId, content: indexedContent ?? content, db: db)
     }
 
     func resolvedTextContent(snapshotId: Int64,
@@ -179,60 +160,13 @@ private extension DB {
         }
     }
 
-    func updatePreviewText(rowId: Int64, preview: String, db: OpaquePointer) throws {
+    /// Removes a pre-text-store preview row, if the legacy table still exists.
+    func deleteLegacyPreviewText(rowId: Int64, db: OpaquePointer) {
         var stmt: OpaquePointer?
         defer { sqlite3_finalize(stmt) }
-        guard sqlite3_prepare_v2(db, "INSERT OR REPLACE INTO ts_text(rowid, content) VALUES(?, ?);", -1, &stmt, nil) == SQLITE_OK else {
-            throw NSError(domain: "TS.DB", code: 306)
-        }
+        guard sqlite3_prepare_v2(db, "DELETE FROM ts_text WHERE rowid=?;", -1, &stmt, nil) == SQLITE_OK else { return }
         sqlite3_bind_int64(stmt, 1, rowId)
-        sqlite3_bind_text(stmt, 2, preview, -1, SQLITE_TRANSIENT)
-        guard sqlite3_step(stmt) == SQLITE_DONE else {
-            throw NSError(domain: "TS.DB", code: 307)
-        }
-    }
-
-    func deletePreviewText(rowId: Int64, db: OpaquePointer) throws {
-        var stmt: OpaquePointer?
-        defer { sqlite3_finalize(stmt) }
-        guard sqlite3_prepare_v2(db, "DELETE FROM ts_text WHERE rowid=?;", -1, &stmt, nil) == SQLITE_OK else {
-            throw NSError(domain: "TS.DB", code: 312)
-        }
-        sqlite3_bind_int64(stmt, 1, rowId)
-        guard sqlite3_step(stmt) == SQLITE_DONE else {
-            throw NSError(domain: "TS.DB", code: 313)
-        }
-    }
-
-    func replaceTextChunks(rowId: Int64, chunks: [String], db: OpaquePointer) throws {
-        var deleteStmt: OpaquePointer?
-        defer { sqlite3_finalize(deleteStmt) }
-        guard sqlite3_prepare_v2(db, "DELETE FROM ts_text_chunk WHERE snapshot_id=?;", -1, &deleteStmt, nil) == SQLITE_OK else {
-            throw NSError(domain: "TS.DB", code: 308)
-        }
-        sqlite3_bind_int64(deleteStmt, 1, rowId)
-        guard sqlite3_step(deleteStmt) == SQLITE_DONE else {
-            throw NSError(domain: "TS.DB", code: 309)
-        }
-
-        guard !chunks.isEmpty else { return }
-
-        var insertStmt: OpaquePointer?
-        defer { sqlite3_finalize(insertStmt) }
-        let sql = "INSERT INTO ts_text_chunk(snapshot_id, chunk_index, content) VALUES(?, ?, ?);"
-        guard sqlite3_prepare_v2(db, sql, -1, &insertStmt, nil) == SQLITE_OK else {
-            throw NSError(domain: "TS.DB", code: 310)
-        }
-        for (index, chunk) in chunks.enumerated() {
-            sqlite3_bind_int64(insertStmt, 1, rowId)
-            sqlite3_bind_int(insertStmt, 2, Int32(index))
-            sqlite3_bind_text(insertStmt, 3, chunk, -1, SQLITE_TRANSIENT)
-            guard sqlite3_step(insertStmt) == SQLITE_DONE else {
-                throw NSError(domain: "TS.DB", code: 311)
-            }
-            sqlite3_reset(insertStmt)
-            sqlite3_clear_bindings(insertStmt)
-        }
+        _ = sqlite3_step(stmt)
     }
 
     func clearTextArtifacts(rowId: Int64, clearReference: Bool, db: OpaquePointer) throws {
@@ -248,8 +182,8 @@ private extension DB {
         guard sqlite3_step(stmt) == SQLITE_DONE else {
             throw NSError(domain: "TS.DB", code: 315)
         }
-        try deletePreviewText(rowId: rowId, db: db)
-        try replaceTextChunks(rowId: rowId, chunks: [], db: db)
+        deleteLegacyPreviewText(rowId: rowId, db: db)
+        try Self.removeFromTextIndex(rowId: rowId, db: db)
     }
 
     func loadStoredText(textStoreId: Int64, db: OpaquePointer) -> String? {
@@ -388,47 +322,19 @@ enum TextStorageCodec {
 }
 
 enum IndexedTextProjection {
-    static let previewCharacterLimit = 1_000
     static let maxIndexedCharacters = 48_000
-    static let chunkCharacterLimit = 2_000
-    static let chunkOverlapCharacters = 256
-    private static let chunkBoundaryLookback = 256
 
-    static func preview(from text: String) -> String {
-        String(normalizePreview(text).prefix(previewCharacterLimit))
+    /// The normalized text that is written to the full-text index (capped in size).
+    static func indexDocument(from text: String) -> String {
+        normalizeForIndexing(text)
     }
 
-    static func chunks(from text: String) -> [String] {
-        let normalized = normalizeForChunking(text)
-        guard !normalized.isEmpty else { return [] }
-
-        var chunks: [String] = []
-        var start = normalized.startIndex
-
-        while start < normalized.endIndex {
-            let hardEnd = normalized.index(start,
-                                           offsetBy: chunkCharacterLimit,
-                                           limitedBy: normalized.endIndex) ?? normalized.endIndex
-            let end = preferredChunkEnd(in: normalized, start: start, hardEnd: hardEnd)
-            let chunk = normalized[start..<end].trimmingCharacters(in: .whitespacesAndNewlines)
-            if !chunk.isEmpty, chunks.last != chunk {
-                chunks.append(chunk)
-            }
-
-            guard end < normalized.endIndex else { break }
-            let nextStart = preferredChunkStart(in: normalized, previousStart: start, previousEnd: end)
-            start = nextStart > start ? nextStart : end
-        }
-
-        return chunks
-    }
-
-    private static func normalizePreview(_ text: String) -> String {
+    private static func collapseWhitespace(_ text: String) -> String {
         text.replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
             .trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
-    private static func normalizeForChunking(_ text: String) -> String {
+    private static func normalizeForIndexing(_ text: String) -> String {
         var lines: [String] = []
         lines.reserveCapacity(64)
 
@@ -440,7 +346,7 @@ enum IndexedTextProjection {
         }
 
         if lines.isEmpty {
-            return String(normalizePreview(text).prefix(maxIndexedCharacters))
+            return String(collapseWhitespace(text).prefix(maxIndexedCharacters))
         }
 
         var combined = lines.joined(separator: "\n")
@@ -454,44 +360,5 @@ enum IndexedTextProjection {
     private static func normalizeLine(_ line: String) -> String {
         line.replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
             .trimmingCharacters(in: .whitespacesAndNewlines)
-    }
-
-    private static func preferredChunkEnd(in text: String, start: String.Index, hardEnd: String.Index) -> String.Index {
-        guard hardEnd < text.endIndex else { return text.endIndex }
-
-        let lowerBound = text.index(hardEnd,
-                                    offsetBy: -chunkBoundaryLookback,
-                                    limitedBy: start) ?? start
-        if let boundary = text[lowerBound..<hardEnd].lastIndex(where: isChunkBoundary) {
-            let candidate = text.index(after: boundary)
-            if candidate > start {
-                return candidate
-            }
-        }
-        return hardEnd
-    }
-
-    private static func preferredChunkStart(in text: String,
-                                            previousStart: String.Index,
-                                            previousEnd: String.Index) -> String.Index {
-        let overlapStart = text.index(previousEnd,
-                                      offsetBy: -chunkOverlapCharacters,
-                                      limitedBy: previousStart) ?? previousStart
-        guard overlapStart > previousStart else { return previousEnd }
-
-        if let boundary = text[overlapStart..<previousEnd].firstIndex(where: isChunkBoundary) {
-            let candidate = text.index(after: boundary)
-            if candidate < previousEnd {
-                return candidate
-            }
-        }
-        return overlapStart
-    }
-
-    private static func isChunkBoundary(_ character: Character) -> Bool {
-        character.unicodeScalars.allSatisfy { scalar in
-            CharacterSet.whitespacesAndNewlines.contains(scalar)
-                || CharacterSet.punctuationCharacters.contains(scalar)
-        }
     }
 }

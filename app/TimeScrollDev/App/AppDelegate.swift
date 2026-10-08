@@ -79,6 +79,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self?.installUpdateNotificationObservers()
             self?.installSleepWakeObservers()
             StorageMaintenanceManager.shared.start()
+            MCPBridgeServer.shared.start()
             // Show onboarding when the currently configured capture/text modes still need permissions.
             let captureSelection = CaptureModeSelection(settings: SettingsStore.shared)
             let hasRequiredPermissions = Permissions.hasRequiredCapturePermissions(
@@ -125,6 +126,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Ensure any open HEVC writers are flushed (best-effort with timeout)
         AppState.shared.captureManager.flushWriters()
         StorageMaintenanceManager.shared.stop()
+        MCPBridgeServer.shared.stop()
         UsageTracker.shared.appWillTerminate()
         UserDefaults.standard.synchronize()
     }

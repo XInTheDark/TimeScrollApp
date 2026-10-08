@@ -10,6 +10,7 @@ final class CaptureManager: NSObject {
     private var capturedDisplays: [SCDisplay] = []
     private let outputQueue = DispatchQueue(label: "TimeScroll.Capture.Output")
     private let streamDelegate = StreamDelegate()
+    private var appSwitchObserver: AppSwitchObserver?
     private let onSnapshot: (URL) -> Void
 
     init(onSnapshot: @escaping (URL) -> Void) {
@@ -68,6 +69,7 @@ final class CaptureManager: NSObject {
             let output = FrameOutput(
                 onSnapshot: onSnapshot,
                 hevcStore: HEVCVideoStore(namespace: String(display.displayID)),
+                displayBounds: CGDisplayBounds(display.displayID),
                 onProbeIntervalChanged: { [weak self] probeInterval in
                     self?.scheduleProbeIntervalUpdate(probeInterval, for: streamIndex)
                 }
@@ -85,12 +87,22 @@ final class CaptureManager: NSObject {
         configuredProbeIntervals = newProbeIntervals
         outputs = newOutputs
         capturedDisplays = displays
+        appSwitchObserver?.invalidate()
+        // Outputs are only touched on outputQueue, where their sample handlers also run.
+        nonisolated(unsafe) let switchOutputs = newOutputs
+        appSwitchObserver = AppSwitchObserver { [outputQueue] in
+            outputQueue.async {
+                for output in switchOutputs { output.noteAppSwitch() }
+            }
+        }
         for stream in streams {
             try await stream.startCapture()
         }
     }
 
     func stop() async {
+        appSwitchObserver?.invalidate()
+        appSwitchObserver = nil
         for stream in streams {
             try? await stream.stopCapture()
         }

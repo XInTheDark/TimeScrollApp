@@ -55,7 +55,7 @@ struct SearchPane: View {
                             }
                             .labelsHidden()
                             .pickerStyle(.menu)
-                            .frame(width: 280)
+                            .fixedSize()
                         }
 
                         if settings.embeddingProvider == "ollama" {
@@ -69,35 +69,30 @@ struct SearchPane: View {
                         DisclosureGroup("Advanced ranking", isExpanded: $showAdvancedRanking) {
                             VStack(alignment: .leading, spacing: 12) {
                                 LabeledContent("Similarity threshold") {
-                                    HStack {
-                                    Slider(value: $settings.aiThreshold, in: 0.0...0.6, step: 0.05)
-                                    Text(String(format: "%.2f", settings.aiThreshold))
-                                        .monospacedDigit()
-                                        .frame(width: 44, alignment: .trailing)
+                                    SettingsSlider(
+                                        value: $settings.aiThreshold,
+                                        in: 0.0...0.6,
+                                        step: 0.05,
+                                        valueText: String(format: "%.2f", settings.aiThreshold)
+                                    )
                                 }
-                            }
 
                                 LabeledContent("Max candidates") {
-                                    HStack(spacing: 6) {
-                                        TextField("", value: $settings.aiMaxCandidates, formatter: Self.aiIntFormatter)
-                                            .frame(width: 90)
-                                        Text("rows")
-                                            .foregroundColor(.secondary)
-                                    }
+                                    SettingsNumberField(value: $settings.aiMaxCandidates, formatter: Self.aiIntFormatter, unit: "rows", width: 90)
+                                }
                             }
+                            .padding(.top, 8)
                         }
-                        .padding(.top, 8)
-                    }
 
-                    if settings.embeddingProvider == "mobileclip2" {
-                        Text("MobileCLIP2 usually needs a lower similarity threshold than text-only embedding models.")
-                            .font(.footnote)
-                            .foregroundColor(.secondary)
-                    }
+                        if settings.embeddingProvider == "mobileclip2" {
+                            Text("MobileCLIP2 usually needs a lower similarity threshold than text-only embedding models.")
+                                .font(.footnote)
+                                .foregroundColor(.secondary)
+                        }
 
-                    embeddingLibraryCard
+                        embeddingLibraryCard
+                    }
                 }
-            }
             }
         }
         .onAppear {

@@ -52,7 +52,7 @@ struct EmbeddingANNIndex: Codable {
 }
 
 enum EmbeddingANNIndexBuilder {
-    static let minimumCorpusSize = 12_000
+    static let minimumCorpusSize = 250_000
 
     static func shouldBuildIndex(for embeddingCount: Int) -> Bool {
         embeddingCount >= minimumCorpusSize

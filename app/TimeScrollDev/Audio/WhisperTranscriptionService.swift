@@ -6,8 +6,15 @@ actor WhisperTranscriptionService {
 
     private var loadedModelID: String?
     private var whisperKit: WhisperKit?
+    private var idleUnloadTask: Task<Void, Never>?
+    /// Models hold hundreds of MB; release them when transcription has been idle this long.
+    private static let idleUnloadNanoseconds: UInt64 = 5 * 60 * 1_000_000_000
 
-    func transcribe(audioURL: URL, modelID: String) async throws -> [AudioTranscriptSegment] {
+    /// Transcribes a file. Pass `language` to skip language detection; the returned language
+    /// is the one used (detected or given).
+    func transcribe(audioURL: URL, modelID: String, language: String? = nil) async throws -> (segments: [AudioTranscriptSegment], language: String?) {
+        idleUnloadTask?.cancel()
+        defer { scheduleIdleUnload() }
         guard WhisperModelStore.isModelAvailable(modelID) else {
             throw NSError(domain: "TimeScroll.Audio",
                           code: -60,
@@ -17,8 +24,9 @@ actor WhisperTranscriptionService {
         let kit = try await whisperKit(for: modelID)
         let results = try await kit.transcribe(audioPath: audioURL.path,
                                                decodeOptions: DecodingOptions(verbose: false,
+                                                                              language: language,
                                                                               usePrefillPrompt: true,
-                                                                              detectLanguage: true,
+                                                                              detectLanguage: language == nil,
                                                                               wordTimestamps: true,
                                                                               chunkingStrategy: .vad))
         let segments = results
@@ -29,7 +37,7 @@ actor WhisperTranscriptionService {
                 }
                 return lhs.start < rhs.start
             }
-        return segments.enumerated().compactMap { index, segment in
+        let transcript: [AudioTranscriptSegment] = segments.enumerated().compactMap { index, segment in
             let text = sanitizeTranscriptText(segment.text)
             guard !text.isEmpty else { return nil }
             return AudioTranscriptSegment(id: index,
@@ -37,6 +45,23 @@ actor WhisperTranscriptionService {
                                           relativeEndMs: Int64((segment.end * 1000).rounded()),
                                           text: text)
         }
+        return (transcript, results.first?.language ?? language)
+    }
+
+    private func scheduleIdleUnload() {
+        idleUnloadTask?.cancel()
+        idleUnloadTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: Self.idleUnloadNanoseconds)
+            guard !Task.isCancelled else { return }
+            await self?.unloadModel()
+        }
+    }
+
+    private func unloadModel() async {
+        guard let kit = whisperKit else { return }
+        whisperKit = nil
+        loadedModelID = nil
+        await kit.unloadModels()
     }
 
     private func whisperKit(for modelID: String) async throws -> WhisperKit {

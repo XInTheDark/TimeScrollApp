@@ -34,17 +34,6 @@ final class AppState: ObservableObject {
     private var captureTransitionInProgress = false
     private var captureStopInProgress = false
 
-    func enforceRetention() {
-        let days = SettingsStore.shared.retentionDays
-        Task.detached {
-            try? DB.shared.purgeOlderThan(days: days)
-            DB.shared.pruneOldOCRBoxesIfConfigured()
-            await MainActor.run {
-                StorageMaintenanceManager.shared.runIfNeeded(forceMaintenance: true, afterLargeDelete: true)
-            }
-        }
-    }
-
     func startCaptureIfNeeded() async {
         if isCapturing || isCaptureStarting || captureTransitionInProgress { return }
         captureLifecycleGeneration &+= 1

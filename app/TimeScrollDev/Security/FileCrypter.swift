@@ -1,6 +1,5 @@
 import Foundation
 import CryptoKit
-import Security
 
 struct TSEHeader: Codable {
     let version: Int
@@ -11,46 +10,28 @@ struct TSEHeader: Codable {
     let mime: String
     let sealedFek: String // base64
     let nonce: String // base64 12 bytes
+    /// v2: sender's ephemeral X25519 public key (base64) used to wrap the file key.
+    let ephemeralPublicKey: String?
 }
 
+/// "TSE" envelopes: each payload gets a random AES-256-GCM file key; the file key is wrapped
+/// to the vault's media public key (ephemeral X25519 + HKDF-SHA256 + AES-GCM), so files can be
+/// encrypted while the vault is locked and only decrypted once it is unlocked.
+///
+/// Layout: "TSE1" | UInt32 BE header length | header JSON | ciphertext | 16-byte tag.
+/// The header JSON is authenticated as associated data.
 final class FileCrypter {
     static let shared = FileCrypter()
     private init() {}
     private let snapshotWriteLock = NSLock()
 
+    private static let magic = Data("TSE1".utf8)
+    private static let currentVersion = 2
+    private static let wrapInfo = Data("TimeScroll.TSE.v2.fek".utf8)
+
     func encryptSnapshot(encoded: EncodedImage, timestampMs: Int64) throws -> URL {
-    let fek = SymmetricKey(size: .bits256)
-        let nonce = AES.GCM.Nonce()
-        // Wrap FEK with KEK public key
-    let pub = try KeyStore.shared.publicKey()
-    let fekData = fek.withUnsafeBytes { Data($0) }
-        var err: Unmanaged<CFError>?
-        guard let sealedFek = SecKeyCreateEncryptedData(pub, .eciesEncryptionCofactorX963SHA256AESGCM, fekData as CFData, &err) as Data? else {
-            throw err!.takeRetainedValue() as Error
-        }
-        let header = TSEHeader(
-            version: 1,
-            alg: "AES-256-GCM",
-            createdAtMs: timestampMs,
-            width: encoded.width,
-            height: encoded.height,
-            mime: mimeFor(format: encoded.format),
-            sealedFek: sealedFek.base64EncodedString(),
-            nonce: nonce.withUnsafeBytes { Data($0) }.base64EncodedString()
-        )
-
-        let json = try JSONEncoder().encode(header)
-        // Seal payload authenticating the header bytes so header tampering is detected
-        let sealedBox = try AES.GCM.seal(encoded.data, using: fek, nonce: nonce, authenticating: json)
-        var blob = Data()
-        blob.append("TSE1".data(using: .utf8)!)
-        var len = UInt32(json.count).bigEndian
-        withUnsafeBytes(of: &len) { blob.append(contentsOf: $0) }
-        blob.append(json)
-        // CryptoKit provides ciphertext and tag explicitly when nonce provided
-    blob.append(sealedBox.ciphertext)
-    sealedBox.tag.withUnsafeBytes { blob.append(contentsOf: $0) }
-
+        let blob = try seal(encoded.data, timestampMs: timestampMs, width: encoded.width, height: encoded.height,
+                            mime: mimeFor(format: encoded.format))
         // Reserve the filename and write atomically while holding one process-wide lock.
         // Multiple capture streams can otherwise choose the same timestamp-based path.
         snapshotWriteLock.lock()
@@ -66,169 +47,104 @@ final class FileCrypter {
     }
 
     func decryptImage(at url: URL) throws -> Data {
-        let data = try StoragePaths.withSecurityScope { try Data(contentsOf: url) }
-        guard data.count > 8 else { throw NSError(domain: "TS.TSE", code: -1) }
-        let magic = String(data: data.prefix(4), encoding: .utf8)
-        guard magic == "TSE1" else { throw NSError(domain: "TS.TSE", code: -2) }
-        let lenBE = data.subdata(in: 4..<8)
-        let len = lenBE.withUnsafeBytes { $0.load(as: UInt32.self).bigEndian }
-        guard data.count >= 8 + Int(len) else { throw NSError(domain: "TS.TSE", code: -3) }
-        let headerData = data.subdata(in: 8..<(8+Int(len)))
-        let header = try JSONDecoder().decode(TSEHeader.self, from: headerData)
-        let body = data.suffix(from: 8 + Int(len))
-
-    // Unwrap FEK
-    let sealedFek = Data(base64Encoded: header.sealedFek) ?? Data()
-    // Use synchronous key access; SecKey operations will prompt if necessary
-    let priv = try KeyStore.shared.currentPrivateKey()
-        var err: Unmanaged<CFError>?
-        guard let fekRaw = SecKeyCreateDecryptedData(priv, .eciesEncryptionCofactorX963SHA256AESGCM, sealedFek as CFData, &err) as Data? else {
-            throw err!.takeRetainedValue() as Error
-        }
-        let fek = SymmetricKey(data: fekRaw)
-        let nonceData = Data(base64Encoded: header.nonce) ?? Data()
-        let nonce = try AES.GCM.Nonce(data: nonceData)
-        // body = ciphertext + tag (16)
-        guard body.count >= 16 else { throw NSError(domain: "TS.TSE", code: -4) }
-        let cipher = body.prefix(body.count - 16)
-        let tag = body.suffix(16)
-        let sealed = try AES.GCM.SealedBox(nonce: nonce, ciphertext: cipher, tag: tag)
-        let clear = try AES.GCM.open(sealed, using: fek, authenticating: headerData)
-        return clear
+        try decryptTSE(at: url).1
     }
 
-    // Decrypt a generic .tse blob, returning header + payload
+    /// Decrypts a .tse file, returning header + payload.
     func decryptTSE(at url: URL) throws -> (TSEHeader, Data) {
         let data = try StoragePaths.withSecurityScope { try Data(contentsOf: url, options: [.mappedIfSafe]) }
-        guard data.count > 8 else { throw NSError(domain: "TS.TSE", code: -21) }
-        let magic = String(data: data.prefix(4), encoding: .utf8)
-        guard magic == "TSE1" else { throw NSError(domain: "TS.TSE", code: -22) }
-        let lenBE = data.subdata(in: 4..<8)
-        let len = lenBE.withUnsafeBytes { $0.load(as: UInt32.self).bigEndian }
-        guard data.count >= 8 + Int(len) else { throw NSError(domain: "TS.TSE", code: -23) }
-        let headerData = data.subdata(in: 8..<(8+Int(len)))
-        let header = try JSONDecoder().decode(TSEHeader.self, from: headerData)
-        let body = data.suffix(from: 8 + Int(len))
-        let sealedFek = Data(base64Encoded: header.sealedFek) ?? Data()
-        let priv = try KeyStore.shared.currentPrivateKey()
-        var err: Unmanaged<CFError>?
-        guard let fekRaw = SecKeyCreateDecryptedData(priv, .eciesEncryptionCofactorX963SHA256AESGCM, sealedFek as CFData, &err) as Data? else {
-            throw err!.takeRetainedValue() as Error
-        }
-        let fek = SymmetricKey(data: fekRaw)
-        let nonceData = Data(base64Encoded: header.nonce) ?? Data()
-        let nonce = try AES.GCM.Nonce(data: nonceData)
-        guard body.count >= 16 else { throw NSError(domain: "TS.TSE", code: -24) }
-        let cipher = body.prefix(body.count - 16)
-        let tag = body.suffix(16)
-        let sealed = try AES.GCM.SealedBox(nonce: nonce, ciphertext: cipher, tag: tag)
-        let clear = try AES.GCM.open(sealed, using: fek, authenticating: headerData)
-        return (header, clear)
+        return try open(data)
     }
 
-    // Peek the cleartext header from a .tse blob without decrypting the payload
+    /// Reads the cleartext header without decrypting the payload.
     func peekTSEHeader(at url: URL) throws -> TSEHeader {
         let data = try StoragePaths.withSecurityScope { try Data(contentsOf: url, options: [.mappedIfSafe]) }
-        guard data.count > 8 else { throw NSError(domain: "TS.TSE", code: -31) }
-        let magic = String(data: data.prefix(4), encoding: .utf8)
-        guard magic == "TSE1" else { throw NSError(domain: "TS.TSE", code: -32) }
-        let lenBE = data.subdata(in: 4..<8)
-        let len = lenBE.withUnsafeBytes { $0.load(as: UInt32.self).bigEndian }
-        guard data.count >= 8 + Int(len) else { throw NSError(domain: "TS.TSE", code: -33) }
-        let headerData = data.subdata(in: 8..<(8+Int(len)))
-        return try JSONDecoder().decode(TSEHeader.self, from: headerData)
+        return try Self.parse(data).header
     }
 
-    // Create a TSE envelope for arbitrary data. Caller is responsible for writing to disk.
+    /// Creates a TSE envelope for arbitrary data. Caller is responsible for writing to disk.
     func makeTSEBlob(data: Data, timestampMs: Int64, width: Int, height: Int, mime: String) throws -> Data {
-        let fek = SymmetricKey(size: .bits256)
-        let nonce = AES.GCM.Nonce()
-        // Prepare header, then seal authenticating header JSON as AAD
-        let pub = try KeyStore.shared.publicKey()
-        let fekData = fek.withUnsafeBytes { Data($0) }
-        var err: Unmanaged<CFError>?
-        guard let sealedFek = SecKeyCreateEncryptedData(pub, .eciesEncryptionCofactorX963SHA256AESGCM, fekData as CFData, &err) as Data? else {
-            throw err!.takeRetainedValue() as Error
-        }
-        let header = TSEHeader(
-            version: 1,
-            alg: "AES-256-GCM",
-            createdAtMs: timestampMs,
-            width: width,
-            height: height,
-            mime: mime,
-            sealedFek: sealedFek.base64EncodedString(),
-            nonce: nonce.withUnsafeBytes { Data($0) }.base64EncodedString()
-        )
-        let json = try JSONEncoder().encode(header)
-        let sealedBox = try AES.GCM.seal(data, using: fek, nonce: nonce, authenticating: json)
-        var out = Data()
-        out.append("TSE1".data(using: .utf8)!)
-        var len = UInt32(json.count).bigEndian
-        withUnsafeBytes(of: &len) { out.append(contentsOf: $0) }
-        out.append(json)
-        out.append(sealedBox.ciphertext)
-        sealedBox.tag.withUnsafeBytes { out.append(contentsOf: $0) }
-        return out
+        try seal(data, timestampMs: timestampMs, width: width, height: height, mime: mime)
     }
 
-    // MARK: - Generic data envelope (.iq1)
+    /// Envelope for small records (e.g. the locked-capture ingest queue).
     func encryptData(_ data: Data, timestampMs: Int64) throws -> Data {
-        let fek = SymmetricKey(size: .bits256)
-        let nonce = AES.GCM.Nonce()
-        // Prepare header, then seal authenticating header JSON as AAD
-        let pub = try KeyStore.shared.publicKey()
-        let fekData = fek.withUnsafeBytes { Data($0) }
-        var err: Unmanaged<CFError>?
-        guard let sealedFek = SecKeyCreateEncryptedData(pub, .eciesEncryptionCofactorX963SHA256AESGCM, fekData as CFData, &err) as Data? else {
-            throw err!.takeRetainedValue() as Error
-        }
-        let header = TSEHeader(
-            version: 1,
-            alg: "AES-256-GCM",
-            createdAtMs: timestampMs,
-            width: 0, height: 0,
-            mime: "application/json",
-            sealedFek: sealedFek.base64EncodedString(),
-            nonce: nonce.withUnsafeBytes { Data($0) }.base64EncodedString()
-        )
-        let json = try JSONEncoder().encode(header)
-        let sealedBox = try AES.GCM.seal(data, using: fek, nonce: nonce, authenticating: json)
-        var out = Data()
-        out.append("TSE1".data(using: .utf8)!)
-        var len = UInt32(json.count).bigEndian
-        withUnsafeBytes(of: &len) { out.append(contentsOf: $0) }
-        out.append(json)
-    out.append(sealedBox.ciphertext)
-    sealedBox.tag.withUnsafeBytes { out.append(contentsOf: $0) }
-        return out
+        try seal(data, timestampMs: timestampMs, width: 0, height: 0, mime: "application/json")
     }
 
     func decryptData(_ blob: Data) throws -> Data {
-        guard blob.count > 8 else { throw NSError(domain: "TS.TSE", code: -11) }
-        let magic = String(data: blob.prefix(4), encoding: .utf8)
-        guard magic == "TSE1" else { throw NSError(domain: "TS.TSE", code: -12) }
-        let lenBE = blob.subdata(in: 4..<8)
-        let len = lenBE.withUnsafeBytes { $0.load(as: UInt32.self).bigEndian }
-        guard blob.count >= 8 + Int(len) else { throw NSError(domain: "TS.TSE", code: -13) }
-        let headerData = blob.subdata(in: 8..<(8+Int(len)))
-        let header = try JSONDecoder().decode(TSEHeader.self, from: headerData)
-        let body = blob.suffix(from: 8 + Int(len))
-    let sealedFek = Data(base64Encoded: header.sealedFek) ?? Data()
-    let priv = try KeyStore.shared.currentPrivateKey()
-        var err: Unmanaged<CFError>?
-        guard let fekRaw = SecKeyCreateDecryptedData(priv, .eciesEncryptionCofactorX963SHA256AESGCM, sealedFek as CFData, &err) as Data? else {
-            throw err!.takeRetainedValue() as Error
-        }
-        let fek = SymmetricKey(data: fekRaw)
-        let nonceData = Data(base64Encoded: header.nonce) ?? Data()
-        let nonce = try AES.GCM.Nonce(data: nonceData)
-        guard body.count >= 16 else { throw NSError(domain: "TS.TSE", code: -14) }
-        let cipher = body.prefix(body.count - 16)
-        let tag = body.suffix(16)
-        let sealed = try AES.GCM.SealedBox(nonce: nonce, ciphertext: cipher, tag: tag)
-        return try AES.GCM.open(sealed, using: fek, authenticating: headerData)
+        try open(blob).1
     }
+
+    // MARK: - Envelope
+
+    private func seal(_ payload: Data, timestampMs: Int64, width: Int, height: Int, mime: String) throws -> Data {
+        let recipient = try VaultKeys.shared.mediaPublicKey()
+        let fek = SymmetricKey(size: .bits256)
+        let ephemeral = Curve25519.KeyAgreement.PrivateKey()
+        let wrapKey = try Self.wrapKey(shared: ephemeral.sharedSecretFromKeyAgreement(with: recipient),
+                                       ephemeral: ephemeral.publicKey, recipient: recipient)
+        guard let sealedFek = try AES.GCM.seal(fek.withUnsafeBytes { Data($0) }, using: wrapKey).combined else {
+            throw NSError(domain: "TS.TSE", code: -40)
+        }
+        let nonce = AES.GCM.Nonce()
+        let header = TSEHeader(version: Self.currentVersion,
+                               alg: "AES-256-GCM;X25519-HKDF-SHA256",
+                               createdAtMs: timestampMs,
+                               width: width,
+                               height: height,
+                               mime: mime,
+                               sealedFek: sealedFek.base64EncodedString(),
+                               nonce: nonce.withUnsafeBytes { Data($0) }.base64EncodedString(),
+                               ephemeralPublicKey: ephemeral.publicKey.rawRepresentation.base64EncodedString())
+        let json = try JSONEncoder().encode(header)
+        let box = try AES.GCM.seal(payload, using: fek, nonce: nonce, authenticating: json)
+        var out = Self.magic
+        var length = UInt32(json.count).bigEndian
+        withUnsafeBytes(of: &length) { out.append(contentsOf: $0) }
+        out.append(json)
+        out.append(box.ciphertext)
+        out.append(box.tag)
+        return out
+    }
+
+    private func open(_ blob: Data) throws -> (TSEHeader, Data) {
+        let (header, headerData, body) = try Self.parse(blob)
+        guard header.version >= 2, let ephemeralB64 = header.ephemeralPublicKey,
+              let ephemeralRaw = Data(base64Encoded: ephemeralB64) else {
+            throw NSError(domain: "TS.TSE", code: -41, userInfo: [NSLocalizedDescriptionKey: "This file was encrypted by an older TimeScroll vault and cannot be opened."])
+        }
+        let privateKey = try VaultKeys.shared.mediaPrivateKey()
+        let ephemeral = try Curve25519.KeyAgreement.PublicKey(rawRepresentation: ephemeralRaw)
+        let wrapKey = try Self.wrapKey(shared: privateKey.sharedSecretFromKeyAgreement(with: ephemeral),
+                                       ephemeral: ephemeral, recipient: privateKey.publicKey)
+        let fekRaw = try AES.GCM.open(AES.GCM.SealedBox(combined: Data(base64Encoded: header.sealedFek) ?? Data()), using: wrapKey)
+        guard body.count >= 16 else { throw NSError(domain: "TS.TSE", code: -4) }
+        let box = try AES.GCM.SealedBox(nonce: AES.GCM.Nonce(data: Data(base64Encoded: header.nonce) ?? Data()),
+                                        ciphertext: body.prefix(body.count - 16),
+                                        tag: body.suffix(16))
+        return (header, try AES.GCM.open(box, using: SymmetricKey(data: fekRaw), authenticating: headerData))
+    }
+
+    private static func parse(_ data: Data) throws -> (header: TSEHeader, headerData: Data, body: Data) {
+        guard data.count > 8, data.prefix(4) == magic else { throw NSError(domain: "TS.TSE", code: -2) }
+        let length = data.subdata(in: 4..<8).withUnsafeBytes { $0.load(as: UInt32.self).bigEndian }
+        guard data.count >= 8 + Int(length) else { throw NSError(domain: "TS.TSE", code: -3) }
+        let headerData = data.subdata(in: 8..<(8 + Int(length)))
+        let header = try JSONDecoder().decode(TSEHeader.self, from: headerData)
+        return (header, headerData, Data(data.suffix(from: data.startIndex + 8 + Int(length))))
+    }
+
+    private static func wrapKey(shared: SharedSecret,
+                                ephemeral: Curve25519.KeyAgreement.PublicKey,
+                                recipient: Curve25519.KeyAgreement.PublicKey) throws -> SymmetricKey {
+        shared.hkdfDerivedSymmetricKey(using: SHA256.self,
+                                       salt: ephemeral.rawRepresentation + recipient.rawRepresentation,
+                                       sharedInfo: wrapInfo,
+                                       outputByteCount: 32)
+    }
+
+    // MARK: - Paths
 
     private func outputLocation(timestampMs: Int64) throws -> (dir: URL, base: String) {
         let day = Date(timeIntervalSince1970: TimeInterval(timestampMs)/1000)

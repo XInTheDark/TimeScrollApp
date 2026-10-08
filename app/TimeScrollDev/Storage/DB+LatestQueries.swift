@@ -36,9 +36,7 @@ extension DB {
                      endMs: Int64? = nil,
                      captureKinds: [CaptureKind]? = nil,
                      audioSourceKinds: [AudioSourceKind]? = nil) throws -> [SnapshotMeta] {
-        try onQueueSync {
-            try openIfNeeded()
-            guard let db = db else { return [] }
+        try onReadQueueSync { db in
             var sql = """
             SELECT s.id, s.started_at_ms, s.ended_at_ms, s.path, s.app_bundle_id, s.app_name, s.thumb_path, s.capture_kind, s.source_kind, s.audio_asset_id, a.duration_ms
             FROM ts_snapshot s
@@ -84,9 +82,7 @@ extension DB {
 
     // Fetch a single snapshot meta by id
     func snapshotMetaById(_ id: Int64) throws -> SnapshotMeta? {
-        try onQueueSync {
-            try openIfNeeded()
-            guard let db = db else { return nil }
+        try onReadQueueSync { db in
             var stmt: OpaquePointer?
             defer { sqlite3_finalize(stmt) }
             let sql = """
@@ -173,9 +169,7 @@ extension DB {
                                captureKinds: [CaptureKind]?,
                                audioSourceKinds: [AudioSourceKind]?,
                                includeContent: Bool) throws -> [SearchRowUnified] {
-        try onQueueSync {
-            try openIfNeeded()
-            guard let db = db else { return [] }
+        try onReadQueueSync { db in
             let selectClause = includeContent
                 ? "SELECT s.id, s.started_at_ms, s.ended_at_ms, s.path, s.app_bundle_id, s.app_name, s.thumb_path, s.capture_kind, s.source_kind, s.audio_asset_id, a.duration_ms, t.content"
                 : "SELECT s.id, s.started_at_ms, s.ended_at_ms, s.path, s.app_bundle_id, s.app_name, s.thumb_path, s.capture_kind, s.source_kind, s.audio_asset_id, a.duration_ms"

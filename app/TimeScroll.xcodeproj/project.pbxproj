@@ -7,15 +7,12 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
-		C43960542ED30B9600B5EC03 /* SQLCipher in Frameworks */ = {isa = PBXBuildFile; productRef = C43960532ED30B9600B5EC03 /* SQLCipher */; };
 		C44CC3162EAA2D6200387344 /* CoreSearch.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = C44CC30B2EAA2D6200387344 /* CoreSearch.framework */; };
 		C44CC3202EAA2D6200387344 /* CoreSearch.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = C44CC30B2EAA2D6200387344 /* CoreSearch.framework */; };
 		C44CC3212EAA2D6200387344 /* CoreSearch.framework in Embed Frameworks */ = {isa = PBXBuildFile; fileRef = C44CC30B2EAA2D6200387344 /* CoreSearch.framework */; settings = {ATTRIBUTES = (CodeSignOnCopy, RemoveHeadersOnCopy, ); }; };
 		C44CC3482EAA331000387344 /* SQLCipher in Frameworks */ = {isa = PBXBuildFile; productRef = C44CC3472EAA331000387344 /* SQLCipher */; };
 		C45777802E93EFE9007E2F3D /* Collections in Frameworks */ = {isa = PBXBuildFile; productRef = C457777F2E93EFE9007E2F3D /* Collections */; };
 		C4B151FF2E8FDB30003BBD66 /* SQLCipher in Frameworks */ = {isa = PBXBuildFile; productRef = C4B151FE2E8FDB30003BBD66 /* SQLCipher */; };
-		C4C56C552EAB6B910073342F /* CoreSearch.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = C44CC30B2EAA2D6200387344 /* CoreSearch.framework */; };
-		C4C56C562EAB6B910073342F /* CoreSearch.framework in Embed Frameworks */ = {isa = PBXBuildFile; fileRef = C44CC30B2EAA2D6200387344 /* CoreSearch.framework */; settings = {ATTRIBUTES = (CodeSignOnCopy, RemoveHeadersOnCopy, ); }; };
 		C4C56C642EAB6D4C0073342F /* timescroll-mcp.app in CopyFiles */ = {isa = PBXBuildFile; fileRef = C4C56C2D2EAB6AE50073342F /* timescroll-mcp.app */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 		C4F1215A2E7EEDDC00AB38FC /* Sparkle in Frameworks */ = {isa = PBXBuildFile; productRef = C4F121592E7EEDDC00AB38FC /* Sparkle */; };
 		C4A0A1012F8C100100A00101 /* WhisperKit in Frameworks */ = {isa = PBXBuildFile; productRef = C4A0A1022F8C100100A00101 /* WhisperKit */; };
@@ -49,13 +46,6 @@
 			proxyType = 1;
 			remoteGlobalIDString = C4681DB22E7C2717004C20D3;
 			remoteInfo = TimeScroll;
-		};
-		C4C56C572EAB6B910073342F /* PBXContainerItemProxy */ = {
-			isa = PBXContainerItemProxy;
-			containerPortal = C4681DAB2E7C2717004C20D3 /* Project object */;
-			proxyType = 1;
-			remoteGlobalIDString = C44CC30A2EAA2D6200387344;
-			remoteInfo = CoreSearch;
 		};
 		C4C56C652EAB6E540073342F /* PBXContainerItemProxy */ = {
 			isa = PBXContainerItemProxy;
@@ -94,7 +84,6 @@
 			dstPath = "";
 			dstSubfolderSpec = 10;
 			files = (
-				C4C56C562EAB6B910073342F /* CoreSearch.framework in Embed Frameworks */,
 			);
 			name = "Embed Frameworks";
 			runOnlyForDeploymentPostprocessing = 0;
@@ -127,16 +116,21 @@
 				Search/OCRConfusion.swift,
 				Search/EmbeddingANNIndex.swift,
 				Search/EmbeddingANNIndexStore.swift,
+				Search/EmbeddingMatrix.swift,
+				Search/EmbeddingMatrixStore.swift,
 				Search/SearchQueryParser.swift,
 				Search/SearchService.swift,
 				Search/VectorSearchEngine.swift,
 				Security/FileCrypter.swift,
-				Security/KeyStore.swift,
 				Security/SQLCipherBridge.swift,
+				Security/VaultKeys.swift,
+				Security/VaultManifest.swift,
 				Security/VaultMediaAccess.swift,
+				Security/VaultSecret.swift,
 				Settings/SettingsStore.swift,
 				"Storage/DB+Embeddings.swift",
 				"Storage/DB+LatestQueries.swift",
+				"Storage/DB+Meta.swift",
 				"Storage/DB+OCRBoxQueries.swift",
 				"Storage/DB+AudioAssets.swift",
 				"Storage/DB+CaptureFilters.swift",
@@ -146,13 +140,17 @@
 				"Storage/DB+SnapshotReads.swift",
 				"Storage/DB+SnapshotStats.swift",
 				"Storage/DB+SnapshotWrites.swift",
+				"Storage/DB+TextIndex.swift",
 				"Storage/DB+TextQueries.swift",
 				"Storage/DB+UsageSessions.swift",
 				Storage/DB.swift,
+				Storage/DBReadConnection.swift,
 				Storage/HEVCFrameExtractor.swift,
 				Storage/HEVCAssetCache.swift,
+				Storage/HEVCLiveFrameCache.swift,
 				Storage/HEVCMemoryAsset.swift,
 				Storage/ImageEncoder.swift,
+				Storage/OCRLayoutCodec.swift,
 				"Storage/StoragePaths+Backup.swift",
 				"Storage/StoragePaths+Migration.swift",
 				"Storage/StoragePaths+SecurityScope.swift",
@@ -168,6 +166,8 @@
 			membershipExceptions = (
 				MCP/AnyCodable.swift,
 				MCP/JSONRPC.swift,
+				MCP/MCPBridge.swift,
+				MCP/MCPBridgeClient.swift,
 				MCP/MCPMain.swift,
 				MCP/MCPServer.swift,
 				MCP/Schemas.swift,
@@ -187,6 +187,7 @@
 				Info.plist,
 				MCP/AnyCodable.swift,
 				MCP/JSONRPC.swift,
+				MCP/MCPBridgeClient.swift,
 				MCP/MCPMain.swift,
 				MCP/MCPServer.swift,
 				MCP/Schemas.swift,
@@ -293,8 +294,6 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				C43960542ED30B9600B5EC03 /* SQLCipher in Frameworks */,
-				C4C56C552EAB6B910073342F /* CoreSearch.framework in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -485,14 +484,12 @@
 			buildRules = (
 			);
 			dependencies = (
-				C4C56C582EAB6B910073342F /* PBXTargetDependency */,
 			);
 			fileSystemSynchronizedGroups = (
 				C4C56C2E2EAB6AE50073342F /* timescroll-mcp */,
 			);
 			name = "timescroll-mcp";
 			packageProductDependencies = (
-				C43960532ED30B9600B5EC03 /* SQLCipher */,
 			);
 			productName = "timescroll-mcp-agent";
 			productReference = C4C56C2D2EAB6AE50073342F /* timescroll-mcp.app */;
@@ -672,11 +669,6 @@
 			target = C4681DB22E7C2717004C20D3 /* TimeScroll */;
 			targetProxy = C4681DCC2E7C2718004C20D3 /* PBXContainerItemProxy */;
 		};
-		C4C56C582EAB6B910073342F /* PBXTargetDependency */ = {
-			isa = PBXTargetDependency;
-			target = C44CC30A2EAA2D6200387344 /* CoreSearch */;
-			targetProxy = C4C56C572EAB6B910073342F /* PBXContainerItemProxy */;
-		};
 		C4C56C662EAB6E540073342F /* PBXTargetDependency */ = {
 			isa = PBXTargetDependency;
 			target = C4C56C2C2EAB6AE50073342F /* timescroll-mcp */;
@@ -691,7 +683,7 @@
 				BUILD_LIBRARY_FOR_DISTRIBUTION = YES;
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
-				CURRENT_PROJECT_VERSION = 47;
+				CURRENT_PROJECT_VERSION = 48;
 				DEVELOPMENT_TEAM = AHMJRF4WSG;
 				DYLIB_COMPATIBILITY_VERSION = 1;
 				DYLIB_CURRENT_VERSION = 1;
@@ -706,7 +698,7 @@
 					"@loader_path/Frameworks",
 				);
 				MACOSX_DEPLOYMENT_TARGET = 14.0;
-				MARKETING_VERSION = 1.0.2;
+				MARKETING_VERSION = 2.0.0;
 				MODULE_VERIFIER_SUPPORTED_LANGUAGES = "objective-c objective-c++";
 				MODULE_VERIFIER_SUPPORTED_LANGUAGE_STANDARDS = "gnu17 gnu++20";
 				PRODUCT_BUNDLE_IDENTIFIER = com.muzhen.CoreSearch;
@@ -727,7 +719,7 @@
 				BUILD_LIBRARY_FOR_DISTRIBUTION = YES;
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
-				CURRENT_PROJECT_VERSION = 47;
+				CURRENT_PROJECT_VERSION = 48;
 				DEVELOPMENT_TEAM = AHMJRF4WSG;
 				DYLIB_COMPATIBILITY_VERSION = 1;
 				DYLIB_CURRENT_VERSION = 1;
@@ -742,7 +734,7 @@
 					"@loader_path/Frameworks",
 				);
 				MACOSX_DEPLOYMENT_TARGET = 14.0;
-				MARKETING_VERSION = 1.0.2;
+				MARKETING_VERSION = 2.0.0;
 				MODULE_VERIFIER_SUPPORTED_LANGUAGES = "objective-c objective-c++";
 				MODULE_VERIFIER_SUPPORTED_LANGUAGE_STANDARDS = "gnu17 gnu++20";
 				PRODUCT_BUNDLE_IDENTIFIER = com.muzhen.CoreSearch;
@@ -761,11 +753,11 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 47;
+				CURRENT_PROJECT_VERSION = 48;
 				DEVELOPMENT_TEAM = AHMJRF4WSG;
 				GENERATE_INFOPLIST_FILE = YES;
 				MACOSX_DEPLOYMENT_TARGET = 15.5;
-				MARKETING_VERSION = 1.0.2;
+				MARKETING_VERSION = 2.0.0;
 				PRODUCT_BUNDLE_IDENTIFIER = com.muzhen.CoreSearchTests;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_EMIT_LOC_STRINGS = NO;
@@ -778,11 +770,11 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 47;
+				CURRENT_PROJECT_VERSION = 48;
 				DEVELOPMENT_TEAM = AHMJRF4WSG;
 				GENERATE_INFOPLIST_FILE = YES;
 				MACOSX_DEPLOYMENT_TARGET = 15.5;
-				MARKETING_VERSION = 1.0.2;
+				MARKETING_VERSION = 2.0.0;
 				PRODUCT_BUNDLE_IDENTIFIER = com.muzhen.CoreSearchTests;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_EMIT_LOC_STRINGS = NO;
@@ -918,12 +910,12 @@
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				ASSETCATALOG_COMPILER_INCLUDE_ALL_APPICON_ASSETS = NO;
 					CODE_SIGN_ENTITLEMENTS = TimeScrollDev/TimeScrollRuntime.entitlements;
-					CODE_SIGN_IDENTITY = "-";
-					CODE_SIGN_STYLE = Manual;
+					CODE_SIGN_IDENTITY = "Apple Development";
+					CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
-				CURRENT_PROJECT_VERSION = 47;
+				CURRENT_PROJECT_VERSION = 48;
 				DEVELOPMENT_ASSET_PATHS = "";
-					DEVELOPMENT_TEAM = "";
+					DEVELOPMENT_TEAM = AHMJRF4WSG;
 				ENABLE_HARDENED_RUNTIME = YES;
 				ENABLE_PREVIEWS = YES;
 				ENABLE_USER_SCRIPT_SANDBOXING = NO;
@@ -944,7 +936,7 @@
 					"@executable_path/../Frameworks",
 				);
 				MACOSX_DEPLOYMENT_TARGET = 14.0;
-				MARKETING_VERSION = 1.0.2;
+				MARKETING_VERSION = 2.0.0;
 				PRODUCT_BUNDLE_IDENTIFIER = com.muzhen.TimeScroll;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 					PROVISIONING_PROFILE_SPECIFIER = "";
@@ -964,7 +956,7 @@
 					CODE_SIGN_IDENTITY = "-";
 					CODE_SIGN_STYLE = Manual;
 				COMBINE_HIDPI_IMAGES = YES;
-				CURRENT_PROJECT_VERSION = 47;
+				CURRENT_PROJECT_VERSION = 48;
 				DEVELOPMENT_ASSET_PATHS = "";
 					DEVELOPMENT_TEAM = "";
 				ENABLE_HARDENED_RUNTIME = YES;
@@ -987,7 +979,7 @@
 					"@executable_path/../Frameworks",
 				);
 				MACOSX_DEPLOYMENT_TARGET = 14.0;
-				MARKETING_VERSION = 1.0.2;
+				MARKETING_VERSION = 2.0.0;
 				PRODUCT_BUNDLE_IDENTIFIER = com.muzhen.TimeScroll;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 					PROVISIONING_PROFILE_SPECIFIER = "";
@@ -1002,11 +994,11 @@
 			buildSettings = {
 				BUNDLE_LOADER = "$(TEST_HOST)";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 47;
+				CURRENT_PROJECT_VERSION = 48;
 				DEVELOPMENT_TEAM = AHMJRF4WSG;
 				GENERATE_INFOPLIST_FILE = YES;
 				MACOSX_DEPLOYMENT_TARGET = 14.0;
-				MARKETING_VERSION = 1.0.2;
+				MARKETING_VERSION = 2.0.0;
 				PRODUCT_BUNDLE_IDENTIFIER = com.muzhen.TimeScrollTests;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_EMIT_LOC_STRINGS = NO;
@@ -1020,11 +1012,11 @@
 			buildSettings = {
 				BUNDLE_LOADER = "$(TEST_HOST)";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 47;
+				CURRENT_PROJECT_VERSION = 48;
 				DEVELOPMENT_TEAM = AHMJRF4WSG;
 				GENERATE_INFOPLIST_FILE = YES;
 				MACOSX_DEPLOYMENT_TARGET = 14.0;
-				MARKETING_VERSION = 1.0.2;
+				MARKETING_VERSION = 2.0.0;
 				PRODUCT_BUNDLE_IDENTIFIER = com.muzhen.TimeScrollTests;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_EMIT_LOC_STRINGS = NO;
@@ -1037,10 +1029,10 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 47;
+				CURRENT_PROJECT_VERSION = 48;
 				DEVELOPMENT_TEAM = AHMJRF4WSG;
 				GENERATE_INFOPLIST_FILE = YES;
-				MARKETING_VERSION = 1.0.2;
+				MARKETING_VERSION = 2.0.0;
 				PRODUCT_BUNDLE_IDENTIFIER = com.muzhen.TimeScrollUITests;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_EMIT_LOC_STRINGS = NO;
@@ -1053,10 +1045,10 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 47;
+				CURRENT_PROJECT_VERSION = 48;
 				DEVELOPMENT_TEAM = AHMJRF4WSG;
 				GENERATE_INFOPLIST_FILE = YES;
-				MARKETING_VERSION = 1.0.2;
+				MARKETING_VERSION = 2.0.0;
 				PRODUCT_BUNDLE_IDENTIFIER = com.muzhen.TimeScrollUITests;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_EMIT_LOC_STRINGS = NO;
@@ -1071,11 +1063,11 @@
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 					CODE_SIGN_ENTITLEMENTS = "";
-					CODE_SIGN_IDENTITY = "-";
-					CODE_SIGN_STYLE = Manual;
+					CODE_SIGN_IDENTITY = "Apple Development";
+					CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
-				CURRENT_PROJECT_VERSION = 47;
-					DEVELOPMENT_TEAM = "";
+				CURRENT_PROJECT_VERSION = 48;
+					DEVELOPMENT_TEAM = AHMJRF4WSG;
 				ENABLE_HARDENED_RUNTIME = YES;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
@@ -1087,7 +1079,7 @@
 					"@executable_path/../Frameworks",
 				);
 				MACOSX_DEPLOYMENT_TARGET = 15.5;
-				MARKETING_VERSION = 1.0.2;
+				MARKETING_VERSION = 2.0.0;
 				PRODUCT_BUNDLE_IDENTIFIER = com.muzhen.TimeScroll.mcp;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 					PROVISIONING_PROFILE_SPECIFIER = "";
@@ -1107,7 +1099,7 @@
 					CODE_SIGN_IDENTITY = "-";
 					CODE_SIGN_STYLE = Manual;
 				COMBINE_HIDPI_IMAGES = YES;
-				CURRENT_PROJECT_VERSION = 47;
+				CURRENT_PROJECT_VERSION = 48;
 					DEVELOPMENT_TEAM = "";
 				ENABLE_HARDENED_RUNTIME = YES;
 				ENABLE_PREVIEWS = YES;
@@ -1120,7 +1112,7 @@
 					"@executable_path/../Frameworks",
 				);
 				MACOSX_DEPLOYMENT_TARGET = 15.5;
-				MARKETING_VERSION = 1.0.2;
+				MARKETING_VERSION = 2.0.0;
 				PRODUCT_BUNDLE_IDENTIFIER = com.muzhen.TimeScroll.mcp;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 					PROVISIONING_PROFILE_SPECIFIER = "";
@@ -1235,11 +1227,6 @@
 /* End XCRemoteSwiftPackageReference section */
 
 /* Begin XCSwiftPackageProductDependency section */
-		C43960532ED30B9600B5EC03 /* SQLCipher */ = {
-			isa = XCSwiftPackageProductDependency;
-			package = C4B151FD2E8FDB30003BBD66 /* XCRemoteSwiftPackageReference "SQLCipher.swift" */;
-			productName = SQLCipher;
-		};
 		C44CC3472EAA331000387344 /* SQLCipher */ = {
 			isa = XCSwiftPackageProductDependency;
 			package = C4B151FD2E8FDB30003BBD66 /* XCRemoteSwiftPackageReference "SQLCipher.swift" */;

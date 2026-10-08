@@ -7,13 +7,14 @@ final class SettingsStore: ObservableObject {
     nonisolated static let defaultOCRMode: OCRMode = .fast
     nonisolated static let defaultCaptureMinInterval: Double = 5.0
     nonisolated static let defaultRetentionDays: Int = 30
-    nonisolated static let defaultStorageFormat: StorageFormat = .heic
+    nonisolated static let defaultStorageFormat: StorageFormat = .hevc
     nonisolated static let defaultMaxLongEdge: Int = 1600
     nonisolated static let defaultLossyQuality: Double = 0.6
     nonisolated static let defaultDedupEnabled: Bool = true
     nonisolated static let defaultDedupHammingThreshold: Int = 6
     nonisolated static let defaultAdaptiveSampling: Bool = true
     nonisolated static let defaultAdaptiveMaxInterval: Double = 10.0
+    nonisolated static let defaultAppSwitchCaptureMode: AppSwitchCaptureMode = .off
     nonisolated static let defaultDegradeAfterDays: Int = 7
     nonisolated static let defaultDegradeMaxLongEdge: Int = 1200
     nonisolated static let defaultDegradeQuality: Double = 0.5
@@ -36,6 +37,19 @@ final class SettingsStore: ObservableObject {
     enum StorageFormat: String, CaseIterable, Identifiable { case hevc, heic, jpeg, png; var id: String { rawValue } }
     enum DisplayCaptureMode: String, CaseIterable, Identifiable { case first, all; var id: String { rawValue } }
 
+    /// Whether switching apps triggers capture: never, as an extra snapshot on top of the
+    /// regular interval, or as the only time capture runs (for a short window after each switch).
+    enum AppSwitchCaptureMode: String, CaseIterable, Identifiable {
+        case off, additional, afterSwitchOnly
+        var id: String { rawValue }
+
+        /// Background-safe read of the current mode.
+        nonisolated static func current(_ defaults: UserDefaults = .standard) -> AppSwitchCaptureMode {
+            defaults.string(forKey: "settings.appSwitchCaptureMode").flatMap(AppSwitchCaptureMode.init(rawValue:))
+                ?? SettingsStore.defaultAppSwitchCaptureMode
+        }
+    }
+
     enum TextProcessingMode: String, CaseIterable, Identifiable {
         case ocr, accessibility, none
         var id: String { rawValue }
@@ -44,6 +58,7 @@ final class SettingsStore: ObservableObject {
     @Published var textProcessingMode: TextProcessingMode = SettingsStore.defaultTextProcessingMode { didSet { if !isLoading { save() } } }
     @Published var ocrMode: OCRMode = SettingsStore.defaultOCRMode { didSet { if !isLoading { save() } } }
     @Published var captureMinInterval: Double = SettingsStore.defaultCaptureMinInterval { didSet { if !isLoading { save() } } }
+    @Published var appSwitchCaptureMode: AppSwitchCaptureMode = SettingsStore.defaultAppSwitchCaptureMode { didSet { if !isLoading { save() } } }
     @Published var fuzziness: Fuzziness = .low { didSet { if !isLoading { save() } } }
     @Published var retentionDays: Int = SettingsStore.defaultRetentionDays { didSet { if !isLoading { save() } } }
     @Published var showHighlights: Bool = true { didSet { if !isLoading { save() } } }
@@ -139,6 +154,7 @@ final class SettingsStore: ObservableObject {
         if let raw = defaults.string(forKey: "settings.ocrMode"), let v = OCRMode(rawValue: raw) { ocrMode = v }
         let interval = defaults.double(forKey: "settings.captureMinInterval")
         if interval > 0 { captureMinInterval = interval }
+        if let raw = defaults.string(forKey: "settings.appSwitchCaptureMode"), let v = AppSwitchCaptureMode(rawValue: raw) { appSwitchCaptureMode = v }
         if let raw = defaults.string(forKey: "settings.fuzziness"), let v = Fuzziness(rawValue: raw) { fuzziness = v }
         let rd = defaults.integer(forKey: "settings.retentionDays")
         if rd > 0 { retentionDays = rd }
@@ -156,6 +172,15 @@ final class SettingsStore: ObservableObject {
         }
 
         if let raw = defaults.string(forKey: "settings.storageFormat"), let f = StorageFormat(rawValue: raw) { storageFormat = f }
+        // 1.x saved its HEIC default for every install; move those to the HEVC default once.
+        // Written to defaults directly because capture and compaction read the key off the main actor.
+        if !defaults.bool(forKey: "settings.migratedStorageFormatToHEVC") {
+            if storageFormat == .heic {
+                storageFormat = .hevc
+                defaults.set(StorageFormat.hevc.rawValue, forKey: "settings.storageFormat")
+            }
+            defaults.set(true, forKey: "settings.migratedStorageFormatToHEVC")
+        }
         if let p = StoragePaths.sharedString(forKey: StoragePaths.storageDisplayPathKey) { storageFolderPath = p }
         if defaults.object(forKey: "settings.backupEnabled") != nil { backupEnabled = defaults.bool(forKey: "settings.backupEnabled") }
         if let bp = StoragePaths.sharedString(forKey: StoragePaths.backupDisplayPathKey) { backupFolderPath = bp }
@@ -306,6 +331,7 @@ final class SettingsStore: ObservableObject {
         defaults.set(textProcessingMode.rawValue, forKey: "settings.textProcessingMode")
         defaults.set(ocrMode.rawValue, forKey: "settings.ocrMode")
         defaults.set(captureMinInterval, forKey: "settings.captureMinInterval")
+        defaults.set(appSwitchCaptureMode.rawValue, forKey: "settings.appSwitchCaptureMode")
         defaults.set(fuzziness.rawValue, forKey: "settings.fuzziness")
         StoragePaths.setShared(fuzziness.rawValue, forKey: "settings.fuzziness")
         defaults.set(retentionDays, forKey: "settings.retentionDays")

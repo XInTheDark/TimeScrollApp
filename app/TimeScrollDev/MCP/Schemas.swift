@@ -5,7 +5,7 @@ enum Schemas {
         "properties": [
             "query": ["type": "string", "description": "The search query. Leave query empty to return the latest snapshots."],
             "max_results": ["type":"integer","minimum":1,"maximum":100,"default":20],
-            "include_images": ["type":"boolean","default":true, "description":"Include snapshot images in results."],
+            "include_images": ["type":"boolean","default":false, "description":"Include snapshot images (JPEG) for the first 10 results. Images are large; request them only when the text is not enough."],
             "date_range": [
                 "type":"object",
                 "properties":[ "from":["type":"string","format":"date-time"],
@@ -17,8 +17,8 @@ enum Schemas {
             "apps": ["type":"array","items":["type":"string"],
                      "description":"List of app bundle IDs to include. Leave empty to include all apps. Example: [\"com.apple.Safari\",\"com.microsoft.VSCode\"]"]
             ,
-            "image_max_pixel": ["type":"integer","minimum":1024,"maximum":8192,"default":2048,
-                                 "description":"Max pixel length (longest edge) for returned images. Do not change unless you need to get a better quality image."]
+            "image_max_pixel": ["type":"integer","minimum":256,"maximum":2048,"default":1024,
+                                 "description":"Max pixel length (longest edge) for returned images. Raise only when small text in the image must be legible."]
         ],
         "required": []
     ]

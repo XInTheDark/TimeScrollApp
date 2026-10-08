@@ -12,7 +12,14 @@ extension DB {
             guard let db = db else { return [] }
             var stmt: OpaquePointer?
             defer { sqlite3_finalize(stmt) }
-            let sql = "SELECT path FROM ts_snapshot WHERE started_at_ms < ? AND COALESCE(compaction_profile, '') != ?;"
+            // Only plaintext still images can be re-encoded; skip audio, HEVC segments and vault files.
+            let sql = """
+            SELECT path FROM ts_snapshot
+            WHERE started_at_ms < ? AND COALESCE(compaction_profile, '') != ?
+              AND capture_kind = 'screen'
+              AND LOWER(COALESCE(format, '')) IN ('heic', 'jpg', 'jpeg', 'png')
+              AND path NOT LIKE '%.tse';
+            """
             guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return [] }
             sqlite3_bind_int64(stmt, 1, cutoffMs)
             sqlite3_bind_text(stmt, 2, profile, -1, SQLITE_TRANSIENT)
@@ -113,9 +120,7 @@ extension DB {
     }
 
     func distinctApps() throws -> [(bundleId: String, name: String)] {
-        try onQueueSync {
-        try openIfNeeded()
-        guard let db = db else { return [] }
+        try onReadQueueSync { db in
         var stmt: OpaquePointer?
         defer { sqlite3_finalize(stmt) }
         // Use latest observed app_name per bundle id for better label accuracy

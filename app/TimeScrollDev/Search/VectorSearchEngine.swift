@@ -5,6 +5,23 @@ final class VectorSearchEngine {
 
     private init() {}
 
+    /// Ranked ids for recent queries, so paging does not re-run the search. Entries expire
+    /// quickly; new captures show up on the next fresh query.
+    fileprivate struct RankKey: Equatable {
+        let identity: VectorSearchIdentity
+        let query: [Float]
+        let threshold: Float
+        let appBundleIds: Set<String>?
+        let startMs: Int64?
+        let endMs: Int64?
+        let captureKinds: Set<CaptureKind>?
+        let audioSourceKinds: Set<AudioSourceKind>?
+    }
+    private static let rankCacheTTL: TimeInterval = 60
+    private static let rankCacheCapacity = 4
+    private let rankCacheLock = NSLock()
+    private var rankCache: [(key: RankKey, ranked: [(id: Int64, score: Float)], createdAt: Date)] = []
+
     func searchResults(queryVector: [Float],
                        knownTokens: Int,
                        totalTokens: Int,
@@ -22,206 +39,110 @@ final class VectorSearchEngine {
                                             model: service.modelID,
                                             dim: service.dim,
                                             dbPath: DB.shared.dbURL?.path ?? StoragePaths.dbURL().path)
-        let stats = (try? DB.shared.embeddingStats(requireDim: service.dim,
-                                                   requireProvider: service.providerID,
-                                                   requireModel: service.modelID)) ?? EmbeddingStats(count: 0, maxUpdatedAtMs: 0)
-        guard stats.count > 0 else { return [] }
-
         let threshold = Float(service.effectiveThreshold)
-        let debugEnabled = UserDefaults.standard.bool(forKey: "settings.debugMode")
-        let strategy: String
-        let rawResults: [SearchResult]
+        let key = RankKey(identity: identity,
+                          query: queryVector,
+                          threshold: threshold,
+                          appBundleIds: appBundleIds.map(Set.init),
+                          startMs: startMs,
+                          endMs: endMs,
+                          captureKinds: captureKinds.flatMap { $0.isEmpty ? nil : Set($0) },
+                          audioSourceKinds: audioSourceKinds.flatMap { $0.isEmpty ? nil : Set($0) })
 
-        let hasMediaFilters = (captureKinds?.isEmpty == false) || (audioSourceKinds?.isEmpty == false)
-
-        if !hasMediaFilters,
-           EmbeddingANNIndexBuilder.shouldBuildIndex(for: stats.count),
-           let index = EmbeddingANNIndexStore.shared.readyIndex(identity: identity, stats: stats) {
-            strategy = "ann"
-            rawResults = annSearch(queryVector: queryVector,
-                                   threshold: threshold,
-                                   service: service,
-                                   identity: identity,
-                                   index: index,
-                                   appBundleIds: appBundleIds,
-                                   startMs: startMs,
-                                   endMs: endMs,
-                                   limit: limit,
-                                   offset: offset)
+        var strategy = "cached"
+        let ranked: [(id: Int64, score: Float)]
+        if let cached = cachedRanking(for: key) {
+            ranked = cached
         } else {
-            let fullScan = !EmbeddingANNIndexBuilder.shouldBuildIndex(for: stats.count)
-            strategy = fullScan ? "exact-full" : "exact-fallback"
-            if !fullScan {
-                EmbeddingANNIndexStore.shared.scheduleBuildIfNeeded(identity: identity, stats: stats)
+            let stats = (try? DB.shared.embeddingStats(requireDim: service.dim,
+                                                       requireProvider: service.providerID,
+                                                       requireModel: service.modelID)) ?? EmbeddingStats(count: 0, maxUpdatedAtMs: 0)
+            guard stats.count > 0 else { return [] }
+            (ranked, strategy) = rank(key: key, stats: stats, requested: limit + offset, maxCandidates: service.maxCandidates)
+            storeRanking(ranked, for: key)
+            if UserDefaults.standard.bool(forKey: "settings.debugMode") {
+                let head = queryVector.prefix(8).map { String(format: "%.4f", $0) }.joined(separator: ", ")
+                print("[AI][Query] provider=\(service.providerID) model=\(service.modelID) dim=\(queryVector.count) tokens=\(knownTokens)/\(totalTokens) threshold=\(String(format: "%.2f", threshold)) corpus=\(stats.count) strategy=\(strategy) matches=\(ranked.count) head=[\(head)]")
             }
-            rawResults = exactSearch(queryVector: queryVector,
-                                     threshold: threshold,
-                                     service: service,
-                                     stats: stats,
-                                     appBundleIds: appBundleIds,
-                                     startMs: startMs,
-                                     endMs: endMs,
-                                     captureKinds: captureKinds,
-                                     audioSourceKinds: audioSourceKinds,
-                                     limit: limit,
-                                     offset: offset,
-                                     fullScan: fullScan)
         }
 
-        if debugEnabled {
-            let head = queryVector.prefix(8).map { String(format: "%.4f", $0) }.joined(separator: ", ")
-            print("[AI][Query] provider=\(service.providerID) model=\(service.modelID) dim=\(queryVector.count) tokens=\(knownTokens)/\(totalTokens) threshold=\(String(format: "%.2f", threshold)) corpus=\(stats.count) strategy=\(strategy) head=[\(head)]")
-        }
-
-        return rawResults
+        let start = max(0, offset)
+        let end = min(ranked.count, start + max(0, limit))
+        guard start < end else { return [] }
+        let page = (try? DB.shared.searchResults(snapshotIds: ranked[start..<end].map(\.id))) ?? []
+        return (try? DB.shared.hydrateSearchResultContents(page)) ?? page
     }
 }
 
 private extension VectorSearchEngine {
-    func exactSearch(queryVector: [Float],
-                     threshold: Float,
-                     service: EmbeddingService,
-                     stats: EmbeddingStats,
-                     appBundleIds: [String]?,
-                     startMs: Int64?,
-                     endMs: Int64?,
-                     captureKinds: [CaptureKind]?,
-                     audioSourceKinds: [AudioSourceKind]?,
-                     limit: Int,
-                     offset: Int,
-                     fullScan: Bool) -> [SearchResult] {
-        let fetchLimit = fullScan
-            ? max(limit + offset, stats.count)
-            : max(limit + offset, service.maxCandidates)
-        let candidates = (try? DB.shared.embeddingCandidates(appBundleIds: appBundleIds,
-                                                             startMs: startMs,
-                                                             endMs: endMs,
-                                                             captureKinds: captureKinds,
-                                                             audioSourceKinds: audioSourceKinds,
-                                                             limit: fetchLimit,
-                                                             offset: 0,
-                                                             requireDim: service.dim,
-                                                             requireProvider: service.providerID,
-                                                             requireModel: service.modelID)) ?? []
-        let ranked = rankCandidates(candidates, queryVector: queryVector, threshold: threshold)
-        return hydratePage(from: ranked, limit: limit, offset: offset)
+    func rank(key: RankKey, stats: EmbeddingStats, requested: Int, maxCandidates: Int) -> ([(id: Int64, score: Float)], String) {
+        let filter = EmbeddingMatrixFilter(startMs: key.startMs,
+                                           endMs: key.endMs,
+                                           appBundleIds: key.appBundleIds,
+                                           captureKinds: key.captureKinds,
+                                           audioSourceKinds: key.audioSourceKinds)
+        let hasMediaFilters = key.captureKinds != nil || key.audioSourceKinds != nil
+        let useANN = !hasMediaFilters && EmbeddingANNIndexBuilder.shouldBuildIndex(for: stats.count)
+        let index = useANN ? EmbeddingANNIndexStore.shared.readyIndex(identity: key.identity, stats: stats) : nil
+        if useANN, index == nil {
+            EmbeddingANNIndexStore.shared.scheduleBuildIfNeeded(identity: key.identity, stats: stats)
+        }
+
+        let result = EmbeddingMatrixStore.shared.withMatrix(identity: key.identity, stats: stats) { matrix in
+            guard let index, !index.clusters.isEmpty else {
+                return (matrix.rank(query: key.query, threshold: key.threshold, filter: filter), "exact")
+            }
+            return (annRank(matrix: matrix, index: index, key: key, filter: filter,
+                            requested: max(1, requested), maxCandidates: maxCandidates), "ann")
+        }
+        return result ?? ([], "empty")
     }
 
-    func annSearch(queryVector: [Float],
-                   threshold: Float,
-                   service: EmbeddingService,
-                   identity: VectorSearchIdentity,
-                   index: EmbeddingANNIndex,
-                   appBundleIds: [String]?,
-                   startMs: Int64?,
-                   endMs: Int64?,
-                   limit: Int,
-                   offset: Int) -> [SearchResult] {
-        guard !index.clusters.isEmpty else { return [] }
-
-        let requestedResults = max(1, limit + offset)
-        let appFilter = appBundleIds.map(Set.init)
-        let maxFetch = max(service.maxCandidates, requestedResults * 64)
-        let clusterOrder = orderedClusters(for: queryVector, in: index)
+    /// Probes the nearest clusters, widening until enough matches are found.
+    func annRank(matrix: EmbeddingMatrix,
+                 index: EmbeddingANNIndex,
+                 key: RankKey,
+                 filter: EmbeddingMatrixFilter,
+                 requested: Int,
+                 maxCandidates: Int) -> [(id: Int64, score: Float)] {
+        var centroidScores: [(cluster: Int, score: Float)] = []
+        centroidScores.reserveCapacity(index.clusters.count)
+        for clusterIndex in index.clusters.indices {
+            centroidScores.append((clusterIndex, EmbeddingService.dot(key.query, index.clusters[clusterIndex].centroid)))
+        }
+        centroidScores.sort { lhs, rhs in
+            lhs.score == rhs.score ? lhs.cluster < rhs.cluster : lhs.score > rhs.score
+        }
+        let clusterOrder = centroidScores.map(\.cluster)
+        let maxFetch = max(maxCandidates, requested * 64)
         var probeCount = min(clusterOrder.count, EmbeddingANNIndexBuilder.initialProbeCount(for: index.clusters.count))
-        var bestRanked: [SearchResult] = []
-
+        var ranked: [(id: Int64, score: Float)] = []
         while probeCount > 0 {
-            let candidateIds = collectCandidateIDs(clusterOrder: clusterOrder,
-                                                   clusterLimit: probeCount,
-                                                   index: index,
-                                                   appFilter: appFilter,
-                                                   startMs: startMs,
-                                                   endMs: endMs,
-                                                   maxFetch: maxFetch)
-            if candidateIds.isEmpty {
-                if probeCount >= clusterOrder.count { break }
-                probeCount = min(clusterOrder.count, probeCount * 2)
-                continue
+            var ids: [Int64] = []
+            for clusterIndex in clusterOrder.prefix(probeCount) {
+                ids.append(contentsOf: index.clusters[clusterIndex].items.lazy.map(\.snapshotId))
+                if ids.count >= maxFetch { break }
             }
-
-            let candidates = (try? DB.shared.embeddingCandidates(snapshotIds: candidateIds,
-                                                                 requireDim: identity.dim,
-                                                                 requireProvider: identity.provider,
-                                                                 requireModel: identity.model)) ?? []
-            let ranked = rankCandidates(candidates, queryVector: queryVector, threshold: threshold)
-            bestRanked = ranked
-            if ranked.count >= requestedResults || probeCount >= clusterOrder.count {
-                break
-            }
-            probeCount = min(clusterOrder.count, max(probeCount + 1, probeCount * 2))
+            ranked = matrix.rank(query: key.query, threshold: key.threshold, filter: filter, candidateIds: Array(ids.prefix(maxFetch)))
+            if ranked.count >= requested || probeCount >= clusterOrder.count { break }
+            probeCount = min(clusterOrder.count, probeCount * 2)
         }
-
-        return hydratePage(from: bestRanked, limit: limit, offset: offset)
+        return ranked
     }
 
-    func orderedClusters(for queryVector: [Float], in index: EmbeddingANNIndex) -> [(clusterIndex: Int, score: Float)] {
-        index.clusters.indices
-            .map { clusterIndex in
-                (clusterIndex, EmbeddingService.dot(queryVector, index.clusters[clusterIndex].centroid))
-            }
-            .sorted { lhs, rhs in
-                if lhs.score == rhs.score {
-                    return lhs.clusterIndex < rhs.clusterIndex
-                }
-                return lhs.score > rhs.score
-            }
+    func cachedRanking(for key: RankKey) -> [(id: Int64, score: Float)]? {
+        rankCacheLock.lock()
+        defer { rankCacheLock.unlock() }
+        let now = Date()
+        rankCache.removeAll { now.timeIntervalSince($0.createdAt) > Self.rankCacheTTL }
+        return rankCache.first { $0.key == key }?.ranked
     }
 
-    func collectCandidateIDs(clusterOrder: [(clusterIndex: Int, score: Float)],
-                             clusterLimit: Int,
-                             index: EmbeddingANNIndex,
-                             appFilter: Set<String>?,
-                             startMs: Int64?,
-                             endMs: Int64?,
-                             maxFetch: Int) -> [Int64] {
-        var ids: [Int64] = []
-        ids.reserveCapacity(min(maxFetch, 4_096))
-        var seen = Set<Int64>()
-
-        for ordered in clusterOrder.prefix(clusterLimit) {
-            let cluster = index.clusters[ordered.clusterIndex]
-            for item in cluster.items {
-                if let startMs, item.startedAtMs < startMs { continue }
-                if let endMs, item.startedAtMs > endMs { continue }
-                if let appFilter {
-                    guard let appBundleId = item.appBundleId, appFilter.contains(appBundleId) else { continue }
-                }
-                if seen.insert(item.snapshotId).inserted {
-                    ids.append(item.snapshotId)
-                    if ids.count >= maxFetch {
-                        return ids
-                    }
-                }
-            }
-        }
-
-        return ids
-    }
-
-    func rankCandidates(_ candidates: [EmbeddingCandidate], queryVector: [Float], threshold: Float) -> [SearchResult] {
-        var scored: [(SearchResult, Float)] = []
-        scored.reserveCapacity(candidates.count)
-        for candidate in candidates {
-            let score = EmbeddingService.dot(queryVector, candidate.vector)
-            if score >= threshold {
-                scored.append((candidate.result, score))
-            }
-        }
-        scored.sort { lhs, rhs in
-            if lhs.1 == rhs.1 {
-                return lhs.0.startedAtMs > rhs.0.startedAtMs
-            }
-            return lhs.1 > rhs.1
-        }
-        return scored.map(\.0)
-    }
-
-    func hydratePage(from ranked: [SearchResult], limit: Int, offset: Int) -> [SearchResult] {
-        let start = max(0, offset)
-        let end = min(ranked.count, start + max(0, limit))
-        guard start < end else { return [] }
-        let page = Array(ranked[start..<end])
-        return (try? DB.shared.hydrateSearchResultContents(page)) ?? page
+    func storeRanking(_ ranked: [(id: Int64, score: Float)], for key: RankKey) {
+        rankCacheLock.lock()
+        defer { rankCacheLock.unlock() }
+        rankCache.removeAll { $0.key == key }
+        rankCache.insert((key, ranked, Date()), at: 0)
+        if rankCache.count > Self.rankCacheCapacity { rankCache.removeLast() }
     }
 }

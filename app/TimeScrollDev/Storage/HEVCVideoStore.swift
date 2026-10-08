@@ -19,8 +19,14 @@ final class HEVCVideoStore {
 
     // Config
     private let segmentMs: Int64 = 60_000
-    private let targetBitrate: Int = 700_000
-    private let fps: Int32 = 5
+    /// Constant-quality target. Captures arrive seconds apart, so an average-bitrate target
+    /// handed each frame a large budget; quality mode measured ~4x smaller at equal PSNR.
+    private static let quality: Double = 0.8
+    /// Fallback for encoders without quality-based rate control.
+    private static let fallbackBitrate: Int = 300_000
+    /// One keyframe per 60 s segment: frames arrive every 5-10 s, so a 10 s keyframe
+    /// interval made roughly every other frame a full I-frame.
+    private static let maxKeyFrameInterval: Int = 240
 
     // State
     private let queue = DispatchQueue(label: "TimeScroll.HEVCVideoStore")
@@ -141,23 +147,12 @@ final class HEVCVideoStore {
         // When encryption is enabled, we will encrypt-and-replace on close().
         outURL = plainURL(forStart: startMs)
         let writer = try AVAssetWriter(outputURL: outURL, fileType: .mov)
-        // Enable progressive readability of in‑progress files and place moov up front
-        writer.shouldOptimizeForNetworkUse = true
+        // Leave network optimization off: it holds the movie header until finishWriting,
+        // which keeps the live segment at 0 bytes and unreadable while recording.
+        writer.shouldOptimizeForNetworkUse = false
         // Short fragment interval improves live readability at the cost of a few more moofs
         writer.movieFragmentInterval = CMTime(seconds: 1, preferredTimescale: 600)
-        let compression: [String: Any] = [
-            AVVideoAverageBitRateKey: targetBitrate,
-            AVVideoAllowFrameReorderingKey: false, // reduce latency/complexity
-            AVVideoExpectedSourceFrameRateKey: fps,
-            AVVideoMaxKeyFrameIntervalDurationKey: 10,
-            AVVideoProfileLevelKey: kVTProfileLevel_HEVC_Main_AutoLevel
-        ]
-        let settings: [String: Any] = [
-            AVVideoCodecKey: AVVideoCodecType.hevc,
-            AVVideoWidthKey: width,
-            AVVideoHeightKey: height,
-            AVVideoCompressionPropertiesKey: compression
-        ]
+        let settings = Self.outputSettings(width: width, height: height)
         let input = AVAssetWriterInput(mediaType: .video, outputSettings: settings)
         input.expectsMediaDataInRealTime = true
         if input.responds(to: Selector(("setPerformsMultiPassEncodingIfSupported:"))) {
@@ -179,6 +174,36 @@ final class HEVCVideoStore {
         // only when frames are pending and the input is back-pressured.
         return Active(startMs: startMs, encrypt: encrypt, width: width, height: height, writer: writer, input: input, adaptor: adaptor, started: true, outURL: outURL)
     }
+
+    private static func outputSettings(width: Int, height: Int) -> [String: Any] {
+        let rateControl: [String: Any] = supportsQualityMode
+            ? [AVVideoQualityKey: quality]
+            : [AVVideoAverageBitRateKey: fallbackBitrate]
+        return compressionSettings(width: width, height: height, rateControl: rateControl)
+    }
+
+    private static func compressionSettings(width: Int, height: Int, rateControl: [String: Any]) -> [String: Any] {
+        var compression: [String: Any] = [
+            AVVideoAllowFrameReorderingKey: false, // no B-frames: segments stay readable while recording
+            AVVideoMaxKeyFrameIntervalKey: maxKeyFrameInterval,
+            AVVideoProfileLevelKey: kVTProfileLevel_HEVC_Main_AutoLevel
+        ]
+        compression.merge(rateControl) { _, new in new }
+        return [
+            AVVideoCodecKey: AVVideoCodecType.hevc,
+            AVVideoWidthKey: width,
+            AVVideoHeightKey: height,
+            AVVideoCompressionPropertiesKey: compression
+        ]
+    }
+
+    /// AVAssetWriterInput raises on unsupported compression properties, so probe once
+    /// before relying on quality-based rate control.
+    private static let supportsQualityMode: Bool = {
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("hevc-probe-\(UUID().uuidString).mov")
+        let settings = compressionSettings(width: 1280, height: 720, rateControl: [AVVideoQualityKey: quality])
+        return (try? AVAssetWriter(outputURL: url, fileType: .mov))?.canApply(outputSettings: settings, forMediaType: .video) == true
+    }()
 
     private func closeCurrent() throws {
         guard let c = current else { return }

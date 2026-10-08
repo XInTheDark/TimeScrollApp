@@ -68,7 +68,7 @@ final class Indexer {
             if !result.lines.isEmpty {
                 try DB.shared.replaceBoxes(snapshotId: snapshotId, boxes: result.lines)
             }
-            SnapshotEmbeddingWriter.shared.storeCurrentEmbeddingIfNeeded(snapshotId: snapshotId, pixelBuffer: pixelBuffer, extractedText: result.text)
+            SnapshotEmbeddingQueue.shared.enqueue(snapshotId: snapshotId, pixelBuffer: pixelBuffer, extractedText: result.text)
         } catch {
         }
     }

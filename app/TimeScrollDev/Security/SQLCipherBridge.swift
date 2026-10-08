@@ -9,37 +9,19 @@ final class SQLCipherBridge {
     static let shared = SQLCipherBridge()
     private init() {}
 
-    func openWithUnwrappedKeySilently() {
-        // If vault is enabled, do NOT fall back to plaintext open.
+    /// Opens the database for the current vault state: encrypted with the in-memory key when
+    /// the vault is enabled and unlocked, plaintext when the vault is off, closed otherwise.
+    func openForCurrentVaultState() {
         let vaultOn = (StoragePaths.sharedObject(forKey: "settings.vaultEnabled") != nil)
             ? StoragePaths.sharedBool(forKey: "settings.vaultEnabled")
             : false
-        if let key = try? KeyStore.shared.unwrapDbKey() {
-            openWithKey(key)
-            return
-        }
-        // No key unwrapped
         if vaultOn {
-            // Leave DB closed; callers should treat this as locked/not available
+            if let key = VaultKeys.shared.databaseKey { openWithKey(key) }
             return
         }
-        // Vault disabled: allow normal (plaintext) open
         _ = try? DB.shared.openIfNeeded()
     }
-    
-    func openWithUnwrappedKeyOrThrow() throws {
-        let vaultOn = (StoragePaths.sharedObject(forKey: "settings.vaultEnabled") != nil)
-            ? StoragePaths.sharedBool(forKey: "settings.vaultEnabled")
-            : false
-        
-        if vaultOn {
-            let key = try KeyStore.shared.unwrapDbKey()
-            openWithKey(key)
-        } else {
-            try DB.shared.openIfNeeded()
-        }
-    }
-    
+
     func openWithKey(_ key: Data) {
         _ = try? DB.shared.openWithSqlcipher(key: key)
         // Log runtime cipher version for verification
@@ -48,6 +30,13 @@ final class SQLCipherBridge {
     }
 
     func close() { DB.shared.close() }
+
+    /// True when a database file exists and no longer carries the plaintext SQLite header.
+    func isDatabaseEncrypted() -> Bool {
+        let (url, exists) = dbURL()
+        guard exists else { return false }
+        return StoragePaths.withSecurityScope { !isLikelyPlaintextSQLite(url: url) }
+    }
 
     // MARK: - Migration (plaintext -> encrypted)
     func migratePlaintextIfNeeded(withKey key: Data) {

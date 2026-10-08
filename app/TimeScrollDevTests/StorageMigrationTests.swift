@@ -12,6 +12,8 @@ final class StorageMigrationTests: XCTestCase {
         try fm.createDirectory(at: newRoot, withIntermediateDirectories: true)
 
         // Ensure DB is closed and point storage to newRoot (so DB file will be created here)
+        let storageRoot = StorageRootSnapshot()
+        defer { storageRoot.restore() }
         DB.shared.close()
         await MainActor.run { StoragePaths.setStorageFolder(newRoot) }
         try DB.shared.openIfNeeded()
@@ -34,7 +36,7 @@ final class StorageMigrationTests: XCTestCase {
         XCTAssertTrue(rows.contains { $0.path.hasPrefix(newRoot.path) })
 
         // Clean up
-        try? DB.shared.purgeRowsOlderThan(cutoffMs: Int64(Date().timeIntervalSince1970 * 1000) + 1000, deleteFiles: false)
+        try? DB.shared.purgeOlderThan(days: -1)
         try? fm.removeItem(at: oldRoot)
         try? fm.removeItem(at: newRoot)
     }
@@ -47,6 +49,8 @@ final class StorageMigrationTests: XCTestCase {
         try fm.createDirectory(at: oldRoot, withIntermediateDirectories: true)
         try fm.createDirectory(at: newRoot, withIntermediateDirectories: true)
 
+        let storageRoot = StorageRootSnapshot()
+        defer { storageRoot.restore() }
         DB.shared.close()
         await MainActor.run { StoragePaths.setStorageFolder(newRoot) }
         try DB.shared.openIfNeeded()
@@ -66,7 +70,7 @@ final class StorageMigrationTests: XCTestCase {
         let currentSnapshotsRoot = StoragePaths.snapshotsDir().path
         XCTAssertTrue(rows.contains { $0.path.hasPrefix(currentSnapshotsRoot) })
 
-        try? DB.shared.purgeRowsOlderThan(cutoffMs: Int64(Date().timeIntervalSince1970 * 1000) + 1000, deleteFiles: false)
+        try? DB.shared.purgeOlderThan(days: -1)
         try? fm.removeItem(at: oldRoot)
         try? fm.removeItem(at: newRoot)
     }

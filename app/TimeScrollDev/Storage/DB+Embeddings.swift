@@ -72,6 +72,31 @@ extension DB {
         }
     }
 
+    /// Atomically replaces `model` vectors with the `stagingModel` vectors built for the same
+    /// snapshots. Snapshots without a staged vector keep their current one.
+    func promoteStagedEmbeddings(provider: String, stagingModel: String, model: String) throws {
+        try withWriteSavepoint {
+            try openIfNeeded()
+            guard let db = db else { return }
+            func run(_ sql: String, _ binds: [String]) throws {
+                var stmt: OpaquePointer?
+                defer { sqlite3_finalize(stmt) }
+                guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else {
+                    throw NSError(domain: "TS.DB", code: 195, userInfo: [NSLocalizedDescriptionKey: String(cString: sqlite3_errmsg(db))])
+                }
+                for (index, value) in binds.enumerated() {
+                    sqlite3_bind_text(stmt, Int32(index + 1), value, -1, SQLITE_TRANSIENT)
+                }
+                guard sqlite3_step(stmt) == SQLITE_DONE else {
+                    throw NSError(domain: "TS.DB", code: 196, userInfo: [NSLocalizedDescriptionKey: String(cString: sqlite3_errmsg(db))])
+                }
+            }
+            try run("DELETE FROM ts_embedding WHERE provider = ?1 AND model = ?2 AND snapshot_id IN (SELECT snapshot_id FROM ts_embedding WHERE provider = ?1 AND model = ?3);",
+                    [provider, model, stagingModel])
+            try run("UPDATE ts_embedding SET model = ?1 WHERE provider = ?2 AND model = ?3;", [model, provider, stagingModel])
+        }
+    }
+
     func embeddingCount(provider: String, model: String) throws -> Int {
         try onQueueSync {
             try openIfNeeded()
@@ -131,9 +156,7 @@ extension DB {
     }
 
     func embeddingStats(requireDim: Int, requireProvider: String, requireModel: String) throws -> EmbeddingStats {
-        try onQueueSync {
-            try openIfNeeded()
-            guard let db = db else { return EmbeddingStats(count: 0, maxUpdatedAtMs: 0) }
+        try onReadQueueSync { db in
             let sql = """
             SELECT COUNT(*), COALESCE(MAX(e.updated_at_ms), 0)
             FROM ts_embedding e
@@ -202,9 +225,7 @@ extension DB {
                                        beforeStartedAtMs: Int64?,
                                        beforeSnapshotId: Int64?,
                                        offset: Int?) throws -> [EmbeddingIndexEntry] {
-        try onQueueSync {
-            try openIfNeeded()
-            guard let db = db else { return [] }
+        try onReadQueueSync { db in
             var sql = """
             SELECT s.id, s.started_at_ms, s.app_bundle_id, e.vec, e.dim
             FROM ts_embedding e
@@ -255,6 +276,47 @@ extension DB {
         }
     }
 
+    /// Streams embedding rows (with the snapshot fields used for filtering) in ts_embedding
+    /// rowid order, for building the in-memory search matrix.
+    func embeddingMatrixRows(provider: String, model: String, dim: Int, afterRowId: Int64, limit: Int) throws -> (rows: [EmbeddingMatrixRow], lastRowId: Int64?) {
+        try onReadQueueSync { db in
+            let sql = """
+            SELECT e.rowid, s.id, s.started_at_ms, s.app_bundle_id, s.capture_kind, s.source_kind, e.vec, e.updated_at_ms
+            FROM ts_embedding e
+            JOIN ts_snapshot s ON s.id = e.snapshot_id
+            WHERE e.dim = ? AND e.provider = ? AND e.model = ? AND e.rowid > ?
+            ORDER BY e.rowid
+            LIMIT ?;
+            """
+            var stmt: OpaquePointer?
+            defer { sqlite3_finalize(stmt) }
+            guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return ([], nil) }
+            sqlite3_bind_int(stmt, 1, Int32(dim))
+            sqlite3_bind_text(stmt, 2, provider, -1, SQLITE_TRANSIENT)
+            sqlite3_bind_text(stmt, 3, model, -1, SQLITE_TRANSIENT)
+            sqlite3_bind_int64(stmt, 4, afterRowId)
+            sqlite3_bind_int(stmt, 5, Int32(limit))
+            var rows: [EmbeddingMatrixRow] = []
+            var lastRowId: Int64?
+            while sqlite3_step(stmt) == SQLITE_ROW {
+                lastRowId = sqlite3_column_int64(stmt, 0)
+                let blobLen = Int(sqlite3_column_bytes(stmt, 6))
+                guard let blob = sqlite3_column_blob(stmt, 6), blobLen >= dim * MemoryLayout<Float>.size else { continue }
+                let vector = Array(UnsafeBufferPointer(start: blob.assumingMemoryBound(to: Float.self), count: dim))
+                let kindRaw = sqlite3_column_text(stmt, 4).map { String(cString: $0) } ?? CaptureKind.screen.rawValue
+                rows.append(EmbeddingMatrixRow(
+                    snapshotId: sqlite3_column_int64(stmt, 1),
+                    startedAtMs: sqlite3_column_int64(stmt, 2),
+                    appBundleId: sqlite3_column_text(stmt, 3).map { String(cString: $0) },
+                    captureKind: CaptureKind(rawValue: kindRaw) ?? .screen,
+                    audioSourceKind: sqlite3_column_text(stmt, 5).flatMap { AudioSourceKind(rawValue: String(cString: $0)) },
+                    vector: vector,
+                    updatedAtMs: sqlite3_column_int64(stmt, 7)))
+            }
+            return (rows, lastRowId)
+        }
+    }
+
     /// Returns counts of embeddings grouped by model for the given provider+dim. Used to detect mismatched model strings.
     func embeddingModelStats(requireDim: Int, requireProvider: String) throws -> [(model: String, count: Int)] {
         try onQueueSync {
@@ -286,9 +348,7 @@ extension DB {
                               requireDim: Int,
                               requireProvider: String,
                               requireModel: String) throws -> [EmbeddingCandidate] {
-        try onQueueSync {
-            try openIfNeeded()
-            guard let db = db else { return [] }
+        try onReadQueueSync { db in
             var sql = """
             SELECT s.id, s.started_at_ms, s.ended_at_ms, s.path, s.app_bundle_id, s.app_name, s.thumb_path, s.capture_kind, s.source_kind, s.audio_asset_id, a.duration_ms, e.vec, e.dim
             FROM ts_embedding e
@@ -344,9 +404,8 @@ extension DB {
                              requireDim: Int,
                              requireProvider: String,
                              requireModel: String) throws -> [EmbeddingCandidate] {
-        try onQueueSync {
-            try openIfNeeded()
-            guard let db = db, !snapshotIds.isEmpty else { return [] }
+        guard !snapshotIds.isEmpty else { return [] }
+        return try onReadQueueSync { db in
             let placeholders = Array(repeating: "?", count: snapshotIds.count).joined(separator: ",")
             let sql = """
             SELECT s.id, s.started_at_ms, s.ended_at_ms, s.path, s.app_bundle_id, s.app_name, s.thumb_path, s.capture_kind, s.source_kind, s.audio_asset_id, a.duration_ms, e.vec, e.dim

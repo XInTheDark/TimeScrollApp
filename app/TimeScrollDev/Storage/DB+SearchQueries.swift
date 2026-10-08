@@ -95,6 +95,34 @@ extension DB {
         return try hydrateSearchResultContents(results)
     }
 
+    /// Snapshot rows for the given ids, in the given order (missing ids are skipped).
+    func searchResults(snapshotIds: [Int64]) throws -> [SearchResult] {
+        guard !snapshotIds.isEmpty else { return [] }
+        let byId = try onReadQueueSync { db -> [Int64: SearchResult] in
+            let placeholders = Array(repeating: "?", count: snapshotIds.count).joined(separator: ",")
+            let sql = """
+            SELECT s.id, s.started_at_ms, s.ended_at_ms, s.path, s.app_bundle_id, s.app_name, s.thumb_path, s.capture_kind, s.source_kind, s.audio_asset_id, a.duration_ms
+            FROM ts_snapshot s
+            LEFT JOIN ts_audio_asset a ON a.id = s.audio_asset_id
+            WHERE s.id IN (\(placeholders));
+            """
+            var stmt: OpaquePointer?
+            defer { sqlite3_finalize(stmt) }
+            guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return [:] }
+            for (index, id) in snapshotIds.enumerated() {
+                sqlite3_bind_int64(stmt, Int32(index + 1), id)
+            }
+            var rows: [Int64: SearchResult] = [:]
+            while sqlite3_step(stmt) == SQLITE_ROW {
+                if let row = makeSearchRowUnified(from: stmt) {
+                    rows[row.id] = makeSearchResult(from: row)
+                }
+            }
+            return rows
+        }
+        return snapshotIds.compactMap { byId[$0] }
+    }
+
     /// Core FTS search used by both `searchMetas` and `searchWithContent` wrappers.
     private func searchUnified(ftsParts: [String],
                                appBundleIds: [String]?,
@@ -105,34 +133,30 @@ extension DB {
                                limit: Int,
                                offset: Int,
                                includeContent: Bool) throws -> [SearchRowUnified] {
-        try onQueueSync {
+        try onReadQueueSync { db in
             guard !ftsParts.isEmpty else { return [] }
-            try openIfNeeded()
-            guard let db = db else { return [] }
             var sql = """
             SELECT s.id, s.started_at_ms, s.ended_at_ms, s.path, s.app_bundle_id, s.app_name, s.thumb_path, s.capture_kind, s.source_kind, s.audio_asset_id, a.duration_ms
             FROM ts_snapshot s
             LEFT JOIN ts_audio_asset a ON a.id = s.audio_asset_id
             WHERE 1=1
             """
-            // Add one MATCH per part to preserve per-token OR-group semantics across both
-            // the new chunk index and the legacy single-row FTS table. Include old
-            // text_ref_id rows as well; newer captures retain per-snapshot FTS rows.
-            for _ in ftsParts {
-                sql += """
-                 AND (
-                    s.id IN (
-                        SELECT snapshot_id FROM ts_text_chunk WHERE content MATCH ?
-                        UNION
-                        SELECT rowid AS snapshot_id FROM ts_text WHERE content MATCH ?
-                    )
-                    OR s.text_ref_id IN (
-                        SELECT snapshot_id FROM ts_text_chunk WHERE content MATCH ?
-                        UNION
-                        SELECT rowid AS snapshot_id FROM ts_text WHERE content MATCH ?
-                    )
-                 )
-                """
+            // Each part is an OR-group of variants; parts are AND-combined. With only the new
+            // index, all parts go into a single FTS expression so FTS5 intersects the postings.
+            // Legacy tables (and text_ref_id rows only they cover) are consulted per part until
+            // the backfill drops them.
+            let legacy = Self.legacyTextTablesExist(db: db)
+            let matchBinds: [String]
+            if legacy {
+                let match = Self.textMatchSubquery(legacyTablesExist: true)
+                let legacyRefMatch = "SELECT snapshot_id FROM ts_text_chunk WHERE ts_text_chunk MATCH ? UNION SELECT rowid FROM ts_text WHERE ts_text MATCH ?"
+                for _ in ftsParts {
+                    sql += " AND (s.id IN (\(match.sql)) OR s.text_ref_id IN (\(legacyRefMatch)))"
+                }
+                matchBinds = ftsParts.flatMap { Array(repeating: $0, count: match.bindsPerPart + 2) }
+            } else {
+                sql += " AND s.id IN (\(Self.textMatchSubquery(legacyTablesExist: false).sql))"
+                matchBinds = [ftsParts.map { "(\($0))" }.joined(separator: " AND ")]
             }
             if let s = startMs { sql += " AND s.started_at_ms >= \(s)" }
             if let e = endMs { sql += " AND s.started_at_ms <= \(e)" }
@@ -150,11 +174,8 @@ extension DB {
             defer { sqlite3_finalize(stmt) }
             guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return [] }
             var idx: Int32 = 1
-            for p in ftsParts {
-                sqlite3_bind_text(stmt, idx, p, -1, SQLITE_TRANSIENT); idx += 1
-                sqlite3_bind_text(stmt, idx, p, -1, SQLITE_TRANSIENT); idx += 1
-                sqlite3_bind_text(stmt, idx, p, -1, SQLITE_TRANSIENT); idx += 1
-                sqlite3_bind_text(stmt, idx, p, -1, SQLITE_TRANSIENT); idx += 1
+            for value in matchBinds {
+                sqlite3_bind_text(stmt, idx, value, -1, SQLITE_TRANSIENT); idx += 1
             }
             if let ids = appBundleIds, !ids.isEmpty {
                 for bid in ids { sqlite3_bind_text(stmt, idx, bid, -1, SQLITE_TRANSIENT); idx += 1 }

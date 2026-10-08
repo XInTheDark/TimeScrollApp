@@ -18,10 +18,18 @@ actor AudioSegmentProcessor {
     private var processingPaused = false
     private var pauseGeneration = 0
     private var activeTranscriptionInputURL: URL?
+    /// Last detected language per source, reused for a few segments to skip detection passes.
+    private var languageBySource: [AudioSourceKind: (language: String, uses: Int)] = [:]
+    private static let languageRedetectInterval = 20
     private var drainContinuations: [UUID: CheckedContinuation<Bool, Never>] = [:]
 
     func submit(_ segment: RecordedAudioSegment, modelID: String) {
         guard FileManager.default.fileExists(atPath: segment.tempURL.path) else { return }
+        // Silent segments are neither stored nor transcribed.
+        if AudioSilenceDetector.isSilent(fileAt: segment.tempURL) {
+            try? FileManager.default.removeItem(at: segment.tempURL)
+            return
+        }
 
         var finalizedURL: URL?
         do {
@@ -141,7 +149,16 @@ actor AudioSegmentProcessor {
         }
 
         do {
-            let segments = try await WhisperTranscriptionService.shared.transcribe(audioURL: inputURL, modelID: modelID)
+            let source = job.asset.sourceKind
+            let cached = languageBySource[source].flatMap { $0.uses < Self.languageRedetectInterval ? $0.language : nil }
+            let transcription = try await WhisperTranscriptionService.shared.transcribe(audioURL: inputURL,
+                                                                                       modelID: modelID,
+                                                                                       language: cached)
+            let segments = transcription.segments
+            if let detected = transcription.language, !detected.isEmpty {
+                let uses = cached == detected ? (languageBySource[source]?.uses ?? 0) + 1 : 1
+                languageBySource[source] = (detected, uses)
+            }
             guard !processingPaused, pauseGeneration == processingGeneration else { return }
             let text = segments
                 .map(\.text)
@@ -213,6 +230,14 @@ actor AudioSegmentProcessor {
                                                        appBundleId: meta.appBundleId,
                                                        vector: vector,
                                                        updatedAtMs: updatedAtMs)
+            EmbeddingMatrixStore.shared.recordUpsert(identity: identity, row: EmbeddingMatrixRow(
+                snapshotId: snapshotID,
+                startedAtMs: meta.startedAtMs,
+                appBundleId: meta.appBundleId,
+                captureKind: meta.captureKind,
+                audioSourceKind: meta.audioSourceKind,
+                vector: vector,
+                updatedAtMs: updatedAtMs))
         } catch {
             fputs("[Audio][Embedding] Failed to index transcript: \(error.localizedDescription)\n", stderr)
         }

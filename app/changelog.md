@@ -1,3 +1,70 @@
+# v2.0.0 - 2026-10-08
+
+v1 had a lot of issues, especially on macOS 27. This release fixes most of them and reworks storage, search and the encrypted vault.
+
+## Major fixes
+
+- Fixed the app freezing on launch (#16, #12).
+- Fixed the encrypted vault locking people out (#15). If this happened to you, the vault turns itself off on first unlock and your data should still be there.
+- Fixed HEVC recordings older than 7 days being deleted regardless of your retention setting.
+- Fixed retention only running when the timeline window was open.
+
+## Encrypted vault
+
+The vault has been reworked and fully works on public builds now.
+
+- You set a recovery passphrase when turning it on. Keep it somewhere safe, as it's the only way to get your data back if the keychain is reset.
+- Unlock with Touch ID or your Mac password.
+- Recording keeps going (and stays encrypted) while the vault is locked.
+- Turning the vault off decrypts your data.
+
+## Timeline
+
+- You can scroll back through your whole history now. Before, only the last ~1000 captures (a few hours) were loaded.
+- New captures show up without resetting your scroll position.
+- The latest capture shows at full resolution instead of a blurry preview.
+- Fixed the previous screenshot sometimes showing when a frame failed to load.
+
+## Storage
+
+HEVC is now the default format, and existing installs on HEIC are switched to it automatically. HEVC encoding was also tuned, so recordings are around 4x smaller than before. 
+
+Measured on text-heavy frames:
+
+| Format | KB per frame | Quality (PSNR) |
+|---|---|---|
+| HEIC (old default) | 155 | 43.5 dB |
+| HEVC, old settings | 84 | 34.9 dB |
+| HEVC, new settings | 20 | 35.5 dB |
+
+- Text and OCR data now take up a lot less space. Existing data is upgraded in the background.
+- Silent audio is no longer saved or transcribed (when audio mode is enabled).
+
+## Search
+
+- Much faster AI search (170k captures in ~10 ms).
+- Faster text search.
+- Search and the timeline don't wait on recording anymore.
+- AI search keeps working while embeddings are being rebuilt.
+- Search matches are now highlighted in Direct (Accessibility) mode.
+
+## MCP
+
+- MCP searches now go through the running app, which opens in the background if needed. The helper doesn't touch your database or vault keys anymore, and it's much smaller.
+- No more storage migration needed to turn on MCP.
+- Images are off by default now. When on, they're smaller JPEGs for the first 10 results.
+
+## New
+
+- New "On app switch" capture setting: take a snapshot shortly after switching apps, either on top of your normal interval or as the only time it captures.
+
+## Other
+
+- Less CPU and battery use: made some processing async, and optimized background processes.
+- Settings UI fixes.
+
+---
+
 # v1.0.2 - 2026-09-06
 
 ## Performance

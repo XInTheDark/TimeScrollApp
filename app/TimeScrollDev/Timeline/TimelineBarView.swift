@@ -57,12 +57,15 @@ struct TimelineBarContainer: NSViewRepresentable {
         doc.onHoverExit = onHoverExit
         doc.setFrameSize(NSSize(width: max(600, doc.requiredContentWidth()), height: timelineContentHeight(for: scroll.bounds.height)))
         scroll.documentView = doc
+        context.coordinator.observeScrolling(of: scroll, model: model)
         return scroll
     }
 
     func updateNSView(_ scroll: NSScrollView, context: Context) {
         guard let doc = scroll.documentView as? TimelineBarNSView else { return }
         (scroll as? TimelineBarScrollView)?.invertScrollDirection = invertScrollDirection
+        // Time at the left edge before relayout, so prepending older pages does not move the view.
+        let leftEdgeTimeMs = doc.timelineTime(atX: scroll.contentView.bounds.minX)
         doc.model = model
         doc.isCompressed = isCompressed
         doc.visibleCaptureKinds = visibleCaptureKinds
@@ -70,6 +73,13 @@ struct TimelineBarContainer: NSViewRepresentable {
         let contentWidth = max(scroll.bounds.width, doc.requiredContentWidth())
         doc.setFrameSize(NSSize(width: contentWidth, height: timelineContentHeight(for: scroll.bounds.height)))
         doc.needsDisplay = true
+        if let previousMin = context.coordinator.lastMinTimeMs,
+           model.minTimeMs < previousMin,
+           context.coordinator.lastSelectedId == model.selected?.id {
+            scroll.contentView.scroll(to: NSPoint(x: max(0, doc.timelineX(for: leftEdgeTimeMs)), y: 0))
+            scroll.reflectScrolledClipView(scroll.contentView)
+        }
+        context.coordinator.lastMinTimeMs = model.minTimeMs
         let compressionChanged = context.coordinator.lastCompressedState != isCompressed
         context.coordinator.lastCompressedState = isCompressed
 
@@ -126,12 +136,33 @@ struct TimelineBarContainer: NSViewRepresentable {
     }
 
     func makeCoordinator() -> Coordinator { Coordinator() }
+    @MainActor
     final class Coordinator {
         var shouldScrollToEndIfNeeded = true
         var lastSelectedId: Int64? = nil
         var lastJumpToken: Int = 0
         var lastMsPerPoint: Double = .nan
         var lastCompressedState: Bool? = nil
+        var lastMinTimeMs: Int64? = nil
+        private var boundsObserver: NSObjectProtocol?
+
+        /// Requests older rows once the user scrolls within one viewport of the oldest loaded row.
+        func observeScrolling(of scroll: NSScrollView, model: TimelineModel) {
+            let clip = scroll.contentView
+            clip.postsBoundsChangedNotifications = true
+            boundsObserver = NotificationCenter.default.addObserver(forName: NSView.boundsDidChangeNotification,
+                                                                    object: clip,
+                                                                    queue: .main) { [weak model, weak clip] _ in
+                MainActor.assumeIsolated {
+                    guard let model, let clip, clip.bounds.minX < clip.bounds.width else { return }
+                    model.loadOlderIfNeeded()
+                }
+            }
+        }
+
+        deinit {
+            if let boundsObserver { NotificationCenter.default.removeObserver(boundsObserver) }
+        }
     }
 }
 
@@ -463,6 +494,10 @@ final class TimelineBarNSView: NSView {
 
     func timelineX(for timeMs: Int64) -> CGFloat {
         layout.x(for: timeMs)
+    }
+
+    func timelineTime(atX x: CGFloat) -> Int64 {
+        layout.time(atX: x)
     }
 
     override func draw(_ dirtyRect: NSRect) {

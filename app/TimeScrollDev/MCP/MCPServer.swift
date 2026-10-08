@@ -1,5 +1,4 @@
 import Foundation
-import CoreSearch
 
 struct InitializeResult: Encodable {
     let protocolVersion: String
@@ -30,7 +29,6 @@ struct ToolCallResult: Encodable {
 
 final class MCPServer {
     private let io = LineIO()
-    private let facade = SearchFacade()
     private let encoder = JSONEncoder()
 
     private func sendJSON<T: Encodable>(_ obj: T) {
@@ -51,9 +49,6 @@ final class MCPServer {
     }
 
     func run() {
-        // Try to prime LA + SQLCipher immediately (non-fatal if it fails; we retry on first call).
-        facade.primeVaultIfPossible()
-
         for line in io.lines() {
             MCPFileLogger.log("in: \(line)")
             guard let req = try? JSONDecoder().decode(RPCRequest.self, from: Data(line.utf8)) else {
@@ -122,30 +117,16 @@ final class MCPServer {
     }
 
     private func handleSearch(id: RPCID, argsAny: AnyDecodable?) async {
-        // Ensure DB is open; if not, attempt LA and retry open.
-        if !facade.tryOpenDB() {
-            let (unlocked, errMsg) = await facade.unlockAndOpenIfNeeded()
-            if !unlocked {
-                let msg = errMsg ?? "Unlock required. Please authenticate to access the vault."
-                let err = ToolCallResult(
-                    content: [ AnyEncodable(["type":"text","text":msg]) ],
-                    isError: true
-                )
-                sendJSON(RPCResponse(id: id, result: err))
-                MCPFileLogger.log("tools/call search_timescroll id=\(id) denied: \(msg)")
-                return
-            }
-        }
-
         do {
-            // log DB diagnostics
-            let diag = facade.diagnostics()
-            MCPFileLogger.log("db=\(diag.path ?? "(nil)") snapshots=\(diag.count)")
-
             let a = parseSearchArgs(argsAny)
             let t0 = Date()
             MCPFileLogger.log("search start id=\(id) q=\(a.query ?? "") limit=\(a.maxResults) imgs=\(a.includeImages) apps=\(a.apps?.count ?? 0)")
-            let rows = try await facade.run(a, ocrLimit: 50_000)
+            // The app runs the search (and holds any vault keys); this helper only forwards it.
+            let response = try MCPBridgeClient.search(a)
+            if let message = response.error {
+                throw NSError(domain: "TS.MCPBridge", code: 20, userInfo: [NSLocalizedDescriptionKey: message])
+            }
+            let rows = response.rows ?? []
             let dt = String(format: "%.2fs", Date().timeIntervalSince(t0))
 
             // Build content[] with a per-row text item (stringified JSON) followed
@@ -159,9 +140,9 @@ final class MCPServer {
 
             var content: [AnyEncodable] = []
             for r in rows {
-                let willHaveImage = a.includeImages && (r.imagePNG != nil)
+                let willHaveImage = a.includeImages && (r.imageJPEG != nil)
 
-                let t = jsonStr(r.timeISO8601)
+                let t = jsonStr(r.time)
                 let a = jsonStr(r.app)
                 let o = jsonStr(r.ocrText)
                 let i = willHaveImage ? "true" : "false"
@@ -172,11 +153,11 @@ final class MCPServer {
                 // Text entry contains the stringified JSON for the row
                 content.append(AnyEncodable(["type": "text", "text": rowJSON]))
 
-                if willHaveImage, let png = r.imagePNG {
+                if willHaveImage, let jpeg = r.imageJPEG {
                     content.append(AnyEncodable([
                         "type": "image",
-                        "data": png.base64EncodedString(),
-                        "mimeType": "image/png"
+                        "data": jpeg.base64EncodedString(),
+                        "mimeType": "image/jpeg"
                     ]))
                 }
             }
@@ -191,11 +172,11 @@ final class MCPServer {
         }
     }
 
-    private func parseSearchArgs(_ any: AnyDecodable?) -> SearchArgs {
+    private func parseSearchArgs(_ any: AnyDecodable?) -> MCPBridge.SearchRequest {
         let d = any?.value as? [String: Any] ?? [:]
         let query = d["query"] as? String
         let maxResults = max(1, min(100, (d["max_results"] as? Int) ?? 20))
-        let includeImages = (d["include_images"] as? Bool) ?? true
+        let includeImages = (d["include_images"] as? Bool) ?? false
         let textOnly = (d["text_only"] as? Bool) ?? false
         var startMs: Int64? = nil, endMs: Int64? = nil
         if let dr = d["date_range"] as? [String: Any] {
@@ -204,14 +185,10 @@ final class MCPServer {
             if let s = dr["to"]   as? String, let dt = f.date(from: s) { endMs   = Int64(dt.timeIntervalSince1970 * 1000) }
         }
         let apps = (d["apps"] as? [String]).flatMap { $0.isEmpty ? nil : $0 }
-        // MCP defaults to larger images so clients get higher-res by default
-        let imgMax = (d["image_max_pixel"] as? Int) ?? 2048
-        return SearchArgs(query: query, maxResults: maxResults, includeImages: includeImages,
-                  startMs: startMs, endMs: endMs, textOnly: textOnly, apps: apps,
-                  imageMaxPixel: imgMax)
+        return MCPBridge.SearchRequest(query: query, maxResults: maxResults, includeImages: includeImages,
+                                       startMs: startMs, endMs: endMs, textOnly: textOnly, apps: apps,
+                                       imageMaxPixel: d["image_max_pixel"] as? Int)
     }
-
-    // No direct vault helpers here; delegated to CoreSearch.SearchFacade
 }
 
 private func decodeArgs<T: Decodable>(_ t: T.Type, _ any: AnyDecodable?) throws -> T {

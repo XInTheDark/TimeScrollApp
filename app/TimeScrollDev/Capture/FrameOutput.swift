@@ -32,14 +32,25 @@ final class FrameOutput: NSObject, SCStreamOutput {
 
     // Dedup/adaptive
     var lastHash: UInt64?
+    var lastGrid: LumaGridSignature?
+    /// Frontmost app + focused window title of the last persisted frame.
+    var lastFrontContext: String?
     var stableCount: Int = 0
-    var lastCapturedFingerprint: (id: Int64, fingerprint: TextFingerprint)?
+    /// Last snapshot whose Accessibility text was indexed in full, with its normalized lines.
+    var lastTextAnchor: (id: Int64, fingerprint: TextFingerprint, lines: Set<String>)?
+    /// Global bounds of the captured display, used to place Accessibility text boxes.
+    let displayBounds: CGRect
 
     // Thermal governance
     var lastThermalState: ProcessInfo.ThermalState = .nominal
     var lastThermalAdjustAt: TimeInterval = 0
     var suppressPostersUntil: TimeInterval = 0
     var lastReportedProbeInterval: CFTimeInterval = 0
+
+    // App-switch capture (system uptime seconds)
+    var appSwitchSettlesAt: TimeInterval?
+    /// Starts open so "capture only after changes" records the screen when capture begins.
+    var appSwitchWindowEndsAt: TimeInterval = ProcessInfo.processInfo.systemUptime + FrameOutput.appSwitchCaptureWindow
 
     var ocrService: OCRService?
     let onProbeIntervalChanged: (CFTimeInterval) -> Void
@@ -52,9 +63,11 @@ final class FrameOutput: NSObject, SCStreamOutput {
 
     init(onSnapshot: @escaping (URL) -> Void,
          hevcStore: HEVCVideoStore,
+         displayBounds: CGRect,
          onProbeIntervalChanged: @escaping (CFTimeInterval) -> Void = { _ in }) {
         self.onSnapshot = onSnapshot
         self.hevcStore = hevcStore
+        self.displayBounds = displayBounds
         self.onProbeIntervalChanged = onProbeIntervalChanged
         super.init()
         currentInterval = baseInterval
@@ -62,6 +75,7 @@ final class FrameOutput: NSObject, SCStreamOutput {
     }
 
     func desiredProbeInterval() -> CFTimeInterval {
+        if isIdleBetweenAppSwitchWindows { return 5.0 }
         let desired = currentInterval / 2.0
         return min(5.0, max(0.5, desired))
     }
@@ -90,9 +104,12 @@ final class FrameOutput: NSObject, SCStreamOutput {
             reportProbeIntervalIfNeeded(force: true)
         }
 
+        let appSwitch = appSwitchGate(mode: SettingsStore.AppSwitchCaptureMode.current())
+        if appSwitch == .skip { return }
+
         // Gate evaluation cadence by PTS
         let pts = CMSampleBufferGetPresentationTimeStamp(sb)
-        if lastEvaluatedPTS.isValid {
+        if lastEvaluatedPTS.isValid && appSwitch != .captureNow {
             let delta = CMTimeGetSeconds(CMTimeSubtract(pts, lastEvaluatedPTS))
             if delta < currentInterval { return }
         }
@@ -122,28 +139,28 @@ final class FrameOutput: NSObject, SCStreamOutput {
             return
         }
 
-        // IMPORTANT: Compute hash directly from the pixel buffer (cheap, uses CI) before making any CGImage.
+        // Compute signatures directly from the pixel buffer before making any CGImage.
         var hashVal: UInt64 = 0
+        var grid: LumaGridSignature?
+        let frontContext = Self.frontContextKey()
         if dedupEnabled {
             hashVal = hasher.hash64(pixelBuffer: pixelBuffer)
-            if let prev = lastHash {
-                let hamming = ImageHasher.hamming(prev, hashVal)
-                if hamming <= thr {
-                    // For HEVC we still append frames to the segment to keep the video continuous,
-                    // but we skip DB/metadata work for unchanged frames.
-                    if fmt == .hevc {
-                        let tsMs = Int64(Date().timeIntervalSince1970 * 1000)
-                        if !vaultOn || (vaultOn && (unlockedFlag ? true : allowWhileLocked)) {
-                            self.hevcStore.append(pixelBuffer: pixelBuffer, timestampMs: tsMs, encrypt: vaultOn)
-                        }
+            grid = LumaGridSignature(pixelBuffer: pixelBuffer)
+            if isNearDuplicate(grid: grid, hash: hashVal, frontContext: frontContext, sensitivity: thr) {
+                // For HEVC we still append frames to the segment to keep the video continuous,
+                // but we skip DB/metadata work for unchanged frames.
+                if fmt == .hevc {
+                    let tsMs = Int64(Date().timeIntervalSince1970 * 1000)
+                    if !vaultOn || (vaultOn && (unlockedFlag ? true : allowWhileLocked)) {
+                        self.hevcStore.append(pixelBuffer: pixelBuffer, timestampMs: tsMs, encrypt: vaultOn)
                     }
-                    if adaptive {
-                        stableCount += 1
-                        currentInterval = min(maxInterval, baseInterval * CFTimeInterval(pow(1.5, Double(stableCount))))
-                        reportProbeIntervalIfNeeded()
-                    }
-                    return
                 }
+                if adaptive {
+                    stableCount += 1
+                    currentInterval = min(maxInterval, baseInterval * CFTimeInterval(pow(1.5, Double(stableCount))))
+                    reportProbeIntervalIfNeeded()
+                }
+                return
             }
         }
 
@@ -184,6 +201,8 @@ final class FrameOutput: NSObject, SCStreamOutput {
                     // The encrypted snapshot and its metadata are safely queued. Treat it
                     // as an accepted capture so an unchanged locked screen is deduplicated.
                     self.lastHash = hashVal
+                    self.lastGrid = grid
+                    self.lastFrontContext = frontContext
                     self.stableCount = 0
                     self.currentInterval = self.baseInterval
                     self.lastPersistedPTS = pts
@@ -209,11 +228,17 @@ final class FrameOutput: NSObject, SCStreamOutput {
                         thumbPath: thumbPath
                     )
 
+                    if fmt == .hevc {
+                        HEVCLiveFrameCache.shared.store(pixelBuffer: pb, path: url, startedAtMs: tsMs)
+                    }
+
                     // Notify UI before OCR to avoid races
                     DispatchQueue.main.async { self.onSnapshot(url) }
 
                     // Reset adaptive state after a real persist
                     self.lastHash = hashVal
+                    self.lastGrid = grid
+                    self.lastFrontContext = frontContext
                     self.stableCount = 0
                     self.currentInterval = self.baseInterval
                     self.lastPersistedPTS = pts
@@ -226,6 +251,26 @@ final class FrameOutput: NSObject, SCStreamOutput {
                 // swallow for now
             }
         }
+    }
+
+    /// A frame is a near-duplicate if few grid cells changed. A frontmost app/window change drops
+    /// the tolerance to zero, so any visible change captures but an identical screen (e.g. a
+    /// title-only update) is still skipped. Falls back to the dHash when no grid signature is available.
+    func isNearDuplicate(grid: LumaGridSignature?, hash: UInt64, frontContext: String?, sensitivity: Int) -> Bool {
+        let contextChanged = lastFrontContext.map { $0 != frontContext } ?? false
+        if let grid, let lastGrid {
+            let tolerated = contextChanged ? 0 : LumaGridSignature.toleratedChangedCells(forSensitivity: sensitivity)
+            return grid.changedCells(comparedTo: lastGrid) <= tolerated
+        }
+        guard let lastHash else { return false }
+        return ImageHasher.hamming(lastHash, hash) <= (contextChanged ? 0 : sensitivity)
+    }
+
+    static func frontContextKey() -> String {
+        let tracker = AppActivityTracker.shared
+        let bundleId = tracker.current().bundleId ?? ""
+        let title = FrontWindowTitleReader.title(forProcess: tracker.currentProcessIdentifier) ?? ""
+        return bundleId + "\u{1F}" + title
     }
 
     func shutdown() {

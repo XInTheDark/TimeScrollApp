@@ -101,8 +101,10 @@ final class StorageMigrationManager {
         let d = UserDefaults.standard
         let vaultOn = (d.object(forKey: "settings.vaultEnabled") != nil) ? d.bool(forKey: "settings.vaultEnabled") : false
         let unlocked = d.bool(forKey: "vault.isUnlocked")
+        // The vault manifest moved with the storage root; reload the cached public key from it.
+        VaultKeys.shared.reloadPublicKey()
         if vaultOn && unlocked {
-            SQLCipherBridge.shared.openWithUnwrappedKeySilently()
+            SQLCipherBridge.shared.openForCurrentVaultState()
             IngestQueue.shared.startIngestIfNeeded()
         } else {
             _ = try? DB.shared.openIfNeeded()

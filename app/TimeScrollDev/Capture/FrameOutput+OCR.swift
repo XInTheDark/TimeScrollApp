@@ -19,7 +19,7 @@ extension FrameOutput {
             case .accessibility:
                 handleAccessibilityText(snapshotId: snapshotId, pixelBuffer: pixelBuffer)
             case .none:
-                SnapshotEmbeddingWriter.shared.storeCurrentEmbeddingIfNeeded(snapshotId: snapshotId, pixelBuffer: pixelBuffer, extractedText: nil)
+                SnapshotEmbeddingQueue.shared.enqueue(snapshotId: snapshotId, pixelBuffer: pixelBuffer, extractedText: nil)
                 break
             }
             retainedPixelBuffer.release()
@@ -28,33 +28,41 @@ extension FrameOutput {
 
     func handleAccessibilityText(snapshotId: Int64, pixelBuffer: CVPixelBuffer) {
         let blacklist = UserDefaults.standard.array(forKey: "settings.blacklistBundleIds") as? [String] ?? []
-        let text = AXTextExtractor.shared.collectText(blacklistBundleIds: Set(blacklist))
+        let capture = AXTextExtractor.shared.collect(blacklistBundleIds: Set(blacklist), displayBounds: displayBounds)
+        let text = capture.text
         let fingerprint = TextFingerprint.make(from: text)
+        let lines = Self.normalizedLines(text)
 
-        // Dedup check
-        var isDuplicate = false
-        if let last = lastCapturedFingerprint {
-            let distance = fingerprint.hammingDistance(to: last.fingerprint)
-            if fingerprint.isNearDuplicate(of: last.fingerprint) {
-                if UserDefaults.standard.bool(forKey: "settings.debugMode") {
-                    print("[Capture] Deduplicating text, hamming=\(distance), refId=\(last.id)")
-                }
-                isDuplicate = true
+        // Near-duplicate text (vs. the last anchor) is stored in full but only its new lines are
+        // indexed: search still finds every line, while text that stays on screen matches the
+        // anchor instead of every following snapshot.
+        var indexedContent: String?
+        if let anchor = lastTextAnchor, fingerprint.isNearDuplicate(of: anchor.fingerprint) {
+            indexedContent = lines.filter { !anchor.lines.contains($0) }.joined(separator: "\n")
+            if UserDefaults.standard.bool(forKey: "settings.debugMode") {
+                print("[Capture] Near-duplicate text, hamming=\(fingerprint.hammingDistance(to: anchor.fingerprint)), anchor=\(anchor.id)")
             }
-        }
-
-        if !isDuplicate {
-            // This is a new anchor
-            lastCapturedFingerprint = (snapshotId, fingerprint)
+        } else {
+            lastTextAnchor = (snapshotId, fingerprint, Set(lines))
         }
         do {
-            // Text storage deduplicates payloads by hash, while each snapshot keeps its
-            // own FTS rows so a search can return the correct timestamp.
-            try DB.shared.updateFTS(rowId: snapshotId, content: text)
+            try DB.shared.updateFTS(rowId: snapshotId, content: text, indexedContent: indexedContent)
+            if !capture.lines.isEmpty {
+                try DB.shared.replaceBoxes(snapshotId: snapshotId, boxes: capture.lines)
+            }
         } catch {
             // Swallow errors; debug log if needed
         }
-        SnapshotEmbeddingWriter.shared.storeCurrentEmbeddingIfNeeded(snapshotId: snapshotId, pixelBuffer: pixelBuffer, extractedText: text)
+        SnapshotEmbeddingQueue.shared.enqueue(snapshotId: snapshotId, pixelBuffer: pixelBuffer, extractedText: text)
+    }
+
+    static func normalizedLines(_ text: String) -> [String] {
+        var lines: [String] = []
+        text.enumerateLines { line, _ in
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            if !trimmed.isEmpty { lines.append(trimmed) }
+        }
+        return lines
     }
 
     func runOCR(_ pixelBuffer: CVPixelBuffer) throws -> OCRResult {

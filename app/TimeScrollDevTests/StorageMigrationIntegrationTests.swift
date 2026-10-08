@@ -40,6 +40,8 @@ final class StorageMigrationIntegrationTests: XCTestCase {
         try fm.createDirectory(at: root, withIntermediateDirectories: true)
 
         // Use this root as the current storage for DB
+        let storageRoot = StorageRootSnapshot()
+        defer { storageRoot.restore() }
         DB.shared.close()
         await MainActor.run { StoragePaths.setStorageFolder(root) }
         try DB.shared.openIfNeeded()
@@ -65,7 +67,7 @@ final class StorageMigrationIntegrationTests: XCTestCase {
         // File should be removed
         XCTAssertFalse(fm.fileExists(atPath: img.path))
 
-        try? DB.shared.purgeRowsOlderThan(cutoffMs: Int64(Date().timeIntervalSince1970 * 1000) + 1000, deleteFiles: false)
+        try? DB.shared.purgeOlderThan(days: -1)
         try? fm.removeItem(at: root)
     }
 }

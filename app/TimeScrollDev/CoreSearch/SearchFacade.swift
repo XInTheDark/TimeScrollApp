@@ -6,7 +6,7 @@ public struct SearchArgs {
     public var maxResults: Int
     public var includeImages: Bool
     /// Maximum pixel size for returned images' longest edge. If nil, implementations
-    /// should use a sensible default (512).
+    /// use `SearchFacade.defaultImageMaxPixel`.
     public var imageMaxPixel: Int?
     public var startMs: Int64?
     public var endMs: Int64?
@@ -25,18 +25,8 @@ public struct RowOut {
     public let timeISO8601: String
     public let app: String
     public let ocrText: String
-    public let imagePNG: Data?
-}
-
-public enum SearchFacadeError: LocalizedError {
-    case dbUnavailable(Error)
-    
-    public var errorDescription: String? {
-        switch self {
-        case .dbUnavailable(let underlying):
-            return "Database unavailable: \(underlying.localizedDescription)"
-        }
-    }
+    /// JPEG-encoded snapshot image, when requested.
+    public let imageJPEG: Data?
 }
 
 public final class SearchFacade {
@@ -53,81 +43,12 @@ public final class SearchFacade {
         self.prefs = prefs
     }
 
-    // Call this once after LA to ensure SQLCipher DB is open.
-    public func openDatabaseOrThrow() throws {
-        // Try to open via SQLCipherBridge with full error reporting
-        do {
-            try SQLCipherBridge.shared.openWithUnwrappedKeyOrThrow()
-        } catch {
-            throw SearchFacadeError.dbUnavailable(error)
-        }
-    }
-
-    // MARK: - Vault/DB helpers (public)
-    // Expose minimal helpers so the MCP server doesn’t need to import internal types.
-    public func primeVaultIfPossible() {
-        SQLCipherBridge.shared.openWithUnwrappedKeySilently()
-        _ = try? DB.shared.openIfNeeded()
-    }
-
-    public func tryOpenDB() -> Bool {
-        // Attempt SQLCipher open first (no-op if vault disabled or no key)
-        SQLCipherBridge.shared.openWithUnwrappedKeySilently()
-        // Prefer a positive indicator that an open happened
-        if DB.shared.dbURL != nil { return true }
-        // If vault disabled, plain open is allowed
-        return (try? DB.shared.openIfNeeded()) != nil
-    }
-
-    public func unlockAndOpenIfNeeded() async -> (Bool, String?) {
-        // Retry in case another process just unlocked
-        if tryOpenDB() { return (true, nil) }
-        // Prompt for LA in this process, then try SQLCipher open again
-        do {
-            // Use the new method that authenticates AND unwraps the key using the authenticated context
-            let key = try await KeyStore.shared.authenticateAndUnwrapDbKey()
-            
-            // Mirror unlocked flag so helpers looking at defaults behave consistently
-            let std = UserDefaults.standard
-            StoragePaths.setShared(UUID().uuidString, forKey: "vault.mediaGeneration")
-            std.set(true, forKey: "vault.isUnlocked")
-            StoragePaths.setShared(true, forKey: "vault.isUnlocked")
-            DistributedNotificationCenter.default().postNotificationName(VaultMediaAccess.didChange, object: nil, userInfo: nil, deliverImmediately: true)
-            
-            // Open with the unwrapped key
-            SQLCipherBridge.shared.openWithKey(key)
-        } catch {
-            let msg = error.localizedDescription
-            fputs("[SearchFacade] unlockAndOpenIfNeeded failed: \(msg)\n", stderr)
-            return (false, msg)
-        }
-        
-        if DB.shared.dbURL != nil || (try? DB.shared.openIfNeeded()) != nil {
-            return (true, nil)
-        } else {
-            return (false, "Database open failed after unlock")
-        }
-    }
-
     public func run(_ a: SearchArgs, ocrLimit: Int = 50_000) async throws -> [RowOut] {
         let accessURL = StoragePaths.dbURL()
         guard let access = VaultMediaAccess.token(for: accessURL) else {
             throw NSError(domain: "TimeScroll.Vault", code: 1, userInfo: [NSLocalizedDescriptionKey: "Vault locked."])
         }
-        do {
-            try openDatabaseOrThrow()
-        } catch {
-            fputs("[SearchFacade] openDatabaseOrThrow failed: \(error.localizedDescription)\n", stderr)
-            throw error
-        }
-        
-        // Debug: Log DB path and count
-        if let path = DB.shared.dbURL?.path {
-            let count = (try? DB.shared.snapshotCount()) ?? -1
-            fputs("[SearchFacade] DB path: \(path), snapshots: \(count)\n", stderr)
-        } else {
-            fputs("[SearchFacade] DB path is nil\n", stderr)
-        }
+        // Runs inside the app, which opens the database for the current vault state.
 
         let limit = max(1, min(100, a.maxResults))
         let appIds = (a.apps?.isEmpty == false) ? a.apps : nil
@@ -156,20 +77,18 @@ public final class SearchFacade {
                                             limit: limit, offset: 0)
         }
 
-        let results = rows.map { r in
+        let results = rows.enumerated().map { index, r in
             let ts = Self.isoF.string(from: Date(timeIntervalSince1970: TimeInterval(r.startedAtMs)/1000))
             let app = r.appName ?? r.appBundleId ?? "Unknown"
             // reasonably high OCR limit as requested
             let content = r.content.prefix(ocrLimit)
-            var png: Data? = nil
-            if a.includeImages {
-                if let mp = a.imageMaxPixel {
-                    png = Self.imagePNG(for: r, maxPixel: mp)
-                } else {
-                    png = Self.imagePNG(for: r)
-                }
+            // Images are large in a model's context: cap their size and how many rows carry one.
+            var jpeg: Data? = nil
+            if a.includeImages, index < Self.maxImagesPerResponse {
+                let maxPixel = min(Self.maxImageMaxPixel, max(Self.minImageMaxPixel, a.imageMaxPixel ?? Self.defaultImageMaxPixel))
+                jpeg = Self.imageJPEG(for: r, maxPixel: maxPixel)
             }
-            return RowOut(timeISO8601: ts, app: app, ocrText: String(content), imagePNG: png)
+            return RowOut(timeISO8601: ts, app: app, ocrText: String(content), imageJPEG: jpeg)
         }
         guard VaultMediaAccess.isCurrent(access, for: accessURL) else {
             throw NSError(domain: "TimeScroll.Vault", code: 1, userInfo: [NSLocalizedDescriptionKey: "Vault locked during search."])
@@ -177,43 +96,42 @@ public final class SearchFacade {
         return results
     }
 
-    // Lightweight diagnostics for MCP logging
-    public func diagnostics() -> (path: String?, count: Int) {
-        let p = DB.shared.dbURL?.path
-        let c = (try? DB.shared.snapshotCount()) ?? -1
-        return (p, c)
-    }
+    public static let defaultImageMaxPixel = 1024
+    public static let minImageMaxPixel = 256
+    public static let maxImageMaxPixel = 2048
+    public static let maxImagesPerResponse = 10
+    private static let jpegQuality = 0.7
 
-    private static func imagePNG(for r: SearchResult, maxPixel: Int = 512) -> Data? {
+    private static func imageJPEG(for r: SearchResult, maxPixel: Int) -> Data? {
         let url = URL(fileURLWithPath: r.path)
         let ext = url.pathExtension.lowercased()
 
         if ext == "tse", let header = try? FileCrypter.shared.peekTSEHeader(at: url), header.mime.hasPrefix("image/") {
-            return ThumbnailCache.shared.thumbnail(for: url, maxPixel: CGFloat(maxPixel)).flatMap { nsImageToPNG($0) }
+            return ThumbnailCache.shared.thumbnail(for: url, maxPixel: CGFloat(maxPixel)).flatMap { nsImageToJPEG($0) }
         }
 
         // HEVC segments or sealed videos
         if ["mov","mp4","tse"].contains(ext) {
             let img = HEVCFrameExtractor.image(forPath: url, startedAtMs: r.startedAtMs, format: "hevc", maxPixel: CGFloat(maxPixel))
-            return img.flatMap { nsImageToPNG($0) }
+            return img.flatMap { nsImageToJPEG($0) }
         }
 
         // Prefer poster if present
         if let t = r.thumbPath {
             if let im = ThumbnailCache.shared.thumbnail(for: URL(fileURLWithPath: t), maxPixel: CGFloat(maxPixel)) {
-                return nsImageToPNG(im)
+                return nsImageToJPEG(im)
             }
         }
 
         // Fallback: image file thumbnail
         if let im = ThumbnailCache.shared.thumbnail(for: url, maxPixel: CGFloat(maxPixel)) {
-            return nsImageToPNG(im)
+            return nsImageToJPEG(im)
         }
         return nil
     }
 
-    private static func nsImageToPNG(_ img: NSImage) -> Data? {
+    private static func nsImageToJPEG(_ img: NSImage) -> Data? {
         guard let tiff = img.tiffRepresentation, let rep = NSBitmapImageRep(data: tiff) else { return nil }
-        return rep.representation(using: .png, properties: [:])
+        return rep.representation(using: .jpeg, properties: [.compressionFactor: jpegQuality])
     }
 }

@@ -31,6 +31,7 @@ final class ThumbnailCache {
 
   func clear() {
     HEVCAssetCache.shared.clear()
+    HEVCLiveFrameCache.shared.clear()
     lock.lock()
     generation &+= 1
     cache.removeAllObjects()

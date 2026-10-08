@@ -3,9 +3,6 @@ import AppKit
 
 final class Compactor {
     private let encoder = ImageEncoder()
-    private static let segDF: DateFormatter = {
-        let f = DateFormatter(); f.dateFormat = "yyyy-MM-dd-HH-mm-ss"; f.locale = Locale(identifier: "en_US_POSIX"); return f
-    }()
 
     private struct CompactionSettings {
         let degradeAfterDays: Int
@@ -33,12 +30,8 @@ final class Compactor {
         let days = s.degradeAfterDays
         guard days > 0 else { return false }
         let cutoff = Int64(Date().addingTimeInterval(-Double(days)*86400).timeIntervalSince1970 * 1000)
-        // When primary storage is HEVC video, delete rows older than cutoff and prune full segments
-        if SettingsStore.StorageFormat(rawValue: s.storageFormatRaw) == .hevc {
-            try DB.shared.purgeRowsOlderThan(cutoffMs: cutoff, deleteFiles: false)
-            pruneHEVCSegments(olderThanMs: cutoff)
-            return true
-        }
+        // Compaction only degrades still images. HEVC segments are never deleted here:
+        // removing data is the job of retention (`settings.retentionDays`), not compaction.
         let profile = s.profile
         let paths = try DB.shared.pathsNeedingCompaction(cutoffMs: cutoff, profile: profile)
         for path in paths {
@@ -52,7 +45,7 @@ final class Compactor {
             guard let cg = cgImage else { continue }
             autoreleasepool {
                 do {
-                    let format = SettingsStore.StorageFormat(rawValue: s.storageFormatRaw) ?? .heic
+                    let format = Self.stillImageFormat(forStorageFormat: s.storageFormatRaw)
                     let encoded = try encoder.encode(
                         cgImage: cg,
                         format: format,
@@ -73,20 +66,9 @@ final class Compactor {
         return true
     }
 
-    private func pruneHEVCSegments(olderThanMs cutoff: Int64) {
-        let fm = FileManager.default
-        let dir = StoragePaths.videosDir()
-        guard let items = try? fm.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles]) else { return }
-        for u in items {
-            let name = u.deletingPathExtension().lastPathComponent
-            guard name.hasPrefix("seg-") else { continue }
-            let tsStr = String(String(name.dropFirst(4)).prefix(19))
-            guard let d = Compactor.segDF.date(from: tsStr) else { continue }
-            let startMs = Int64(d.timeIntervalSince1970 * 1000)
-            let endMs = startMs + 60_000 - 1
-            if endMs < cutoff {
-                _ = try? fm.removeItem(at: u)
-            }
-        }
+    /// Still images keep a still-image format even when new captures are recorded as HEVC video.
+    private static func stillImageFormat(forStorageFormat raw: String) -> SettingsStore.StorageFormat {
+        let format = SettingsStore.StorageFormat(rawValue: raw) ?? .heic
+        return format == .hevc ? .heic : format
     }
 }

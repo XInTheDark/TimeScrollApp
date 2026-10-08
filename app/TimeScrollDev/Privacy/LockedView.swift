@@ -10,9 +10,15 @@ struct LockedView: View {
                 Text("Queued items will be stored after unlock.")
                     .font(.footnote).foregroundColor(.secondary)
             }
-            Button("Unlock…") { Task { await vault.unlock(presentingWindow: NSApp.keyWindow) } }
-                .keyboardShortcut(.defaultAction)
+            if vault.needsRecoveryPassphrase {
+                VaultRecoveryField()
+                    .frame(maxWidth: 420)
+            } else {
+                Button("Unlock…") { Task { await vault.unlock(presentingWindow: NSApp.keyWindow) } }
+                    .keyboardShortcut(.defaultAction)
+            }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .vaultErrorAlert()
     }
 }

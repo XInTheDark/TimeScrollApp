@@ -55,32 +55,9 @@ extension DB {
         if let audioAssetId { sqlite3_bind_int64(stmt, 15, audioAssetId) } else { sqlite3_bind_null(stmt, 15) }
         if sqlite3_step(stmt) != SQLITE_DONE { throw NSError(domain: "TS.DB", code: 5) }
         let rowId = sqlite3_last_insert_rowid(db)
-        var tstmt: OpaquePointer?
-        defer { sqlite3_finalize(tstmt) }
-        if sqlite3_prepare_v2(db, "INSERT INTO ts_text(rowid, content) VALUES(?, ?);", -1, &tstmt, nil) != SQLITE_OK {
-            throw NSError(domain: "TS.DB", code: 6)
-        }
-        let preview = (textRefId == nil && !text.isEmpty) ? IndexedTextProjection.preview(from: text) : ""
-        sqlite3_bind_int64(tstmt, 1, rowId)
-        sqlite3_bind_text(tstmt, 2, preview, -1, SQLITE_TRANSIENT)
-        if sqlite3_step(tstmt) != SQLITE_DONE { throw NSError(domain: "TS.DB", code: 7) }
 
         if !boxes.isEmpty {
-            var bstmt: OpaquePointer?
-            defer { sqlite3_finalize(bstmt) }
-            if sqlite3_prepare_v2(db, "INSERT INTO ts_ocr_boxes(snapshot_id, text, x, y, w, h) VALUES(?, ?, ?, ?, ?, ?);", -1, &bstmt, nil) != SQLITE_OK {
-                throw NSError(domain: "TS.DB", code: 8)
-            }
-            for box in boxes {
-                sqlite3_bind_int64(bstmt, 1, rowId)
-                sqlite3_bind_text(bstmt, 2, box.text, -1, SQLITE_TRANSIENT)
-                sqlite3_bind_double(bstmt, 3, Double(box.box.origin.x))
-                sqlite3_bind_double(bstmt, 4, Double(box.box.origin.y))
-                sqlite3_bind_double(bstmt, 5, Double(box.box.size.width))
-                sqlite3_bind_double(bstmt, 6, Double(box.box.size.height))
-                guard sqlite3_step(bstmt) == SQLITE_DONE else { throw NSError(domain: "TS.DB", code: 9) }
-                sqlite3_reset(bstmt)
-            }
+            try Self.writeOCRLayout(snapshotId: rowId, boxes: boxes, db: db)
         }
         if !text.isEmpty {
             try updateFTS(rowId: rowId, content: text)

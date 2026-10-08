@@ -2,15 +2,11 @@ import SwiftUI
 
 struct MCPPane: View {
     @Binding var mcpEnabled: Bool
-    var migrating: Bool
-    var migrationProgress: String
 
     @State private var jsonText: String
 
-    init(mcpEnabled: Binding<Bool>, migrating: Bool, migrationProgress: String) {
+    init(mcpEnabled: Binding<Bool>) {
         self._mcpEnabled = mcpEnabled
-        self.migrating = migrating
-        self.migrationProgress = migrationProgress
         let helper = Self.helperExecutable(for: Bundle.main.bundleURL)
         self._jsonText = State(initialValue: Self.makeConfigJSON(helperPath: helper))
     }
@@ -43,13 +39,9 @@ struct MCPPane: View {
         Form {
             Section(header: Text("Enable MCP")) {
                 Toggle("Enable MCP tools", isOn: $mcpEnabled)
-                    .disabled(migrating)
-                if migrating {
-                    HStack(spacing: 8) {
-                        ProgressView()
-                        Text(migrationProgress.isEmpty ? "Moving data…" : migrationProgress)
-                    }
-                }
+                Text("MCP clients search through the running TimeScroll app, which opens in the background when needed. While the vault is locked, searches are refused.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
             }
 
             Section(header: Text("Install MCP server")) {

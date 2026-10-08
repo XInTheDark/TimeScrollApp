@@ -21,14 +21,12 @@ struct UpdatesPane: View {
                     .onChange(of: settings.enableAutoCheckUpdates) { _ in applySparkle() }
 
                 LabeledContent("Check interval") {
-                    HStack {
-                        Slider(value: Binding(get: { Double(settings.autoCheckIntervalHours) },
-                                              set: { settings.autoCheckIntervalHours = Int($0) }),
-                               in: 12...168, step: 12)
-                        Text("\(settings.autoCheckIntervalHours) h")
-                            .monospacedDigit()
-                            .frame(width: 44, alignment: .trailing)
-                    }
+                    SettingsSlider(
+                        value: Binding(get: { Double(settings.autoCheckIntervalHours) }, set: { settings.autoCheckIntervalHours = Int($0) }),
+                        in: 12...168,
+                        step: 12,
+                        valueText: "\(settings.autoCheckIntervalHours) h"
+                    )
                 }
                 .onChange(of: settings.autoCheckIntervalHours) { _ in applySparkle() }
 

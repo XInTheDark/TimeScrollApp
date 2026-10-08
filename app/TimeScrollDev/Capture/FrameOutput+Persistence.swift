@@ -14,9 +14,8 @@ extension FrameOutput {
             }
             return ("", [])
         case .accessibility:
-            let set = Set(blacklistBundleIds)
-            let text = AXTextExtractor.shared.collectText(blacklistBundleIds: set)
-            return (text, [])
+            let capture = AXTextExtractor.shared.collect(blacklistBundleIds: Set(blacklistBundleIds), displayBounds: displayBounds)
+            return (capture.text, capture.lines)
         case .none:
             return ("", [])
         }

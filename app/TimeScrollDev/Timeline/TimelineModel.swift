@@ -36,6 +36,14 @@ final class TimelineModel: ObservableObject {
     private var timesAsc: [Int64] = []
     private var requestToken: Int = 0
 
+    // Paging: the timeline holds a window of rows and extends it as the user scrolls back.
+    static let pageSize = 1000
+    @Published private(set) var hasMoreOlder: Bool = false
+    private var isLoadingOlder = false
+    private var activeQuery: TimelineQuery?
+    /// True while showing a fixed window around an opened search result.
+    private var isAnchoredWindow = false
+
     var minTimeMs: Int64 { metas.last?.startedAtMs ?? 0 }
     var maxTimeMs: Int64 { metas.first?.startedAtMs ?? 0 }
     var selected: SnapshotMeta? { metas.indices.contains(selectedIndex) ? metas[selectedIndex] : nil }
@@ -45,64 +53,25 @@ final class TimelineModel: ObservableObject {
         overlayOffsetY = 220
     }
 
-    func load(limit: Int = 1000) {
+    func load(limit: Int = TimelineModel.pageSize) {
         requestToken &+= 1
         let token = requestToken
         isLoading = true
+        isLoadingOlder = false
         Task { @MainActor in await Task.yield() }
 
-        let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
         let previousSelectedId = selected?.id
-        let settings = SettingsStore.shared
-        let useAI = settings.aiEmbeddingsEnabled && settings.aiModeOn && EmbeddingService.shared.dim > 0
-        let ia = settings.intelligentAccuracy
-        let fuzz = settings.fuzziness
-        let appIds = selectedAppBundleIds.isEmpty ? nil : Array(selectedAppBundleIds)
-        let captureKinds = selectedCaptureKinds.isEmpty ? nil : Array(selectedCaptureKinds)
-        let audioSourceKinds = selectedAudioSourceKinds.isEmpty ? nil : Array(selectedAudioSourceKinds)
-        let start = startMs
-        let end = endMs
+        let q = currentQuery()
 
-        DispatchQueue.global(qos: .userInitiated).async { [limit, trimmed, appIds, captureKinds, audioSourceKinds, start, end, useAI, fuzz, ia] in
-            let searchSvc = SearchService()
-            let list: [SnapshotMeta]
-            if trimmed.isEmpty {
-                list = searchSvc.latestMetas(
-                    limit: limit,
-                    appBundleIds: appIds,
-                    startMs: start,
-                    endMs: end,
-                    captureKinds: captureKinds,
-                    audioSourceKinds: audioSourceKinds
-                )
-            } else if useAI {
-                list = searchSvc.searchAIMetas(
-                    trimmed,
-                    appBundleIds: appIds,
-                    startMs: start,
-                    endMs: end,
-                    captureKinds: captureKinds,
-                    audioSourceKinds: audioSourceKinds,
-                    limit: limit
-                )
-            } else {
-                list = searchSvc.searchMetas(
-                    trimmed,
-                    fuzziness: fuzz,
-                    intelligentAccuracy: ia,
-                    appBundleIds: appIds,
-                    startMs: start,
-                    endMs: end,
-                    captureKinds: captureKinds,
-                    audioSourceKinds: audioSourceKinds,
-                    limit: limit
-                )
-            }
-
+        DispatchQueue.global(qos: .userInitiated).async { [limit, q] in
+            let list = q.fetch(limit: limit, offset: 0, endMs: q.endMs)
             let sorted = list.sorted { $0.startedAtMs > $1.startedAtMs }
             DispatchQueue.main.async { [weak self] in
                 guard let self else { return }
                 guard token == self.requestToken else { return }
+                self.activeQuery = q
+                self.isAnchoredWindow = false
+                self.hasMoreOlder = q.supportsPaging && list.count >= limit
                 self.metas = sorted
                 if self.followLatest {
                     self.selectedIndex = self.metas.isEmpty ? -1 : 0
@@ -273,6 +242,8 @@ final class TimelineModel: ObservableObject {
         requestToken &+= 1
         let token = requestToken
         isLoading = true
+        isLoadingOlder = false
+        let browseQuery = currentQuery(text: "")
 
         let appIds = selectedAppBundleIds.isEmpty ? nil : Array(selectedAppBundleIds)
         let captureKinds = selectedCaptureKinds.isEmpty ? nil : Array(selectedCaptureKinds)
@@ -309,6 +280,9 @@ final class TimelineModel: ObservableObject {
             DispatchQueue.main.async { [weak self] in
                 guard let self else { return }
                 guard token == self.requestToken else { return }
+                self.activeQuery = browseQuery
+                self.isAnchoredWindow = true
+                self.hasMoreOlder = true
                 self.metas = sorted
                 self.selectedIndex = self.metas.firstIndex(where: { $0.id == id }) ?? (self.metas.isEmpty ? -1 : 0)
                 self.rebuildAscCache()
@@ -320,6 +294,84 @@ final class TimelineModel: ObservableObject {
 
     func prev() {
         if selectedIndex + 1 < metas.count { selectedIndex += 1 }
+        if selectedIndex >= metas.count - 2 { loadOlderIfNeeded() }
+    }
+
+    /// Fetches the next page of older rows for the active query and merges it in.
+    func loadOlderIfNeeded() {
+        guard hasMoreOlder, !isLoadingOlder, !isLoading, let q = activeQuery, q.supportsPaging, !metas.isEmpty else { return }
+        isLoadingOlder = true
+        let token = requestToken
+        let oldestMs = minTimeMs
+        let offset = metas.count
+        DispatchQueue.global(qos: .userInitiated).async { [q] in
+            // Browsing pages by time (stable under live inserts); text search pages by offset.
+            let page = q.text.isEmpty
+                ? q.fetch(limit: Self.pageSize, offset: 0, endMs: min(q.endMs ?? Int64.max, oldestMs))
+                : q.fetch(limit: Self.pageSize, offset: offset, endMs: q.endMs)
+            DispatchQueue.main.async { [weak self] in
+                guard let self, token == self.requestToken else { return }
+                self.isLoadingOlder = false
+                let added = self.merge(page)
+                self.hasMoreOlder = page.count >= Self.pageSize && added > 0
+            }
+        }
+    }
+
+    /// Adds rows newer than the newest loaded row without discarding older pages.
+    /// Returns false when an incremental refresh does not apply and a full `load()` is needed.
+    func refreshNewest() -> Bool {
+        guard let q = activeQuery, q.text.isEmpty, !isAnchoredWindow, !isLoading, !metas.isEmpty, q == currentQuery() else {
+            return false
+        }
+        let token = requestToken
+        let newestMs = maxTimeMs
+        DispatchQueue.global(qos: .userInitiated).async { [q] in
+            let page = q.fetch(limit: Self.pageSize, offset: 0, endMs: q.endMs, startMs: max(q.startMs ?? 0, newestMs))
+            DispatchQueue.main.async { [weak self] in
+                guard let self, token == self.requestToken else { return }
+                if page.count >= Self.pageSize {
+                    // Too far behind to merge incrementally.
+                    self.load()
+                    return
+                }
+                self.merge(page)
+                if self.followLatest, !self.metas.isEmpty { self.selectedIndex = 0 }
+            }
+        }
+        return true
+    }
+
+    /// Merges rows into `metas`, keeping the selection on the same snapshot. Returns rows added.
+    @discardableResult
+    private func merge(_ rows: [SnapshotMeta]) -> Int {
+        let known = Set(metas.map(\.id))
+        let fresh = rows.filter { !known.contains($0.id) }
+        guard !fresh.isEmpty else { return 0 }
+        let selectedId = selected?.id
+        metas = (metas + fresh).sorted { $0.startedAtMs > $1.startedAtMs }
+        if let selectedId, let idx = metas.firstIndex(where: { $0.id == selectedId }) {
+            selectedIndex = idx
+        }
+        rebuildAscCache()
+        refreshSegments()
+        return fresh.count
+    }
+
+    private func currentQuery(text: String? = nil) -> TimelineQuery {
+        let settings = SettingsStore.shared
+        let trimmed = (text ?? query).trimmingCharacters(in: .whitespacesAndNewlines)
+        return TimelineQuery(
+            text: trimmed,
+            useAI: settings.aiEmbeddingsEnabled && settings.aiModeOn && EmbeddingService.shared.dim > 0,
+            fuzziness: settings.fuzziness,
+            intelligentAccuracy: settings.intelligentAccuracy,
+            appBundleIds: selectedAppBundleIds.isEmpty ? nil : selectedAppBundleIds.sorted(),
+            captureKinds: selectedCaptureKinds.isEmpty ? nil : selectedCaptureKinds.sorted { $0.rawValue < $1.rawValue },
+            audioSourceKinds: selectedAudioSourceKinds.isEmpty ? nil : selectedAudioSourceKinds.sorted { $0.rawValue < $1.rawValue },
+            startMs: startMs,
+            endMs: endMs
+        )
     }
 
     func next() {

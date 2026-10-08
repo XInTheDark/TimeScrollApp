@@ -72,30 +72,36 @@ struct GeneralPane: View {
 
             Section {
                 LabeledContent("Min interval") {
-                    HStack {
-                        Slider(value: Self.minIntervalIndexBinding(settings: settings), in: 0...Double(Self.minIntervalOptions.count - 1), step: 1)
-                        Text(Self.formatInterval(settings.captureMinInterval))
-                            .monospacedDigit()
-                            .frame(width: 52, alignment: .trailing)
-                    }
+                    SettingsSlider(
+                        value: Self.minIntervalIndexBinding(settings: settings),
+                        in: 0...Double(Self.minIntervalOptions.count - 1),
+                        step: 1,
+                        valueText: Self.formatInterval(settings.captureMinInterval)
+                    )
                 }
 
-                LabeledContent("Retention") {
-                    HStack(spacing: 6) {
-                        TextField("", value: $settings.retentionDays, formatter: Self.intFormatter)
-                            .frame(width: 70)
-                        Text("days")
-                            .foregroundColor(.secondary)
+                LabeledContent("On app switch") {
+                    Picker("", selection: $settings.appSwitchCaptureMode) {
+                        Text("Off").tag(SettingsStore.AppSwitchCaptureMode.off)
+                        Text("Also capture").tag(SettingsStore.AppSwitchCaptureMode.additional)
+                        Text("Capture only after switch").tag(SettingsStore.AppSwitchCaptureMode.afterSwitchOnly)
                     }
+                    .labelsHidden()
+                    .fixedSize()
+                }
+                .help("\"Also capture\" adds a snapshot shortly after each app switch on top of interval capture. \"Capture only after switch\" records just for a few seconds after each switch.")
+
+                LabeledContent("Retention") {
+                    SettingsNumberField(value: $settings.retentionDays, formatter: Self.intFormatter, unit: "days")
                 }
 
                 LabeledContent("Capture scale") {
-                    HStack {
-                        Slider(value: $settings.captureScale, in: 0.5...1.0, step: 0.05)
-                        Text(String(format: "%.0f%%", settings.captureScale * 100))
-                            .monospacedDigit()
-                            .frame(width: 46, alignment: .trailing)
-                    }
+                    SettingsSlider(
+                        value: $settings.captureScale,
+                        in: 0.5...1.0,
+                        step: 0.05,
+                        valueText: String(format: "%.0f%%", settings.captureScale * 100)
+                    )
                 }
                 .onChange(of: settings.captureScale) { _ in
                     Task { @MainActor in
@@ -110,7 +116,7 @@ struct GeneralPane: View {
                         }
                     }
                     .labelsHidden()
-                    .frame(maxWidth: 220)
+                    .fixedSize()
                 }
                 .onChange(of: settings.captureDisplayMode) { _ in
                     Task { @MainActor in

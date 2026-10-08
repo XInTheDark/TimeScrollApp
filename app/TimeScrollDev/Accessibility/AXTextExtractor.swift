@@ -45,18 +45,36 @@ final class AXTextExtractor {
         let targetWin: AXUIElement
     }
 
+    /// Text plus normalized boxes (Vision convention: origin bottom-left, 0...1) for short text
+    /// elements that lie on the captured display.
+    struct Capture {
+        let text: String
+        let lines: [OCRLine]
+    }
+
+    /// Elements with longer text (documents, text areas) are not boxed: their frame covers the
+    /// whole area and would not localize a match.
+    private static let maxBoxedTextLength = 500
+
     /// Returns concatenated text across visible, on-screen windows (filtered by bundle IDs).
-    /// Uses parallel extraction for better performance.
     func collectText(blacklistBundleIds: Set<String>,
                      limits: Limits = .default) -> String {
-        guard isTrusted() else { return "" }
+        collect(blacklistBundleIds: blacklistBundleIds, displayBounds: nil, limits: limits).text
+    }
+
+    /// Like `collectText`, also returning element boxes relative to `displayBounds`
+    /// (global display coordinates, as from `CGDisplayBounds`). Uses parallel extraction.
+    func collect(blacklistBundleIds: Set<String>,
+                 displayBounds: CGRect?,
+                 limits: Limits = .default) -> Capture {
+        guard isTrusted() else { return Capture(text: "", lines: []) }
 
         let debugMode = UserDefaults.standard.bool(forKey: "settings.debugMode")
         let tStart = DispatchTime.now().uptimeMilliseconds
 
         // 1) Get all on-screen windows in Z-order (front-to-back)
         guard let infoList = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] else {
-            return ""
+            return Capture(text: "", lines: [])
         }
 
         let mainScreenArea = NSScreen.main?.frame.area ?? 0
@@ -144,12 +162,20 @@ final class AXTextExtractor {
             }
         }
 
-        if windowTasks.isEmpty { return "" }
+        if windowTasks.isEmpty { return Capture(text: "", lines: []) }
 
         // ========== PHASE 2: Parallel - extract text from each window ==========
         let results = UnsafeMutablePointer<String>.allocate(capacity: windowTasks.count)
         results.initialize(repeating: "", count: windowTasks.count)
-        defer { results.deallocate() }
+        let boxResults = UnsafeMutablePointer<[(text: String, frame: CGRect)]>.allocate(capacity: windowTasks.count)
+        boxResults.initialize(repeating: [], count: windowTasks.count)
+        defer {
+            results.deinitialize(count: windowTasks.count)
+            results.deallocate()
+            boxResults.deinitialize(count: windowTasks.count)
+            boxResults.deallocate()
+        }
+        let collectBoxes = displayBounds != nil
 
         DispatchQueue.concurrentPerform(iterations: windowTasks.count) { idx in
             let task = windowTasks[idx]
@@ -158,13 +184,18 @@ final class AXTextExtractor {
 
             var seenText = Set<String>()
             var textBuf = String()
+            var boxes: [(text: String, frame: CGRect)] = []
             let collectLimit = limits.maxCharsPerWindow * 2
 
-            let addText: (String) -> Void = { s in
+            let addText: (String, AXUIElement) -> Void = { s, element in
                 if !s.isEmpty && textBuf.count < collectLimit && !seenText.contains(s) {
                     seenText.insert(s)
                     textBuf.append(s)
                     textBuf.append("\n")
+                    if collectBoxes, s.count <= Self.maxBoxedTextLength,
+                       let frame = self.frame(of: element, startTime: windowStart, limits: limits) {
+                        boxes.append((s, frame))
+                    }
                 }
             }
 
@@ -203,7 +234,7 @@ final class AXTextExtractor {
                             if debugMode {
                                 print("[AX] [\(idx)]   -> document value: \(docValue.count) chars")
                             }
-                            addText(docValue)
+                            addText(docValue, focusedElement)
                         }
                     }
                 }
@@ -231,6 +262,7 @@ final class AXTextExtractor {
             }
 
             results[idx] = textBuf
+            boxResults[idx] = boxes
         }
 
         // ========== PHASE 3: Merge results (in Z-order) ==========
@@ -246,19 +278,48 @@ final class AXTextExtractor {
             }
         }
 
-        let totalMs = DispatchTime.now().uptimeMilliseconds - tStart
-        if debugMode {
-            print("[AX] Total: \(windowTasks.count) windows, \(totalChars) chars in \(totalMs)ms")
+        var lines: [OCRLine] = []
+        if let displayBounds, displayBounds.width > 0, displayBounds.height > 0 {
+            for idx in 0..<windowTasks.count {
+                for box in boxResults[idx] {
+                    let visible = box.frame.intersection(displayBounds)
+                    guard !visible.isNull, visible.width > 1, visible.height > 1 else { continue }
+                    let normalized = CGRect(x: (visible.minX - displayBounds.minX) / displayBounds.width,
+                                            y: 1 - (visible.maxY - displayBounds.minY) / displayBounds.height,
+                                            width: visible.width / displayBounds.width,
+                                            height: visible.height / displayBounds.height)
+                    lines.append(OCRLine(text: box.text, box: normalized))
+                }
+            }
         }
 
-        return out
+        let totalMs = DispatchTime.now().uptimeMilliseconds - tStart
+        if debugMode {
+            print("[AX] Total: \(windowTasks.count) windows, \(totalChars) chars, \(lines.count) boxes in \(totalMs)ms")
+        }
+
+        return Capture(text: out, lines: lines)
+    }
+
+    /// Global screen frame (top-left origin) of an element, within the time budget.
+    private func frame(of element: AXUIElement, startTime: Int, limits: Limits) -> CGRect? {
+        guard let positionRef: AnyObject = getAXAttr(element, kAXPositionAttribute as CFString, startTime: startTime, limits: limits),
+              let sizeRef: AnyObject = getAXAttr(element, kAXSizeAttribute as CFString, startTime: startTime, limits: limits),
+              CFGetTypeID(positionRef) == AXValueGetTypeID(), CFGetTypeID(sizeRef) == AXValueGetTypeID() else { return nil }
+        let position = positionRef as! AXValue
+        let size = sizeRef as! AXValue
+        var point = CGPoint.zero
+        var extent = CGSize.zero
+        guard AXValueGetValue(position, .cgPoint, &point), AXValueGetValue(size, .cgSize, &extent),
+              extent.width > 0, extent.height > 0 else { return nil }
+        return CGRect(origin: point, size: extent)
     }
 
     private func traverse(_ element: AXUIElement,
                           depth: Int,
                           limits: Limits,
                           startTime: Int,
-                          onText: (String) -> Void) {
+                          onText: (String, AXUIElement) -> Void) {
         if depth > limits.maxDepth { return }
 
         // Early exit if approaching time budget
@@ -305,7 +366,7 @@ final class AXTextExtractor {
                 if shouldLog {
                     print("[AX]   -> value: \(v.prefix(100))")
                 }
-                onText(v)
+                onText(v, element)
                 foundText = true
             }
         }
@@ -320,7 +381,7 @@ final class AXTextExtractor {
                     if shouldLog {
                         print("[AX]   -> title: \(t.prefix(100))")
                     }
-                    onText(t)
+                    onText(t, element)
                     foundText = true
                 }
             }
@@ -336,7 +397,7 @@ final class AXTextExtractor {
                     if shouldLog {
                         print("[AX]   -> desc: \(d.prefix(100))")
                     }
-                    onText(d)
+                    onText(d, element)
                 }
             }
         }

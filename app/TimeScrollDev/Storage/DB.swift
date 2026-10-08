@@ -49,6 +49,18 @@ final class DB {
     private(set) var dbURL: URL?
     private let queue = DispatchQueue(label: "com.timescroll.db")
     private let queueKey = DispatchSpecificKey<Bool>()
+    private let reader = DBReadConnection()
+    static let writerCacheSizeKiB = 16_000
+
+    /// Runs a read-only block on the dedicated read connection. Blocks must not write and must
+    /// not call back into writer methods (`onQueueSync`).
+    func onReadQueueSync<T>(_ block: (OpaquePointer) throws -> T) throws -> T {
+        if !reader.isConfigured {
+            // Opening the writer creates/migrates the schema and publishes connection parameters.
+            try onQueueSync { try openIfNeeded() }
+        }
+        return try reader.sync(block)
+    }
 
     func onQueueSync<T>(_ block: () throws -> T) rethrows -> T {
         if DispatchQueue.getSpecific(key: queueKey) == true {
@@ -108,9 +120,10 @@ final class DB {
         sqlite3_exec(handle, "PRAGMA journal_mode=WAL;", nil, nil, nil)
         sqlite3_exec(handle, "PRAGMA synchronous=NORMAL;", nil, nil, nil)
         sqlite3_exec(handle, "PRAGMA temp_store=MEMORY;", nil, nil, nil)
-        sqlite3_exec(handle, "PRAGMA cache_size=-2000;", nil, nil, nil)
+        sqlite3_exec(handle, "PRAGMA cache_size=-\(Self.writerCacheSizeKiB);", nil, nil, nil)
         try createSchema()
         try migrateIfNeeded()
+        reader.configure(url: url, key: nil)
         if let u = dbURL { fputs("[DB] opened at \(u.path)\n", stderr) }
         }
     }
@@ -161,7 +174,7 @@ final class DB {
     _ = sqlite3_exec(handle, "PRAGMA journal_mode=WAL;", nil, nil, nil)
         _ = sqlite3_exec(handle, "PRAGMA synchronous=NORMAL;", nil, nil, nil)
         _ = sqlite3_exec(handle, "PRAGMA temp_store=MEMORY;", nil, nil, nil)
-        _ = sqlite3_exec(handle, "PRAGMA cache_size=-2000;", nil, nil, nil)
+        _ = sqlite3_exec(handle, "PRAGMA cache_size=-\(Self.writerCacheSizeKiB);", nil, nil, nil)
     // Immediately checkpoint and truncate WAL to avoid stale WAL pages causing HMAC issues
     _ = sqlite3_exec(handle, "PRAGMA wal_checkpoint(TRUNCATE);", nil, nil, nil)
         // Verify key by a simple query; if it fails, close and throw
@@ -175,12 +188,14 @@ final class DB {
         sqlite3_finalize(testStmt)
         try createSchema()
         try migrateIfNeeded()
+        reader.configure(url: url, key: key)
         // After schema ensures at least one write, verify the on-disk header is no longer the plaintext SQLite magic.
         verifyEncryptedHeader()
         }
     }
 
     func close() {
+        reader.close()
         if let handle = db { sqlite3_close(handle) }
         db = nil
     }
@@ -265,11 +280,9 @@ final class DB {
         );
         """
         if sqlite3_exec(db, schema, nil, nil, nil) != SQLITE_OK { throw NSError(domain: "TS.DB", code: 2) }
-        // Create FTS table if missing
-        let fts = "CREATE VIRTUAL TABLE IF NOT EXISTS ts_text USING fts5(content, tokenize='unicode61 remove_diacritics 2');"
-        _ = sqlite3_exec(db, fts, nil, nil, nil)
-        let chunkFTS = "CREATE VIRTUAL TABLE IF NOT EXISTS ts_text_chunk USING fts5(snapshot_id UNINDEXED, chunk_index UNINDEXED, content, tokenize='unicode61 remove_diacritics 2');"
-        _ = sqlite3_exec(db, chunkFTS, nil, nil, nil)
+        Self.createMetaTableIfNeeded(db: db)
+        Self.createOCRLayoutTableIfNeeded(db: db)
+        Self.createTextIndexIfNeeded(db: db)
         // Indices for faster joins and scans
         _ = sqlite3_exec(db, "CREATE INDEX IF NOT EXISTS idx_ts_snapshot_started_at_ms ON ts_snapshot(started_at_ms DESC);", nil, nil, nil)
         _ = sqlite3_exec(db, "CREATE INDEX IF NOT EXISTS idx_ts_snapshot_app_bundle_started_at_ms ON ts_snapshot(app_bundle_id, started_at_ms DESC);", nil, nil, nil)
@@ -416,16 +429,8 @@ final class DB {
         _ = sqlite3_exec(db, "CREATE INDEX IF NOT EXISTS idx_ts_audio_asset_started_at_ms ON ts_audio_asset(started_at_ms DESC);", nil, nil, nil)
         _ = sqlite3_exec(db, "CREATE INDEX IF NOT EXISTS idx_ts_audio_asset_source_kind ON ts_audio_asset(source_kind);", nil, nil, nil)
         _ = sqlite3_exec(db, "CREATE INDEX IF NOT EXISTS idx_ts_audio_asset_transcription_status ON ts_audio_asset(transcription_status);", nil, nil, nil)
-        if !tableExists("ts_text") {
-            let fts = "CREATE VIRTUAL TABLE ts_text USING fts5(content, tokenize='unicode61 remove_diacritics 2');"
-            _ = sqlite3_exec(db, fts, nil, nil, nil)
-        }
         if !tableExists("ts_text_store") {
             let sql = "CREATE TABLE ts_text_store (id INTEGER PRIMARY KEY AUTOINCREMENT, sha256 TEXT NOT NULL UNIQUE, codec TEXT NOT NULL, original_bytes INTEGER NOT NULL, data BLOB NOT NULL);"
-            _ = sqlite3_exec(db, sql, nil, nil, nil)
-        }
-        if !tableExists("ts_text_chunk") {
-            let sql = "CREATE VIRTUAL TABLE ts_text_chunk USING fts5(snapshot_id UNINDEXED, chunk_index UNINDEXED, content, tokenize='unicode61 remove_diacritics 2');"
             _ = sqlite3_exec(db, sql, nil, nil, nil)
         }
         _ = sqlite3_exec(db, "CREATE INDEX IF NOT EXISTS idx_ts_snapshot_text_store_id ON ts_snapshot(text_store_id);", nil, nil, nil)

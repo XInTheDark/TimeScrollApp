@@ -13,6 +13,8 @@ struct SnapshotStageView: View {
     @State private var lastRequestedId: Int64 = 0
     @State private var loadToken: Int = 0
     @State private var showSpinner: Bool = false
+    /// True while only the small poster is shown because the full frame was not readable yet.
+    @State private var showingPosterOnly: Bool = false
     @State private var rectRefreshToken: Int = 0
     @StateObject private var audioPlayback = AudioPlaybackController()
     @State private var activeAudioMeta: SnapshotMeta?
@@ -45,7 +47,7 @@ struct SnapshotStageView: View {
                         // Avoid flicker: keep background empty while waiting for spinner or image
                         Color.clear
                     } else {
-                        Text("No image").foregroundColor(.secondary)
+                        Text("Frame unavailable").foregroundColor(.secondary)
                     }
                 }
             } else {
@@ -89,6 +91,12 @@ struct SnapshotStageView: View {
         .onDisappear {
             audioPlayback.stop()
             model.playbackTimeMs = nil
+        }
+        .onChange(of: model.metas.first?.id) { _, _ in
+            // A new capture flushes the live segment's previous frame; upgrade a poster-only view.
+            guard showingPosterOnly else { return }
+            lastRequestedId = 0
+            loadSelectedIfNeeded()
         }
         .onChange(of: model.selected?.id) { _, _ in
             handleSelectionChange()
@@ -382,23 +390,32 @@ struct SnapshotStageView: View {
         lastRequestedId = s.id
         loadToken &+= 1
         let token = loadToken
-        // 1) If we have a poster image (thumbPath), prefer it for instant UX
+        // 0) The newest capture is kept in memory at full resolution until its segment catches up.
+        if let live = HEVCLiveFrameCache.shared.image(path: URL(fileURLWithPath: s.path), startedAtMs: s.startedAtMs) {
+            withAnimation(.easeInOut(duration: 0.12)) { nsImage = live }
+            isLoading = false
+            showSpinner = false
+            showingPosterOnly = false
+            return
+        }
+        // 1) Show the small poster (thumbPath) instantly, then upgrade to the full frame below.
+        // Posters only remain while a segment is live or failed to seal, so they are not the final image.
+        var poster: NSImage?
         if let t = s.thumbPath {
             let tu = URL(fileURLWithPath: t)
             if tu.pathExtension.lowercased() == "tse" {
                 if let (hdr, data) = try? FileCrypter.shared.decryptTSE(at: tu), hdr.mime.hasPrefix("image/") {
-                    withAnimation(.easeInOut(duration: 0.12)) { nsImage = NSImage(data: data) }
-                    isLoading = false
-                    showSpinner = false
-                    return
+                    poster = NSImage(data: data)
                 }
-            } else if let im = NSImage(contentsOf: tu) {
-                withAnimation(.easeInOut(duration: 0.12)) { nsImage = im }
-                isLoading = false
-                showSpinner = false
-                return
+            } else {
+                poster = NSImage(contentsOf: tu)
             }
         }
+        if let poster {
+            withAnimation(.easeInOut(duration: 0.12)) { nsImage = poster }
+        }
+        let hasPoster = poster != nil
+        showingPosterOnly = false
         // 2) Begin background load with small retries for live segment flush
         // Do not clear nsImage here to avoid flicker; overlay spinner instead
         isLoading = true
@@ -457,7 +474,11 @@ struct SnapshotStageView: View {
                 guard self.loadToken == token else { return }
                 if let im = image {
                     withAnimation(.easeInOut(duration: 0.12)) { self.nsImage = im }
-                } // else keep the previous image to avoid flicker/flash
+                } else if !hasPoster {
+                    // Never leave the previous snapshot's frame under this snapshot's timestamp.
+                    self.nsImage = nil
+                }
+                self.showingPosterOnly = image == nil && hasPoster
                 self.isLoading = false
                 withAnimation(.easeInOut(duration: 0.12)) { self.showSpinner = false }
             }

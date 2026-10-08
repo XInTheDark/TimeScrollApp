@@ -76,7 +76,6 @@ struct TimelineUnifiedView: View {
         }
         .onAppear {
             _ = SnapshotStore.shared.snapshotsDir
-            appState.enforceRetention()
             model.load()
             installKeyMonitor()
             // Keep the text field in sync with the applied model query
@@ -133,7 +132,9 @@ struct TimelineUnifiedView: View {
             return
         }
 
-        model.load()
+        if !model.refreshNewest() {
+            model.load()
+        }
         if model.followLatest {
             model.jumpToEndToken &+= 1
         }

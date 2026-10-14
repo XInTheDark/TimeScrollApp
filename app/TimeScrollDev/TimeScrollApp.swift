@@ -54,7 +54,7 @@ struct TimeScrollApp: App {
         }
     }
     var body: some Scene {
-        WindowGroup {
+        Window("TimeScroll", id: "main") {
             ContentView()
                 .environmentObject(SettingsStore.shared)
         }

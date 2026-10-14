@@ -743,18 +743,14 @@ final class TimelineBarNSView: NSView {
         // Include the preceding major tick and label overhang at the viewport edges.
         let start = max(m.minTimeMs, layout.time(atX: visibleRect.minX - 100) - majorStep)
         let end = min(m.maxTimeMs, layout.time(atX: visibleRect.maxX + 100) + majorStep)
-        let labelStyle: [NSAttributedString.Key: Any] = [
-            .font: NSFont.systemFont(ofSize: 10, weight: .regular),
-            .foregroundColor: NSColor.secondaryLabelColor
-        ]
         let yTop = rect.minY + 8
         let tickHeightMajor: CGFloat = 8
         let tickHeightMinor: CGFloat = 4
-        // First major aligned to step
         if end <= start { return }
-        let firstMajor = ((start / majorStep) + 1) * majorStep
+        // Align majors to local wall-clock steps so midnight is always a major tick.
+        let tzOffsetMs = Int64(TimeZone.current.secondsFromGMT(for: Date(timeIntervalSince1970: TimeInterval(start) / 1000))) * 1000
+        let firstMajor = (((start + tzOffsetMs) / majorStep) + 1) * majorStep - tzOffsetMs
         var t = firstMajor
-        let df = TimelineBarNSView.timeFormatter
         while t < end {
             let xPos = timelineX(for: t)
             // Major tick
@@ -764,11 +760,11 @@ final class TimelineBarNSView: NSView {
             p.line(to: NSPoint(x: xPos, y: yTop + tickHeightMajor))
             p.lineWidth = 1
             p.stroke()
-            // Label
+            // Label: date at midnight, time otherwise
             let date = Date(timeIntervalSince1970: TimeInterval(t)/1000)
-            let str = df.string(from: date) as NSString
-            let size = str.size(withAttributes: labelStyle)
-            str.draw(at: NSPoint(x: xPos - size.width/2, y: yTop + tickHeightMajor + 2), withAttributes: labelStyle)
+            let isMidnight = Calendar.current.startOfDay(for: date) == date
+            drawTickLabel(isMidnight ? Self.dayFormatter.string(from: date) : Self.timeFormatter.string(from: date),
+                          emphasized: isMidnight, centeredAt: xPos, y: yTop + tickHeightMajor + 2)
             // Minor ticks between this and next major
             var mt = t + minorStep
             let nextMajor = t + majorStep
@@ -788,25 +784,44 @@ final class TimelineBarNSView: NSView {
 
     private func drawCompressedTicks(in rect: NSRect) {
         guard !layout.timesAsc.isEmpty else { return }
-        let firstTime = layout.timesAsc.first ?? 0
-        let lastTime = layout.timesAsc.last ?? firstTime
-        let labelStyle: [NSAttributedString.Key: Any] = [
-            .font: NSFont.systemFont(ofSize: 10, weight: .regular),
-            .foregroundColor: NSColor.secondaryLabelColor
-        ]
         let yTop = rect.minY + 8
         let majorTickHeight: CGFloat = 8
         let minorTickHeight: CGFloat = 4
-        let df = TimelineBarNSView.timeFormatter
+        let labelGap: CGFloat = 10
         var lastMajorX = -CGFloat.greatestFiniteMagnitude
         var lastMinorX = -CGFloat.greatestFiniteMagnitude
+        var lastLabelMaxX = -CGFloat.greatestFiniteMagnitude
+        var lastLabelText = ""
+        // A day change is labelled with the date on the next major tick that has room for it.
+        var nextDayStartMs = Int64.min
+        var dayChangePending = false
 
+        // Walk every point (not just visible ones) so tick placement is stable while scrolling.
         for (timeMs, xPos) in zip(layout.timesAsc, layout.positionsAsc) {
-            let isMajor = xPos - lastMajorX >= 90 || timeMs == firstTime || timeMs == lastTime
+            if timeMs >= nextDayStartMs {
+                let date = Date(timeIntervalSince1970: TimeInterval(timeMs) / 1000)
+                let nextDay = Calendar.current.date(byAdding: .day, value: 1, to: Calendar.current.startOfDay(for: date)) ?? date
+                nextDayStartMs = Int64(nextDay.timeIntervalSince1970 * 1000)
+                dayChangePending = true
+            }
+            let isMajor = xPos - lastMajorX >= 60 || (dayChangePending && xPos - lastMajorX >= 22)
             let needsMinor = xPos - lastMinorX >= 22
             guard isMajor || needsMinor else { continue }
             lastMinorX = xPos
-            if isMajor { lastMajorX = xPos }
+            var label: String?
+            if isMajor {
+                lastMajorX = xPos
+                let date = Date(timeIntervalSince1970: TimeInterval(timeMs) / 1000)
+                let text = dayChangePending ? Self.dayTimeFormatter.string(from: date) : Self.timeFormatter.string(from: date)
+                let width = tickLabelSize(text, emphasized: dayChangePending).width
+                if text != lastLabelText, xPos - width / 2 >= lastLabelMaxX + labelGap {
+                    label = text
+                    lastLabelText = text
+                    lastLabelMaxX = xPos + width / 2
+                }
+            }
+            let showsDay = label != nil && dayChangePending
+            if showsDay { dayChangePending = false }
             guard xPos >= visibleRect.minX - 100, xPos <= visibleRect.maxX + 100 else { continue }
 
             let tickHeight = isMajor ? majorTickHeight : minorTickHeight
@@ -818,20 +833,39 @@ final class TimelineBarNSView: NSView {
             path.lineWidth = 1
             path.stroke()
 
-            if isMajor {
-                let label = df.string(from: Date(timeIntervalSince1970: TimeInterval(timeMs) / 1000)) as NSString
-                let size = label.size(withAttributes: labelStyle)
-                label.draw(at: NSPoint(x: xPos - size.width / 2, y: yTop + majorTickHeight + 2), withAttributes: labelStyle)
+            if let label {
+                drawTickLabel(label, emphasized: showsDay, centeredAt: xPos, y: yTop + majorTickHeight + 2)
             }
         }
     }
 
-    private static let timeFormatter: DateFormatter = {
+    private static func labelAttributes(emphasized: Bool) -> [NSAttributedString.Key: Any] {
+        [
+            .font: NSFont.systemFont(ofSize: 10, weight: emphasized ? .semibold : .regular),
+            .foregroundColor: emphasized ? NSColor.labelColor : NSColor.secondaryLabelColor
+        ]
+    }
+
+    private func tickLabelSize(_ text: String, emphasized: Bool) -> NSSize {
+        (text as NSString).size(withAttributes: Self.labelAttributes(emphasized: emphasized))
+    }
+
+    private func drawTickLabel(_ text: String, emphasized: Bool, centeredAt x: CGFloat, y: CGFloat) {
+        let width = tickLabelSize(text, emphasized: emphasized).width
+        // Keep labels at the content edges fully visible.
+        let originX = min(max(bounds.minX + 2, x - width / 2), bounds.maxX - width - 2)
+        (text as NSString).draw(at: NSPoint(x: originX, y: y), withAttributes: Self.labelAttributes(emphasized: emphasized))
+    }
+
+    private static func formatter(template: String) -> DateFormatter {
         let f = DateFormatter()
-        f.dateStyle = .short
-        f.timeStyle = .short
+        f.setLocalizedDateFormatFromTemplate(template)
         return f
-    }()
+    }
+
+    private static let timeFormatter = formatter(template: "jmm")
+    private static let dayFormatter = formatter(template: "EEEdMMM")
+    private static let dayTimeFormatter = formatter(template: "EEEdMMMjmm")
 
     private func pickMajorTickStep(msPerPoint: Double) -> Int64 {
         // Ensure ~>=80 px between major ticks

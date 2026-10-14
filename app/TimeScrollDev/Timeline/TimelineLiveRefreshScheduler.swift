@@ -6,7 +6,7 @@ final class TimelineLiveRefreshScheduler: ObservableObject {
   var refresh: () -> Void = {}
   var isReady: () -> Bool = { true }
   var isEnabled: () -> Bool = { true }
-  private weak var window: NSWindow?
+  private(set) weak var window: NSWindow?
   private var observers: [NSObjectProtocol] = []
   private var pending: Task<Void, Never>?
   private var dirty = false

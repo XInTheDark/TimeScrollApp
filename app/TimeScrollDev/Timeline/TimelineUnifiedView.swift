@@ -581,15 +581,21 @@ struct TimelineUnifiedView: View {
     }
 
     private func installKeyMonitor() {
-        keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
+        removeKeyMonitor()
+        keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [liveRefresh] event in
+            // Local monitors are app-wide, and the app can hold more than one timeline window
+            // (SwiftUI WindowGroup + AppDelegate.showMainWindow); only handle keys for our own.
+            guard let window = liveRefresh.window, event.window === window else { return event }
             // If typing in the search field (NSTextView), intercept Cmd+Return to run Search & Jump
-            if let first = NSApp.keyWindow?.firstResponder, first is NSTextView {
+            if let first = window.firstResponder as? NSTextView {
                 // keyCode 36 = Return, 76 = keypad Enter
                 if (event.keyCode == 36 || event.keyCode == 76) && event.modifierFlags.contains(.command) {
                     searchAndJump()
                     return nil
                 }
-                return event
+                // The search field has focus on launch; while it is empty, left/right still navigate.
+                let isArrow = event.keyCode == 123 || event.keyCode == 124
+                guard isArrow, first.string.isEmpty else { return event }
             }
             // Ignore other modified keypresses
             if event.modifierFlags.contains(.command) || event.modifierFlags.contains(.option) || event.modifierFlags.contains(.control) {

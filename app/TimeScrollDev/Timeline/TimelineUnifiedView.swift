@@ -15,8 +15,7 @@ struct TimelineUnifiedView: View {
 
     @State private var query: String = ""
     @State private var showFilters: Bool = false
-    @State private var startDate: Date? = nil
-    @State private var endDate: Date? = nil
+    @State private var filterReload: Task<Void, Never>?
     @State private var keyMonitor: Any? = nil
     @State private var showingResults: Bool = false
     @State private var preserveOpenedResultContextOnRefresh: Bool = false
@@ -111,6 +110,11 @@ struct TimelineUnifiedView: View {
         .onChange(of: model.query) { _, newVal in
             if query != newVal { query = newVal }
         }
+        .onChange(of: model.selectedAppBundleIds) { _, _ in scheduleFilterReload() }
+        .onChange(of: model.selectedCaptureKinds) { _, _ in scheduleFilterReload() }
+        .onChange(of: model.selectedAudioSourceKinds) { _, _ in scheduleFilterReload() }
+        .onChange(of: model.startMs) { _, _ in scheduleFilterReload() }
+        .onChange(of: model.endMs) { _, _ in scheduleFilterReload() }
         .onChange(of: showScreenTimelineStrips) { _, _ in
             ensureSelectionMatchesVisibleTimelineTracks()
         }
@@ -360,15 +364,11 @@ struct TimelineUnifiedView: View {
 
     private var filtersPopover: some View {
         VStack(alignment: .leading, spacing: 12) {
-            HStack(spacing: 8) {
-                Text("From:")
-                DatePicker("From", selection: Binding(get: { startDate ?? Date() }, set: { startDate = $0 }), displayedComponents: [.date, .hourAndMinute])
-                    .labelsHidden()
+            dateFilterRow("From:", value: $model.startMs) {
+                model.dayMode ? model.dayRangeMs.lowerBound : Self.ms(Date().addingTimeInterval(-24 * 3600))
             }
-            HStack(spacing: 8) {
-                Text("To:")
-                DatePicker("To", selection: Binding(get: { endDate ?? Date() }, set: { endDate = $0 }), displayedComponents: [.date, .hourAndMinute])
-                    .labelsHidden()
+            dateFilterRow("To:", value: $model.endMs) {
+                model.dayMode ? model.dayRangeMs.upperBound : Self.ms(Date())
             }
             VStack(alignment: .leading, spacing: 6) {
                 Text("Apps:")
@@ -426,8 +426,8 @@ struct TimelineUnifiedView: View {
             Divider()
             HStack {
                 Button("Clear Dates") {
-                    startDate = nil
-                    endDate = nil
+                    model.startMs = nil
+                    model.endMs = nil
                 }
                 Button("Clear Apps") {
                     model.selectedAppBundleIds.removeAll()
@@ -538,8 +538,38 @@ struct TimelineUnifiedView: View {
 
     private func applyFilters() {
         model.query = query
-        model.startMs = startDate.map { Int64($0.timeIntervalSince1970 * 1000) }
-        model.endMs = endDate.map { Int64($0.timeIntervalSince1970 * 1000) }
+    }
+
+    private static func ms(_ date: Date) -> Int64 { Int64(date.timeIntervalSince1970 * 1000) }
+
+    /// Unchecked means no limit. Checking prefills `suggested` (the shown day in Day mode, last 24h otherwise).
+    private func dateFilterRow(_ label: String, value: Binding<Int64?>, suggested: @escaping () -> Int64) -> some View {
+        HStack(spacing: 8) {
+            Toggle(label, isOn: Binding(get: { value.wrappedValue != nil },
+                                        set: { value.wrappedValue = $0 ? suggested() : nil }))
+                .toggleStyle(.checkbox)
+                .frame(width: 64, alignment: .leading)
+            if let current = value.wrappedValue {
+                DatePicker(label,
+                           selection: Binding(get: { Date(timeIntervalSince1970: TimeInterval(current) / 1000) },
+                                              set: { value.wrappedValue = Self.ms($0) }),
+                           displayedComponents: [.date, .hourAndMinute])
+                    .labelsHidden()
+            } else {
+                Text("Any").foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    /// Filters apply to the timeline live; debounced so stepping a date or ticking several apps reloads once.
+    private func scheduleFilterReload() {
+        filterReload?.cancel()
+        filterReload = Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(300))
+            guard !Task.isCancelled else { return }
+            preserveOpenedResultContextOnRefresh = false
+            model.load()
+        }
     }
 
     private func toggleCapture() {

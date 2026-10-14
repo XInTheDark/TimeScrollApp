@@ -273,9 +273,16 @@ final class FrameOutput: NSObject, SCStreamOutput {
         return bundleId + "\u{1F}" + title
     }
 
-    func shutdown() {
-        workQueue.sync {}
-        ocrQueue.sync {}
+    /// Lets in-flight capture and OCR work finish, but waits at most `timeout`. A Vision OCR call
+    /// that never returns would otherwise block quitting and capture restarts (e.g. on wake) forever.
+    func shutdown(timeout: TimeInterval = 2.0) {
+        let drained = DispatchSemaphore(value: 0)
+        workQueue.async { [ocrQueue] in
+            ocrQueue.async { drained.signal() }
+        }
+        if drained.wait(timeout: .now() + timeout) == .timedOut {
+            fputs("[Capture] Shutdown timed out waiting for capture/OCR work; continuing.\n", stderr)
+        }
         hevcStore.shutdown()
     }
 }

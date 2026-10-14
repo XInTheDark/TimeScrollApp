@@ -118,6 +118,20 @@ extension DB {
         }
     }
 
+    /// Start time of the closest snapshot strictly before `ms` (backward) or at/after `ms` (forward).
+    func nearestSnapshotTime(from ms: Int64, forward: Bool) throws -> Int64? {
+        try onReadQueueSync { db in
+            let sql = forward
+                ? "SELECT started_at_ms FROM ts_snapshot WHERE started_at_ms >= ? ORDER BY started_at_ms ASC LIMIT 1;"
+                : "SELECT started_at_ms FROM ts_snapshot WHERE started_at_ms < ? ORDER BY started_at_ms DESC LIMIT 1;"
+            var stmt: OpaquePointer?
+            defer { sqlite3_finalize(stmt) }
+            guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return nil }
+            sqlite3_bind_int64(stmt, 1, ms)
+            return sqlite3_step(stmt) == SQLITE_ROW ? sqlite3_column_int64(stmt, 0) : nil
+        }
+    }
+
     // Return (id, thumbPath) for rows with posters in the range [startMs, endMs]
     func rowsWithThumbs(startMs: Int64, endMs: Int64) throws -> [(Int64, String)] {
         try onQueueSync {

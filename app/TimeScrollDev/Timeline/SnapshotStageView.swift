@@ -671,10 +671,10 @@ private struct CenterOverlay: View {
             Button(action: { model.prev() }) {
                 Image(systemName: "chevron.left.circle.fill")
                     .font(.system(size: 28))
-                    .foregroundColor(.white.opacity(model.selectedIndex + 1 < model.metas.count ? 0.95 : 0.35))
+                    .foregroundColor(.white.opacity(model.canStepBack ? 0.95 : 0.35))
             }
             .buttonStyle(.plain)
-            .disabled(!(model.selectedIndex + 1 < model.metas.count))
+            .disabled(!model.canStepBack)
 
             Text(model.selected.map { Self.df.string(from: Date(timeIntervalSince1970: TimeInterval($0.startedAtMs)/1000)) } ?? "")
                 .font(.system(size: 16, weight: .medium, design: .monospaced))
@@ -683,10 +683,10 @@ private struct CenterOverlay: View {
             Button(action: { model.next() }) {
                 Image(systemName: "chevron.right.circle.fill")
                     .font(.system(size: 28))
-                    .foregroundColor(.white.opacity(model.selectedIndex - 1 >= 0 ? 0.95 : 0.35))
+                    .foregroundColor(.white.opacity(model.canStepForward ? 0.95 : 0.35))
             }
             .buttonStyle(.plain)
-            .disabled(!(model.selectedIndex - 1 >= 0))
+            .disabled(!model.canStepForward)
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 8)

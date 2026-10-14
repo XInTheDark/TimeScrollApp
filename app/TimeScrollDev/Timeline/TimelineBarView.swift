@@ -106,8 +106,8 @@ struct TimelineBarContainer: NSViewRepresentable {
         }
 
         // If zoom level changed, keep the pinch point fixed, or re-center around the current snapshot
-        if context.coordinator.lastMsPerPoint != model.msPerPoint || compressionChanged {
-            context.coordinator.lastMsPerPoint = model.msPerPoint
+        if context.coordinator.lastMsPerPoint != doc.effectiveMsPerPoint || compressionChanged {
+            context.coordinator.lastMsPerPoint = doc.effectiveMsPerPoint
             if let anchor = doc.zoomAnchor {
                 let vis = scroll.contentView.bounds
                 let targetX = max(0, min(doc.bounds.width - vis.width, doc.timelineX(for: anchor.timeMs) - anchor.viewportX))
@@ -176,6 +176,18 @@ struct TimelineBarContainer: NSViewRepresentable {
 
 final class TimelineBarScrollView: NSScrollView {
     var invertScrollDirection: Bool = false
+
+    override func tile() {
+        super.tile()
+        // Per-day mode fits the day to the viewport, so the content width follows window resizes.
+        guard let doc = documentView as? TimelineBarNSView else { return }
+        doc.refreshLayout()
+        let width = max(contentView.bounds.width, doc.requiredContentWidth())
+        if doc.frame.width != width {
+            doc.setFrameSize(NSSize(width: width, height: doc.frame.height))
+            doc.needsDisplay = true
+        }
+    }
 
     override func reflectScrolledClipView(_ cView: NSClipView) {
         super.reflectScrolledClipView(cView)
@@ -254,44 +266,73 @@ final class TimelineBarScrollView: NSScrollView {
 private struct TimelineAxisLayout {
     static let trailingPadding: CGFloat = 200
     static let compressedGapWidth: CGFloat = 18
-    static let empty = TimelineAxisLayout(timesAsc: [], positionsAsc: [], contentWidth: trailingPadding, isCompressed: true, msPerPoint: 1)
+    static let empty = TimelineAxisLayout(timesAsc: [], positionsAsc: [], contentWidth: trailingPadding, isCompressed: true,
+                                          msPerPoint: 1, timeRange: 0...0)
 
     let timesAsc: [Int64]
     let positionsAsc: [CGFloat]
     let contentWidth: CGFloat
     let isCompressed: Bool
     let msPerPoint: Double
+    /// Times the axis covers; in linear mode its lower bound sits at x = 0.
+    let timeRange: ClosedRange<Int64>
 
-    init(model: TimelineModel?, isCompressed: Bool) {
+    init(model: TimelineModel?, isCompressed: Bool, viewportWidth: CGFloat) {
         guard let model else {
             self = .empty
             return
         }
 
         let timesAsc = model.metas.map(\.startedAtMs).sorted()
+        if model.dayMode {
+            // Linear axis over the day's active hours; dayZoom 1 fits it exactly into the viewport.
+            let range = Self.activeHours(timesAsc: timesAsc, day: model.dayRangeMs)
+            let span = Double(range.upperBound - range.lowerBound)
+            let fitMsPerPoint = span / Double(max(1, viewportWidth))
+            let msPerPoint = max(TimelineModel.minMsPerPoint, fitMsPerPoint / max(1, model.dayZoom))
+            self.init(timesAsc: timesAsc,
+                      positionsAsc: timesAsc.map { CGFloat(Double($0 - range.lowerBound) / msPerPoint) },
+                      contentWidth: CGFloat(span / msPerPoint),
+                      isCompressed: false,
+                      msPerPoint: msPerPoint,
+                      timeRange: range)
+            return
+        }
+
         let msPerPoint = max(1.0, model.msPerPoint)
         let positions = Self.makePositions(timesAsc: timesAsc, isCompressed: isCompressed, msPerPoint: msPerPoint)
         self.init(timesAsc: timesAsc,
                   positionsAsc: positions,
                   contentWidth: (positions.last ?? 0) + Self.trailingPadding,
                   isCompressed: isCompressed,
-                  msPerPoint: msPerPoint)
+                  msPerPoint: msPerPoint,
+                  timeRange: (timesAsc.first ?? 0)...(timesAsc.last ?? 0))
     }
 
-    private init(timesAsc: [Int64], positionsAsc: [CGFloat], contentWidth: CGFloat, isCompressed: Bool, msPerPoint: Double) {
+    private init(timesAsc: [Int64], positionsAsc: [CGFloat], contentWidth: CGFloat, isCompressed: Bool, msPerPoint: Double,
+                 timeRange: ClosedRange<Int64>) {
         self.timesAsc = timesAsc
         self.positionsAsc = positionsAsc
         self.contentWidth = contentWidth
         self.isCompressed = isCompressed
         self.msPerPoint = msPerPoint
+        self.timeRange = timeRange
+    }
+
+    /// The span between the day's first and last capture, rounded out to whole hours.
+    private static func activeHours(timesAsc: [Int64], day: ClosedRange<Int64>) -> ClosedRange<Int64> {
+        guard let first = timesAsc.first, let last = timesAsc.last else { return day }
+        let hour: Int64 = 3_600_000
+        let start = day.lowerBound + (first - day.lowerBound) / hour * hour
+        let end = min(day.upperBound + 1, day.lowerBound + ((last - day.lowerBound) / hour + 1) * hour)
+        return start...max(end, start + hour)
     }
 
     func x(for timeMs: Int64) -> CGFloat {
-        guard !timesAsc.isEmpty else { return 0 }
-        guard timesAsc.count > 1 else { return 0 }
         guard isCompressed else {
-            return CGFloat(Double(max(0, timeMs - timesAsc[0])) / msPerPoint)
+            return CGFloat(Double(max(0, timeMs - timeRange.lowerBound)) / msPerPoint)
         }
+        guard timesAsc.count > 1 else { return 0 }
 
         if timeMs <= timesAsc[0] { return positionsAsc[0] }
         if let lastTime = timesAsc.last, timeMs >= lastTime {
@@ -309,14 +350,14 @@ private struct TimelineAxisLayout {
     }
 
     func time(atX x: CGFloat) -> Int64 {
+        guard isCompressed else {
+            let t = timeRange.lowerBound + Int64((Double(max(0, x)) * msPerPoint).rounded())
+            return min(t, timeRange.upperBound)
+        }
         guard !timesAsc.isEmpty else { return 0 }
         guard positionsAsc.count > 1 else { return timesAsc[0] }
         let maxX = positionsAsc.last ?? 0
         let clampedX = min(max(0, x), maxX)
-
-        guard isCompressed else {
-            return timesAsc[0] + Int64((Double(clampedX) * msPerPoint).rounded())
-        }
 
         if clampedX <= positionsAsc[0] { return timesAsc[0] }
         if clampedX >= maxX { return timesAsc.last ?? timesAsc[0] }
@@ -480,6 +521,14 @@ final class TimelineBarNSView: NSView {
     private var layout = TimelineAxisLayout.empty
     private weak var layoutModel: TimelineModel?
     private var layoutRevision: UInt64?
+    private struct LayoutKey: Equatable {
+        let isCompressed: Bool
+        let msPerPoint: Double
+        let dayMode: Bool
+        let dayZoom: Double
+        let viewportWidth: CGFloat
+    }
+    private var layoutKey: LayoutKey?
     private var audioSpans: [MergedAudioDisplaySpan] = []
     /// Set by pinch-zoom so the container keeps the time under the cursor in place.
     var zoomAnchor: (timeMs: Int64, viewportX: CGFloat)?
@@ -493,18 +542,26 @@ final class TimelineBarNSView: NSView {
         layout.contentWidth
     }
 
+    var effectiveMsPerPoint: Double { layout.msPerPoint }
+
     func refreshLayout() {
+        let viewportWidth = enclosingScrollView?.contentView.bounds.width ?? bounds.width
+        let key = LayoutKey(isCompressed: isCompressed,
+                            msPerPoint: model?.msPerPoint ?? 1,
+                            dayMode: model?.dayMode ?? false,
+                            dayZoom: model?.dayZoom ?? 1,
+                            viewportWidth: viewportWidth)
         if layoutModel === model,
            layoutRevision == model?.dataRevision,
-           layout.isCompressed == isCompressed,
-           layout.msPerPoint == max(1, model?.msPerPoint ?? 1) { return }
+           layoutKey == key { return }
+        layoutKey = key
         if layoutModel !== model || layoutRevision != model?.dataRevision {
             audioSpans = model.map { model in
                 mergeAudioDisplaySpans(from: model.metas.filter { $0.captureKind == .audio }
                     .sorted { $0.startedAtMs < $1.startedAtMs }, model: model)
             } ?? []
         }
-        layout = TimelineAxisLayout(model: model, isCompressed: isCompressed)
+        layout = TimelineAxisLayout(model: model, isCompressed: isCompressed, viewportWidth: viewportWidth)
         layoutModel = model
         layoutRevision = model?.dataRevision
     }
@@ -750,25 +807,25 @@ final class TimelineBarNSView: NSView {
     }
 
     private func drawTicks(model m: TimelineModel, in rect: NSRect) {
-        if isCompressed {
+        if layout.isCompressed {
             drawCompressedTicks(in: rect)
             return
         }
 
-        let majorStep = pickMajorTickStep(msPerPoint: m.msPerPoint)
+        let majorStep = pickMajorTickStep(msPerPoint: layout.msPerPoint)
         let minorStep = majorStep / 5
         // Include the preceding major tick and label overhang at the viewport edges.
-        let start = max(m.minTimeMs, layout.time(atX: visibleRect.minX - 100) - majorStep)
-        let end = min(m.maxTimeMs, layout.time(atX: visibleRect.maxX + 100) + majorStep)
+        let start = max(layout.timeRange.lowerBound, layout.time(atX: visibleRect.minX - 100) - majorStep)
+        let end = min(layout.timeRange.upperBound, layout.time(atX: visibleRect.maxX + 100) + majorStep)
         let yTop = rect.minY + 8
         let tickHeightMajor: CGFloat = 8
         let tickHeightMinor: CGFloat = 4
         if end <= start { return }
         // Align majors to local wall-clock steps so midnight is always a major tick.
         let tzOffsetMs = Int64(TimeZone.current.secondsFromGMT(for: Date(timeIntervalSince1970: TimeInterval(start) / 1000))) * 1000
-        let firstMajor = (((start + tzOffsetMs) / majorStep) + 1) * majorStep - tzOffsetMs
+        let firstMajor = ((start + tzOffsetMs + majorStep - 1) / majorStep) * majorStep - tzOffsetMs
         var t = firstMajor
-        while t < end {
+        while t <= end {
             let xPos = timelineX(for: t)
             // Major tick
             NSColor.separatorColor.setStroke()
@@ -959,7 +1016,11 @@ final class TimelineBarNSView: NSView {
         let x = convert(event.locationInWindow, from: nil).x
         zoomAnchor = (timeAt(x: x), x - clip.bounds.minX)
         let scale = max(0.1, 1 + event.magnification)
-        model.msPerPoint = min(max(model.msPerPoint / scale, TimelineModel.minMsPerPoint), TimelineModel.maxMsPerPoint)
+        if model.dayMode {
+            model.dayZoom = min(max(model.dayZoom * scale, 1), TimelineModel.maxDayZoom)
+        } else {
+            model.msPerPoint = min(max(model.msPerPoint / scale, TimelineModel.minMsPerPoint), TimelineModel.maxMsPerPoint)
+        }
     }
 
     // Click or drag scrubs: the selection follows the cursor. Panning is done with the

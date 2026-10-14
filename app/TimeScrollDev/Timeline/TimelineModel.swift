@@ -25,6 +25,15 @@ final class TimelineModel: ObservableObject {
     @AppStorage("ui.timeline.msPerPoint") var msPerPoint: Double = 60_000
     @AppStorage("ui.actionPanelExpanded") var actionPanelExpanded: Bool = false
     @AppStorage("ui.timeline.followLatest") var followLatest: Bool = false
+    @AppStorage("ui.timeline.dayMode") private(set) var dayMode: Bool = false
+
+    // Per-day mode: the day shown, and zoom relative to fitting its active hours (1 = fit).
+    @Published private(set) var day: Date = Calendar.current.startOfDay(for: Date())
+    @Published var dayZoom: Double = 1
+    static let maxDayZoom: Double = 200
+    static let dayLimit = 50_000
+
+    enum Selection { case id(Int64), newest, oldest }
     @AppStorage("ui.overlay.offsetX") var overlayOffsetX: Double = 0
     @AppStorage("ui.overlay.offsetY") var overlayOffsetY: Double = 220
 
@@ -50,12 +59,24 @@ final class TimelineModel: ObservableObject {
     var maxTimeMs: Int64 { metas.first?.startedAtMs ?? 0 }
     var selected: SnapshotMeta? { metas.indices.contains(selectedIndex) ? metas[selectedIndex] : nil }
 
+    /// In day mode stepping past either end of the day moves to the adjacent day with captures.
+    var canStepBack: Bool { dayMode || selectedIndex + 1 < metas.count }
+    var canStepForward: Bool { dayMode ? !(selectedIndex <= 0 && Calendar.current.isDateInToday(day)) : selectedIndex - 1 >= 0 }
+
+    /// Inclusive millisecond bounds of `day`.
+    var dayRangeMs: ClosedRange<Int64> {
+        let next = Calendar.current.date(byAdding: .day, value: 1, to: day) ?? day.addingTimeInterval(86_400)
+        return Int64(day.timeIntervalSince1970 * 1000)...(Int64(next.timeIntervalSince1970 * 1000) - 1)
+    }
+
     init() {
         overlayOffsetX = 0
         overlayOffsetY = 220
     }
 
-    func load(limit: Int = TimelineModel.pageSize) {
+    func load(limit: Int? = nil, selecting: Selection? = nil) {
+        // A day is loaded whole; continuous mode pages in older rows as the user scrolls back.
+        let limit = limit ?? (dayMode ? Self.dayLimit : Self.pageSize)
         requestToken &+= 1
         let token = requestToken
         isLoading = true
@@ -75,7 +96,16 @@ final class TimelineModel: ObservableObject {
                 self.isAnchoredWindow = false
                 self.hasMoreOlder = q.supportsPaging && list.count >= limit
                 self.metas = sorted
-                if self.followLatest {
+                if let selecting {
+                    switch selecting {
+                    case .id(let id):
+                        self.selectedIndex = self.metas.firstIndex(where: { $0.id == id }) ?? (self.metas.isEmpty ? -1 : 0)
+                    case .newest:
+                        self.selectedIndex = self.metas.isEmpty ? -1 : 0
+                    case .oldest:
+                        self.selectedIndex = self.metas.count - 1
+                    }
+                } else if self.followLatest {
                     self.selectedIndex = self.metas.isEmpty ? -1 : 0
                 } else if let prev = previousSelectedId,
                           let idx = self.metas.firstIndex(where: { $0.id == prev }) {
@@ -250,8 +280,9 @@ final class TimelineModel: ObservableObject {
         let appIds = selectedAppBundleIds.isEmpty ? nil : Array(selectedAppBundleIds)
         let captureKinds = selectedCaptureKinds.isEmpty ? nil : Array(selectedCaptureKinds)
         let audioSourceKinds = selectedAudioSourceKinds.isEmpty ? nil : Array(selectedAudioSourceKinds)
+        let isDayMode = dayMode
 
-        DispatchQueue.global(qos: .userInitiated).async { [spanMs, appIds, captureKinds, audioSourceKinds] in
+        DispatchQueue.global(qos: .userInitiated).async { [spanMs, appIds, captureKinds, audioSourceKinds, isDayMode] in
             let anchorTime: Int64?
             if let anchorStartedAtMs {
                 anchorTime = anchorStartedAtMs
@@ -263,6 +294,14 @@ final class TimelineModel: ObservableObject {
                 DispatchQueue.main.async { [weak self] in
                     guard let self, token == self.requestToken else { return }
                     self.isLoading = false
+                }
+                return
+            }
+
+            if isDayMode {
+                // Per-day mode shows the snapshot's whole day instead of a window around it.
+                DispatchQueue.main.async { [weak self] in
+                    self?.showDay(Date(timeIntervalSince1970: TimeInterval(anchorTime) / 1000), selecting: .id(id))
                 }
                 return
             }
@@ -294,7 +333,48 @@ final class TimelineModel: ObservableObject {
         }
     }
 
+    // MARK: Per-day mode
+
+    func setDayMode(_ on: Bool) {
+        guard on != dayMode else { return }
+        let anchor = selected
+        dayMode = on
+        dayZoom = 1
+        if on {
+            day = Calendar.current.startOfDay(for: anchor.map { Date(timeIntervalSince1970: TimeInterval($0.startedAtMs) / 1000) } ?? Date())
+            load(selecting: anchor.map { .id($0.id) })
+        } else if let anchor, !Calendar.current.isDateInToday(Date(timeIntervalSince1970: TimeInterval(anchor.startedAtMs) / 1000)) {
+            // The newest page would not contain an older day's selection; open a window around it instead.
+            openSnapshot(id: anchor.id, anchorStartedAtMs: anchor.startedAtMs)
+        } else {
+            load(selecting: anchor.map { .id($0.id) })
+        }
+    }
+
+    func showDay(_ date: Date, selecting: Selection = .newest) {
+        day = Calendar.current.startOfDay(for: date)
+        dayZoom = 1
+        load(selecting: selecting)
+    }
+
+    /// Moves to the closest earlier (`delta < 0`) or later day that has snapshots.
+    func stepDay(by delta: Int, selecting: Selection = .newest) {
+        let range = dayRangeMs
+        let from = delta < 0 ? range.lowerBound : range.upperBound + 1
+        DispatchQueue.global(qos: .userInitiated).async {
+            let time = (try? DB.shared.nearestSnapshotTime(from: from, forward: delta > 0)) ?? nil
+            DispatchQueue.main.async { [weak self] in
+                guard let self, let time else { return }
+                self.showDay(Date(timeIntervalSince1970: TimeInterval(time) / 1000), selecting: selecting)
+            }
+        }
+    }
+
     func prev() {
+        if dayMode, selectedIndex >= metas.count - 1 {
+            stepDay(by: -1, selecting: .newest)
+            return
+        }
         if selectedIndex + 1 < metas.count { selectedIndex += 1 }
         if selectedIndex >= metas.count - 2 { loadOlderIfNeeded() }
     }
@@ -371,12 +451,16 @@ final class TimelineModel: ObservableObject {
             appBundleIds: selectedAppBundleIds.isEmpty ? nil : selectedAppBundleIds.sorted(),
             captureKinds: selectedCaptureKinds.isEmpty ? nil : selectedCaptureKinds.sorted { $0.rawValue < $1.rawValue },
             audioSourceKinds: selectedAudioSourceKinds.isEmpty ? nil : selectedAudioSourceKinds.sorted { $0.rawValue < $1.rawValue },
-            startMs: startMs,
-            endMs: endMs
+            startMs: dayMode ? max(startMs ?? .min, dayRangeMs.lowerBound) : startMs,
+            endMs: dayMode ? min(endMs ?? .max, dayRangeMs.upperBound) : endMs
         )
     }
 
     func next() {
+        if dayMode, selectedIndex <= 0 {
+            stepDay(by: 1, selecting: .oldest)
+            return
+        }
         if selectedIndex - 1 >= 0 { selectedIndex -= 1 }
     }
 

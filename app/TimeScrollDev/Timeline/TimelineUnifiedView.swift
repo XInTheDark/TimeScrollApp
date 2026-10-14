@@ -23,8 +23,8 @@ struct TimelineUnifiedView: View {
     @State private var showCaptureModePopover: Bool = false
     @State private var timelineResizeStartHeight: Double?
 
-    private let minMsPerPt: Double = 100             // 100ms per pt at max zoom-in
-    private let maxMsPerPt: Double = 300_000         // 5m per pt at max zoom-out (keeps things "pretty small")
+    private let minMsPerPt = TimelineModel.minMsPerPoint
+    private let maxMsPerPt = TimelineModel.maxMsPerPoint
     private let zoomStep: Double = 1.25
 
     private var activeFilterCount: Int {

@@ -105,10 +105,15 @@ struct TimelineBarContainer: NSViewRepresentable {
             context.coordinator.lastSelectedId = nil
         }
 
-        // If zoom level changed, re-center around the current snapshot
+        // If zoom level changed, keep the pinch point fixed, or re-center around the current snapshot
         if context.coordinator.lastMsPerPoint != model.msPerPoint || compressionChanged {
             context.coordinator.lastMsPerPoint = model.msPerPoint
-            if let sel = model.selected {
+            if let anchor = doc.zoomAnchor {
+                let vis = scroll.contentView.bounds
+                let targetX = max(0, min(doc.bounds.width - vis.width, doc.timelineX(for: anchor.timeMs) - anchor.viewportX))
+                scroll.contentView.scroll(to: NSPoint(x: targetX, y: 0))
+                scroll.reflectScrolledClipView(scroll.contentView)
+            } else if let sel = model.selected {
                 let xSel = doc.timelineX(for: sel.startedAtMs)
                 let vis = scroll.contentView.bounds
                 let targetX = max(0, min(doc.bounds.width - vis.width, xSel - vis.width/2))
@@ -116,6 +121,8 @@ struct TimelineBarContainer: NSViewRepresentable {
                 scroll.reflectScrolledClipView(scroll.contentView)
             }
         }
+
+        doc.zoomAnchor = nil
 
         // Handle explicit jump-to-end requests
         if context.coordinator.lastJumpToken != model.jumpToEndToken {
@@ -169,6 +176,12 @@ struct TimelineBarContainer: NSViewRepresentable {
 
 final class TimelineBarScrollView: NSScrollView {
     var invertScrollDirection: Bool = false
+
+    override func reflectScrolledClipView(_ cView: NSClipView) {
+        super.reflectScrolledClipView(cView)
+        // The hover popover is anchored in document coordinates and would travel with the content.
+        (documentView as? TimelineBarNSView)?.dismissHoverPopover()
+    }
 
     override func scrollWheel(with event: NSEvent) {
         guard let documentView else {
@@ -468,6 +481,8 @@ final class TimelineBarNSView: NSView {
     private weak var layoutModel: TimelineModel?
     private var layoutRevision: UInt64?
     private var audioSpans: [MergedAudioDisplaySpan] = []
+    /// Set by pinch-zoom so the container keeps the time under the cursor in place.
+    var zoomAnchor: (timeMs: Int64, viewportX: CGFloat)?
     private var scrubCaptureKind: CaptureKind?
     private var scrubTimeMs: Int64?
 
@@ -936,14 +951,15 @@ final class TimelineBarNSView: NSView {
     }
 
     override func mouseExited(with event: NSEvent) {
-        onHoverExit?()
-        popover.performClose(nil)
-        lastPreviewIndex = nil
-        pendingPreviewIndex = nil
-        loadingTimer?.cancel()
-        loadingTimer = nil
-        previewDebounce?.cancel()
-        previewDebounce = nil
+        cancelTimelineHoverPreview()
+    }
+
+    override func magnify(with event: NSEvent) {
+        guard let model, let clip = enclosingScrollView?.contentView else { return }
+        let x = convert(event.locationInWindow, from: nil).x
+        zoomAnchor = (timeAt(x: x), x - clip.bounds.minX)
+        let scale = max(0.1, 1 + event.magnification)
+        model.msPerPoint = min(max(model.msPerPoint / scale, TimelineModel.minMsPerPoint), TimelineModel.maxMsPerPoint)
     }
 
     // Click or drag scrubs: the selection follows the cursor. Panning is done with the
@@ -1004,6 +1020,10 @@ final class TimelineBarNSView: NSView {
 
     private func cancelTimelineHoverPreview() {
         onHoverExit?()
+        dismissHoverPopover()
+    }
+
+    func dismissHoverPopover() {
         popover.performClose(nil)
         lastPreviewIndex = nil
         pendingPreviewIndex = nil

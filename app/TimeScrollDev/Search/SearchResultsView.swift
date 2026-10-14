@@ -70,7 +70,7 @@ struct SearchResultsView: View {
                     Text("Tiles").tag(ViewMode.tiles)
                 }
                 .pickerStyle(.segmented)
-                .frame(width: 130)
+                .fixedSize()
 
                 Toggle("AI", isOn: Binding(get: { useAI }, set: { enabled in
                     useAI = enabled

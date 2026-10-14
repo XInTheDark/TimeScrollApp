@@ -1034,7 +1034,11 @@ final class TimelineBarNSView: NSView {
         popover.animates = false
         let clampedX = max(0, min(bounds.width - 1, point.x))
         let anchor = NSRect(x: clampedX, y: 0, width: 1, height: 1)
-        popover.show(relativeTo: anchor, of: self, preferredEdge: .maxY)
+        // This view is flipped, so .minY is the top edge.
+        popover.show(relativeTo: anchor, of: self, preferredEdge: .minY)
+        // If AppKit still has to place it over the timeline, let the mouse pass through
+        // so the popover does not trigger mouseExited and close itself.
+        popover.contentViewController?.view.window?.ignoresMouseEvents = true
     }
 
     private func loadPreview(for index: Int) {

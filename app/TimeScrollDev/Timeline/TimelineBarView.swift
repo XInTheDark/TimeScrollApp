@@ -88,14 +88,15 @@ struct TimelineBarContainer: NSViewRepresentable {
             context.coordinator.shouldScrollToEndIfNeeded = false
         }
 
-        // Keep the selected snapshot visible (centered) when selection changes
+        // Keep the selected snapshot visible: re-center only when it is off-screen,
+        // so clicking or scrubbing never moves the timeline under the cursor.
         if let sel = model.selected {
             if context.coordinator.lastSelectedId != sel.id {
                 context.coordinator.lastSelectedId = sel.id
                 let xSel = doc.timelineX(for: sel.startedAtMs)
                 let vis = scroll.contentView.bounds
                 let targetX = max(0, min(doc.bounds.width - vis.width, xSel - vis.width/2))
-                if abs(targetX - vis.origin.x) > 8 {
+                if !vis.insetBy(dx: 24, dy: 0).contains(NSPoint(x: xSel, y: vis.midY)) {
                     scroll.contentView.scroll(to: NSPoint(x: targetX, y: 0))
                     scroll.reflectScrolledClipView(scroll.contentView)
                 }
@@ -467,7 +468,8 @@ final class TimelineBarNSView: NSView {
     private weak var layoutModel: TimelineModel?
     private var layoutRevision: UInt64?
     private var audioSpans: [MergedAudioDisplaySpan] = []
-    private var isDraggingTimeline = false
+    private var scrubCaptureKind: CaptureKind?
+    private var scrubTimeMs: Int64?
 
     override var isFlipped: Bool { true }
     override var acceptsFirstResponder: Bool { true }
@@ -886,11 +888,6 @@ final class TimelineBarNSView: NSView {
         addTrackingArea(tracking!)
     }
 
-    override func resetCursorRects() {
-        super.resetCursorRects()
-        addCursorRect(bounds, cursor: isDraggingTimeline ? .closedHand : .openHand)
-    }
-
     override func mouseMoved(with event: NSEvent) {
         guard model != nil else { return }
         let p = convert(event.locationInWindow, from: nil)
@@ -949,58 +946,30 @@ final class TimelineBarNSView: NSView {
         previewDebounce = nil
     }
 
+    // Click or drag scrubs: the selection follows the cursor. Panning is done with the
+    // scroll wheel / trackpad. Handled per event (not in a tracking loop) so the
+    // main snapshot view keeps updating while dragging.
     override func mouseDown(with event: NSEvent) {
         guard model != nil else { return }
         window?.makeFirstResponder(self)
+        cancelTimelineHoverPreview()
+        let point = convert(event.locationInWindow, from: nil)
+        scrubCaptureKind = TimelineTrackLayout(in: bounds, visibleCaptureKinds: visibleCaptureKinds).preferredCaptureKind(at: point)
+        scrubTimeMs = nil
+        scrub(toX: point.x)
+    }
 
-        let startPoint = convert(event.locationInWindow, from: nil)
-        let preferredCaptureKind = TimelineTrackLayout(in: bounds, visibleCaptureKinds: visibleCaptureKinds).preferredCaptureKind(at: startPoint)
-        guard let scrollView = enclosingScrollView else {
-            onJump?(timeAt(x: startPoint.x), preferredCaptureKind)
-            return
-        }
+    override func mouseDragged(with event: NSEvent) {
+        guard model != nil else { return }
+        _ = autoscroll(with: event)
+        scrub(toX: convert(event.locationInWindow, from: nil).x)
+    }
 
-        let startOriginX = scrollView.contentView.bounds.origin.x
-        let maxX = max(0, bounds.width - scrollView.contentView.bounds.width)
-        let dragThreshold: CGFloat = 3
-        var didDrag = false
-
-        while let nextEvent = window?.nextEvent(matching: [.leftMouseDragged, .leftMouseUp]) {
-            let currentPoint = convert(nextEvent.locationInWindow, from: nil)
-
-            switch nextEvent.type {
-            case .leftMouseDragged:
-                guard maxX > 0 else { continue }
-                let dragDeltaX = currentPoint.x - startPoint.x
-                if !didDrag, abs(dragDeltaX) >= dragThreshold {
-                    didDrag = true
-                    beginTimelineDrag()
-                    cancelTimelineHoverPreview()
-                }
-                guard didDrag else { continue }
-
-                let targetX = min(max(0, startOriginX - dragDeltaX), maxX)
-                scrollView.contentView.scroll(to: NSPoint(x: targetX, y: 0))
-                scrollView.reflectScrolledClipView(scrollView.contentView)
-
-            case .leftMouseUp:
-                if didDrag {
-                    endTimelineDrag()
-                } else {
-                    onJump?(timeAt(x: startPoint.x), preferredCaptureKind)
-                }
-                return
-
-            default:
-                break
-            }
-        }
-
-        if didDrag {
-            endTimelineDrag()
-        } else {
-            onJump?(timeAt(x: startPoint.x), preferredCaptureKind)
-        }
+    private func scrub(toX x: CGFloat) {
+        let t = timeAt(x: min(max(visibleRect.minX, x), visibleRect.maxX))
+        guard t != scrubTimeMs else { return }
+        scrubTimeMs = t
+        onJump?(t, scrubCaptureKind)
     }
 
     override func rightMouseDown(with event: NSEvent) {
@@ -1031,20 +1000,6 @@ final class TimelineBarNSView: NSView {
         return model.indexNearest(to: timeMs,
                                   preferredCaptureKind: preferredCaptureKind,
                                   visibleCaptureKinds: visibleCaptureKinds)
-    }
-
-    private func beginTimelineDrag() {
-        guard !isDraggingTimeline else { return }
-        isDraggingTimeline = true
-        NSCursor.closedHand.push()
-        window?.invalidateCursorRects(for: self)
-    }
-
-    private func endTimelineDrag() {
-        guard isDraggingTimeline else { return }
-        isDraggingTimeline = false
-        NSCursor.pop()
-        window?.invalidateCursorRects(for: self)
     }
 
     private func cancelTimelineHoverPreview() {

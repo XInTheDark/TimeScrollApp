@@ -197,5 +197,9 @@ final class StreamDelegate: NSObject, SCStreamDelegate {
         #if DEBUG
         print("SCStream stopped with error:", error)
         #endif
+        let userStopped = (error as? SCStreamError)?.code == .userStopped
+        Task { @MainActor in
+            AppState.shared.screenStreamDidStop(userStopped: userStopped)
+        }
     }
 }

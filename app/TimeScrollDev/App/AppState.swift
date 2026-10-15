@@ -33,6 +33,7 @@ final class AppState: ObservableObject {
     private var captureLifecycleGeneration = 0
     private var captureTransitionInProgress = false
     private var captureStopInProgress = false
+    private var streamRecoveryTask: Task<Void, Never>?
 
     func startCaptureIfNeeded() async {
         if isCapturing || isCaptureStarting || captureTransitionInProgress { return }
@@ -147,6 +148,30 @@ final class AppState: ObservableObject {
         systemAudioCaptureStatus = .inactive
         UsageTracker.shared.captureStopped()
         captureTransitionInProgress = false
+    }
+
+    /// ScreenCaptureKit ended a stream on its own: either the user chose Stop in the
+    /// system's screen-recording menu, or replayd (the capture daemon) crashed and
+    /// took every stream with it, system audio included.
+    func screenStreamDidStop(userStopped: Bool) {
+        guard isCapturing, streamRecoveryTask == nil else { return }
+        if userStopped {
+            Task { await stopCaptureIfNeeded() }
+            return
+        }
+        streamRecoveryTask = Task {
+            defer { streamRecoveryTask = nil }
+            // launchd relaunches replayd, but that takes a few seconds.
+            for delay: UInt64 in [3, 10, 30, 60, 120] {
+                let generation = captureLifecycleGeneration
+                try? await Task.sleep(nanoseconds: delay * 1_000_000_000)
+                // Capture was stopped or restarted elsewhere in the meantime.
+                guard captureLifecycleGeneration == generation else { return }
+                await stopCaptureIfNeeded()
+                await startCaptureIfNeeded()
+                if screenCaptureStatus.isRunning { return }
+            }
+        }
     }
 
     func restartCaptureIfRunning() async {

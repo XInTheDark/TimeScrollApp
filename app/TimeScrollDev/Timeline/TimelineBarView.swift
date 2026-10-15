@@ -196,6 +196,14 @@ final class TimelineBarScrollView: NSScrollView {
     }
 
     override func scrollWheel(with event: NSEvent) {
+        // Option/Command + scroll zooms, like pinching (matches the snapshot view).
+        if event.modifierFlags.contains(.option) || event.modifierFlags.contains(.command),
+           let doc = documentView as? TimelineBarNSView {
+            // Mouse wheels report lines, trackpads report points.
+            let delta = event.scrollingDeltaY * (event.hasPreciseScrollingDeltas ? 1 : 10)
+            doc.zoom(by: 1 + delta / 100, at: event.locationInWindow)
+            return
+        }
         guard let documentView else {
             super.scrollWheel(with: event)
             return
@@ -1012,10 +1020,15 @@ final class TimelineBarNSView: NSView {
     }
 
     override func magnify(with event: NSEvent) {
+        zoom(by: 1 + event.magnification, at: event.locationInWindow)
+    }
+
+    /// Zooms around the time under `windowPoint`; `factor` > 1 zooms in.
+    func zoom(by factor: CGFloat, at windowPoint: NSPoint) {
         guard let model, let clip = enclosingScrollView?.contentView else { return }
-        let x = convert(event.locationInWindow, from: nil).x
+        let x = convert(windowPoint, from: nil).x
         zoomAnchor = (timeAt(x: x), x - clip.bounds.minX)
-        let scale = max(0.1, 1 + event.magnification)
+        let scale = max(0.1, factor)
         if model.dayMode {
             model.dayZoom = min(max(model.dayZoom * scale, 1), TimelineModel.maxDayZoom)
         } else {

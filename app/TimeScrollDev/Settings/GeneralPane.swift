@@ -112,7 +112,7 @@ struct GeneralPane: View {
                 LabeledContent("Displays") {
                     Picker("", selection: $settings.captureDisplayMode) {
                         ForEach(SettingsStore.DisplayCaptureMode.allCases) { mode in
-                            Text(mode == .first ? "First display" : "All displays").tag(mode)
+                            Text(mode.label).tag(mode)
                         }
                     }
                     .labelsHidden()

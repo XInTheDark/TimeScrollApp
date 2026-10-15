@@ -23,9 +23,11 @@ final class CaptureManager: NSObject {
 
         // Determine which displays to capture based on settings (background-safe via UserDefaults)
         let d = UserDefaults.standard
-        let modeRaw = d.string(forKey: "settings.captureDisplayMode") ?? "first"
-        let captureAll = (modeRaw == "all")
-        let displays: [SCDisplay] = captureAll ? content.displays : (content.displays.first.map { [$0] } ?? [])
+        let mode = SettingsStore.DisplayCaptureMode(rawValue: d.string(forKey: "settings.captureDisplayMode") ?? "") ?? SettingsStore.defaultDisplayCaptureMode
+        // "Main" is the display with the menu bar; SCShareableContent's order is arbitrary.
+        let mainDisplay = content.displays.first { $0.displayID == CGMainDisplayID() } ?? content.displays.first
+        let displays: [SCDisplay] = mode == .first ? (mainDisplay.map { [$0] } ?? []) : content.displays
+        let activeDisplay = mode == .active ? ActiveDisplayTracker(displayIDs: displays.map(\.displayID)) : nil
         guard !displays.isEmpty else { throw NSError(domain: "TS", code: -2) }
         let baseCaptureInterval = {
             let value = d.double(forKey: "settings.captureMinInterval")
@@ -70,6 +72,7 @@ final class CaptureManager: NSObject {
                 onSnapshot: onSnapshot,
                 hevcStore: HEVCVideoStore(namespace: String(display.displayID)),
                 displayBounds: CGDisplayBounds(display.displayID),
+                isActiveDisplay: activeDisplay.map { tracker in { tracker.isActive(display.displayID) } },
                 onProbeIntervalChanged: { [weak self] probeInterval in
                     self?.scheduleProbeIntervalUpdate(probeInterval, for: streamIndex)
                 }

@@ -35,7 +35,19 @@ final class SettingsStore: ObservableObject {
     enum OCRMode: String, CaseIterable, Identifiable { case fast, accurate; var id: String { rawValue } }
     enum Fuzziness: String, CaseIterable, Identifiable { case off, low, medium, high; var id: String { rawValue } }
     enum StorageFormat: String, CaseIterable, Identifiable { case hevc, heic, jpeg, png; var id: String { rawValue } }
-    enum DisplayCaptureMode: String, CaseIterable, Identifiable { case first, all; var id: String { rawValue } }
+    /// `first` is the main display (raw value kept for stored settings); `active` follows the frontmost window.
+    enum DisplayCaptureMode: String, CaseIterable, Identifiable {
+        case active, first, all
+        var id: String { rawValue }
+        var label: String {
+            switch self {
+            case .active: return "Active display"
+            case .first: return "Main display"
+            case .all: return "All displays"
+            }
+        }
+    }
+    static let defaultDisplayCaptureMode: DisplayCaptureMode = .active
 
     /// Whether switching apps triggers capture: never, as an extra snapshot on top of the
     /// regular interval, or as the only time capture runs (for a short window after each switch).
@@ -86,7 +98,7 @@ final class SettingsStore: ObservableObject {
     // Energy: keep captureScale
     @Published var captureScale: Double = SettingsStore.defaultCaptureScale { didSet { if !isLoading { save() } } }  // 0.5...1.0
     // Displays: capture first or all
-    @Published var captureDisplayMode: DisplayCaptureMode = .first { didSet { if !isLoading { save() } } }
+    @Published var captureDisplayMode: DisplayCaptureMode = SettingsStore.defaultDisplayCaptureMode { didSet { if !isLoading { save() } } }
     // Optional audio capture
     @Published var audioFeatureEnabled: Bool = SettingsStore.defaultAudioFeatureEnabled { didSet { if !isLoading { save() } } }
     @Published var captureScreenEnabled: Bool = SettingsStore.defaultCaptureScreenEnabled { didSet { if !isLoading { save() } } }

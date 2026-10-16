@@ -8,6 +8,9 @@ final class CaptureManager: NSObject {
     private var configuredProbeIntervals: [Double] = []
     private var outputs: [FrameOutput] = []
     private var capturedDisplays: [SCDisplay] = []
+    /// Displays available when capture started (main first). Displays are enumerated only on start,
+    /// so a monitor plugged in later is never captured until capture restarts.
+    private(set) var displaySignature: [CGDirectDisplayID] = []
     private let outputQueue = DispatchQueue(label: "TimeScroll.Capture.Output")
     private let streamDelegate = StreamDelegate()
     private var appSwitchObserver: AppSwitchObserver?
@@ -87,6 +90,7 @@ final class CaptureManager: NSObject {
         configuredProbeIntervals = newProbeIntervals
         outputs = newOutputs
         capturedDisplays = displays
+        displaySignature = Self.displaySignature(content.displays.map(\.displayID))
         appSwitchObserver?.invalidate()
         // Outputs are only touched on outputQueue, where their sample handlers also run.
         nonisolated(unsafe) let switchOutputs = newOutputs
@@ -112,6 +116,20 @@ final class CaptureManager: NSObject {
         configuredProbeIntervals.removeAll()
         outputs.removeAll()
         capturedDisplays.removeAll()
+        displaySignature.removeAll()
+    }
+
+    static func onlineDisplaySignature() -> [CGDirectDisplayID] {
+        var count: UInt32 = 0
+        guard CGGetActiveDisplayList(0, nil, &count) == .success else { return [] }
+        var ids = [CGDirectDisplayID](repeating: 0, count: Int(count))
+        guard CGGetActiveDisplayList(count, &ids, &count) == .success else { return [] }
+        return displaySignature(Array(ids.prefix(Int(count))))
+    }
+
+    private static func displaySignature(_ ids: [CGDirectDisplayID]) -> [CGDirectDisplayID] {
+        let main = CGMainDisplayID()
+        return ids.filter { $0 == main } + ids.filter { $0 != main }.sorted()
     }
 
     /// Best-effort fallback for process termination after normal shutdown was skipped.

@@ -34,6 +34,7 @@ final class AppState: ObservableObject {
     private var captureTransitionInProgress = false
     private var captureStopInProgress = false
     private var streamRecoveryTask: Task<Void, Never>?
+    private var displayChangeTask: Task<Void, Never>?
 
     func startCaptureIfNeeded() async {
         if isCapturing || isCaptureStarting || captureTransitionInProgress { return }
@@ -170,6 +171,21 @@ final class AppState: ObservableObject {
                 await stopCaptureIfNeeded()
                 await startCaptureIfNeeded()
                 if screenCaptureStatus.isRunning { return }
+            }
+        }
+    }
+
+    /// Monitors were plugged in or removed. Capture enumerates displays only when it starts
+    /// (e.g. on wake, before external monitors are back), so restart it when the set changed.
+    func displaysDidChange() {
+        displayChangeTask?.cancel()
+        displayChangeTask = Task {
+            // Displays, and ScreenCaptureKit's view of them, take a few seconds to settle.
+            for delay: UInt64 in [3, 10, 30] {
+                try? await Task.sleep(nanoseconds: delay * 1_000_000_000)
+                guard !Task.isCancelled, isCapturing, screenCaptureStatus.isRunning else { return }
+                if captureManager.displaySignature == CaptureManager.onlineDisplaySignature() { return }
+                await restartCaptureIfRunning()
             }
         }
     }

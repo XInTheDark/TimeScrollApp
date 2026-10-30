@@ -126,6 +126,7 @@ final class SettingsStore: ObservableObject {
     // Privacy
     // List of bundle identifiers whose windows should be excluded from capture when visible
     @Published var blacklistBundleIds: [String] = [] { didSet { if !isLoading { save() } } }
+    nonisolated static let defaultBlacklistBundleIds: [String] = ["com.apple.loginwindow"]
 
     // Updates
     @Published var updateChannelBeta: Bool = false { didSet { if !isLoading { save() } } }
@@ -247,6 +248,16 @@ final class SettingsStore: ObservableObject {
         // Privacy
         if let arr = defaults.array(forKey: "settings.blacklistBundleIds") as? [String] {
             blacklistBundleIds = arr
+        }
+        // The lock screen and login prompts belong to loginwindow; exclude it once for every install
+        // (users may remove it afterwards). Written to defaults directly because capture reads the key
+        // off the main actor.
+        if !defaults.bool(forKey: "settings.migratedDefaultBlacklist") {
+            for bundleId in Self.defaultBlacklistBundleIds where !blacklistBundleIds.contains(bundleId) {
+                blacklistBundleIds.append(bundleId)
+            }
+            defaults.set(blacklistBundleIds, forKey: "settings.blacklistBundleIds")
+            defaults.set(true, forKey: "settings.migratedDefaultBlacklist")
         }
 
         // Search behavior

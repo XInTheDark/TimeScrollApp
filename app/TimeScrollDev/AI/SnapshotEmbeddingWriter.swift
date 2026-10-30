@@ -99,6 +99,7 @@ final class SnapshotEmbeddingWriter {
         guard service.dim > 0 else {
             throw NSError(domain: "TimeScroll.AI", code: 41, userInfo: [NSLocalizedDescriptionKey: "The selected embedding model is not ready yet."])
         }
+        service.refreshImageSupport()
 
         let provider = service.providerID
         let model = service.modelID
@@ -117,12 +118,12 @@ final class SnapshotEmbeddingWriter {
             autoreleasepool {
                 let extractedText = try? DB.shared.textContent(snapshotId: row.id)
                 if service.supportsImageDocuments, row.captureKind == .screen {
-                    if let pixelBuffer = SnapshotImageLoader.loadPixelBuffer(for: row) {
-                        let vector = service.embedDocument(pixelBuffer: pixelBuffer, extractedText: extractedText ?? nil)
-                        if !vector.isEmpty {
-                            _ = try? DB.shared.upsertEmbedding(snapshotId: row.id, dim: vector.count, vec: vector, provider: provider, model: stagingModel)
-                            stored += 1
-                        }
+                    // Ollama falls back to the extracted text when the frame cannot be loaded.
+                    let pixelBuffer = SnapshotImageLoader.loadPixelBuffer(for: row)
+                    let vector = service.embedDocument(pixelBuffer: pixelBuffer, extractedText: extractedText ?? nil)
+                    if !vector.isEmpty {
+                        _ = try? DB.shared.upsertEmbedding(snapshotId: row.id, dim: vector.count, vec: vector, provider: provider, model: stagingModel)
+                        stored += 1
                     }
                 } else if let extractedText, !extractedText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                     let vector = service.embed(extractedText, usage: .document)

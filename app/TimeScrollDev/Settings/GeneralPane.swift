@@ -13,7 +13,7 @@ struct GeneralPane: View {
                 Toggle("Start minimized (menu bar only)", isOn: $settings.startMinimized)
                 Toggle("Start recording on launch", isOn: $settings.startRecordingOnStart)
                 Toggle("Show Dock icon when no window", isOn: $settings.showDockIcon)
-                    .onChange(of: settings.showDockIcon) { newValue in
+                    .onChange(of: settings.showDockIcon) { _, newValue in
                         let hasUserWindow = NSApplication.shared.ts_hasVisibleUserWindow
                         if !hasUserWindow {
                             NSApplication.shared.setActivationPolicy(newValue ? .regular : .accessory)
@@ -33,7 +33,7 @@ struct GeneralPane: View {
                     .labelsHidden()
                     .pickerStyle(.segmented)
                     .frame(maxWidth: 320)
-                    .onChange(of: settings.textProcessingMode) { newValue in
+                    .onChange(of: settings.textProcessingMode) { _, newValue in
                         if newValue == .accessibility && !Permissions.isAccessibilityGranted() {
                             showAccessibilityPrompt = true
                         }
@@ -103,7 +103,7 @@ struct GeneralPane: View {
                         valueText: String(format: "%.0f%%", settings.captureScale * 100)
                     )
                 }
-                .onChange(of: settings.captureScale) { _ in
+                .onChange(of: settings.captureScale) { _, _ in
                     Task { @MainActor in
                         await AppState.shared.restartCaptureIfRunning()
                     }
@@ -118,12 +118,12 @@ struct GeneralPane: View {
                     .labelsHidden()
                     .fixedSize()
                 }
-                .onChange(of: settings.captureDisplayMode) { _ in
+                .onChange(of: settings.captureDisplayMode) { _, _ in
                     Task { @MainActor in
                         await AppState.shared.restartCaptureIfRunning()
                     }
                 }
-                .onChange(of: settings.captureMinInterval) { newValue in
+                .onChange(of: settings.captureMinInterval) { _, newValue in
                     if settings.adaptiveMaxInterval < newValue {
                         settings.adaptiveMaxInterval = newValue
                     }

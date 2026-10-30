@@ -143,6 +143,11 @@ private extension MLMultiArray {
             return withUnsafeBufferPointer(ofType: Double.self) { Array($0.prefix(elementCount)).map(Float.init) }
         case .int32:
             return withUnsafeBufferPointer(ofType: Int32.self) { Array($0.prefix(elementCount)).map(Float.init) }
+#if compiler(>=6.2)
+        // `.int8` exists only in the macOS 26 SDK (Swift 6.2 toolchains).
+        case .int8:
+            return (0..<elementCount).map { self[$0].floatValue }
+#endif
         @unknown default:
             return (0..<elementCount).map { self[$0].floatValue }
         }

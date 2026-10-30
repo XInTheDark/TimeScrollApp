@@ -330,6 +330,8 @@ private struct AudioFloatingOverlay: View {
             }
             .buttonStyle(.plain)
             .disabled(!(model.selectedIndex + 1 < model.metas.count))
+            .help("Previous snapshot")
+            .accessibilityLabel("Previous snapshot")
 
             Text(model.selected.map { Self.dateFormatter.string(from: Date(timeIntervalSince1970: TimeInterval($0.startedAtMs) / 1000)) } ?? "")
                 .font(.system(size: 16, weight: .medium, design: .monospaced))
@@ -342,6 +344,8 @@ private struct AudioFloatingOverlay: View {
             }
             .buttonStyle(.plain)
             .disabled(!(model.selectedIndex - 1 >= 0))
+            .help("Next snapshot")
+            .accessibilityLabel("Next snapshot")
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
@@ -362,6 +366,8 @@ private struct AudioFloatingOverlay: View {
             }
             .buttonStyle(.plain)
             .disabled(!canPlay)
+            .help(playback.isPlaying ? "Pause audio" : "Play audio")
+            .accessibilityLabel(playback.isPlaying ? "Pause audio" : "Play audio")
 
             Rectangle()
                 .fill(Color.white.opacity(0.14))

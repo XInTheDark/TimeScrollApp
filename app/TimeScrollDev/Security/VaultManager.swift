@@ -260,13 +260,26 @@ final class VaultManager: ObservableObject {
         DistributedNotificationCenter.default().postNotificationName(VaultMediaAccess.didChange, object: nil, userInfo: nil, deliverImmediately: true)
     }
 
+    /// Polls system idle time so the vault locks after the user stops using the Mac (keyboard,
+    /// mouse or trackpad), not at a fixed time after unlocking. The setting is re-read on every
+    /// check so changing it applies immediately.
     private func scheduleInactivityTimer() {
         inactivityTimer?.invalidate()
-        let d = UserDefaults.standard
-        let minutes = d.integer(forKey: "settings.autoLockInactivityMinutes")
-        guard minutes > 0 else { return }
-        inactivityTimer = Timer.scheduledTimer(withTimeInterval: TimeInterval(minutes * 60), repeats: false) { [weak self] _ in
-            Task { @MainActor in await self?.lock() }
+        let timer = Timer.scheduledTimer(withTimeInterval: Self.inactivityCheckInterval, repeats: true) { [weak self] _ in
+            Task { @MainActor in self?.lockIfIdle() }
         }
+        timer.tolerance = 5
+        inactivityTimer = timer
+    }
+
+    private static let inactivityCheckInterval: TimeInterval = 30
+
+    private func lockIfIdle() {
+        let minutes = UserDefaults.standard.integer(forKey: "settings.autoLockInactivityMinutes")
+        guard minutes > 0, isUnlocked else { return }
+        let anyInputEvent = CGEventType(rawValue: ~0)!
+        let idleSeconds = CGEventSource.secondsSinceLastEventType(.combinedSessionState, eventType: anyInputEvent)
+        guard idleSeconds >= TimeInterval(minutes * 60) else { return }
+        Task { await lock() }
     }
 }

@@ -13,11 +13,26 @@ final class AudioWaveformOverviewCache {
     private var cache: [String: AudioWaveformOverview] = [:]
     private var inFlight: Set<String> = []
     private var waiters: [String: [@Sendable (AudioWaveformOverview?) -> Void]] = [:]
+    /// When each path last failed to load (missing file, locked vault). Retried only after
+    /// `failureRetryInterval` so draw passes do not decode the same file over and over.
+    private var failedAt: [String: Date] = [:]
+    private static let failureRetryInterval: TimeInterval = 30
 
     private init() {}
 
     func cachedOverview(for path: String) -> AudioWaveformOverview? {
         stateQueue.sync { cache[path] }
+    }
+
+    /// True when the overview is neither cached nor recently failed to load.
+    func needsLoad(for path: String) -> Bool {
+        stateQueue.sync {
+            guard cache[path] == nil else { return false }
+            if let failed = failedAt[path], Date().timeIntervalSince(failed) < Self.failureRetryInterval {
+                return false
+            }
+            return true
+        }
     }
 
     func loadOverviewAsync(for path: String,
@@ -46,6 +61,9 @@ final class AudioWaveformOverviewCache {
             let completions: [@Sendable (AudioWaveformOverview?) -> Void] = self.stateQueue.sync {
                 if let overview {
                     self.cache[path] = overview
+                    self.failedAt[path] = nil
+                } else {
+                    self.failedAt[path] = Date()
                 }
                 self.inFlight.remove(path)
                 let completions = self.waiters[path] ?? []

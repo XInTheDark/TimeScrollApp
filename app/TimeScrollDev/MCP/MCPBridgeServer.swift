@@ -7,6 +7,10 @@ final class MCPBridgeServer {
     private init() {}
 
     private static let ocrCharacterLimit = 50_000
+    /// Searches can be heavy (AI ranking, image encoding); cap how many run at once so a burst of
+    /// connections queues in the listen backlog instead of exhausting threads and memory.
+    private static let maxConcurrentRequests = 4
+    private let requestSlots = DispatchSemaphore(value: MCPBridgeServer.maxConcurrentRequests)
     private let workQueue = DispatchQueue(label: "TimeScroll.MCPBridge", qos: .userInitiated, attributes: .concurrent)
     private var listenFD: Int32 = -1
 
@@ -26,7 +30,15 @@ final class MCPBridgeServer {
                     if errno == EINTR { continue }
                     return // listening socket closed
                 }
-                self?.workQueue.async { self?.handle(client) }
+                guard let self else {
+                    close(client)
+                    return
+                }
+                self.requestSlots.wait()
+                self.workQueue.async {
+                    defer { self.requestSlots.signal() }
+                    self.handle(client)
+                }
             }
         }
     }
@@ -65,7 +77,7 @@ final class MCPBridgeServer {
         }
         let response: MCPBridge.SearchResponse
         do {
-            let request = try MCPBridge.readMessage(MCPBridge.SearchRequest.self, from: fd)
+            let request = try MCPBridge.readMessage(MCPBridge.SearchRequest.self, from: fd, maxBytes: MCPBridge.maxRequestBytes)
             response = search(request)
         } catch {
             response = MCPBridge.SearchResponse(rows: nil, error: error.localizedDescription)

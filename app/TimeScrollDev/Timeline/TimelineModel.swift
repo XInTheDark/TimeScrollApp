@@ -33,11 +33,10 @@ final class TimelineModel: ObservableObject {
     @Published var playbackTimeMs: Int64? = nil
     @Published var isLoading: Bool = false
 
-    private var timesAsc: [Int64] = []
     private var requestToken: Int = 0
 
     // Paging: the timeline holds a window of rows and extends it as the user scrolls back.
-    static let pageSize = 1000
+    nonisolated static let pageSize = 1000
     @Published private(set) var hasMoreOlder: Bool = false
     private var isLoadingOlder = false
     private var activeQuery: TimelineQuery?
@@ -63,7 +62,7 @@ final class TimelineModel: ObservableObject {
         let previousSelectedId = selected?.id
         let q = currentQuery()
 
-        DispatchQueue.global(qos: .userInitiated).async { [limit, q] in
+        DispatchQueue.global(qos: .userInitiated).async { [weak self, limit, q] in
             let list = q.fetch(limit: limit, offset: 0, endMs: q.endMs)
             let sorted = list.sorted { $0.startedAtMs > $1.startedAtMs }
             DispatchQueue.main.async { [weak self] in
@@ -81,7 +80,6 @@ final class TimelineModel: ObservableObject {
                 } else {
                     self.selectedIndex = self.metas.isEmpty ? -1 : 0
                 }
-                self.rebuildAscCache()
                 self.refreshSegments()
                 if !self.msPerPoint.isFinite || self.msPerPoint <= 0 {
                     self.msPerPoint = self.defaultMsPerPoint()
@@ -92,7 +90,10 @@ final class TimelineModel: ObservableObject {
     }
 
     func refreshSegments() {
-        segments.removeAll()
+        // Build locally and publish once; appending to the @Published array would notify
+        // observers for every segment.
+        var segments: [TimelineSegment] = []
+        defer { self.segments = segments }
         guard !metas.isEmpty else { return }
 
         let asc = metas.sorted { $0.startedAtMs < $1.startedAtMs }
@@ -164,10 +165,6 @@ final class TimelineModel: ObservableObject {
         appendCurrentSegment()
     }
 
-    private func rebuildAscCache() {
-        timesAsc = metas.map(\.startedAtMs).sorted()
-    }
-
     private func defaultMsPerPoint() -> Double {
         let span = max(1, Double(max(0, maxTimeMs - minTimeMs)))
         return max(span / 5000.0, 1.0)
@@ -184,14 +181,13 @@ final class TimelineModel: ObservableObject {
     }
 
     func audioMeta(overlapping timeMs: Int64) -> SnapshotMeta? {
-        metas
-            .filter { $0.captureKind == .audio }
-            .first { meta in
-                let endMs = resolvedEndMs(for: meta)
-                return timeMs >= meta.startedAtMs && timeMs <= endMs
-            }
+        metas.first { meta in
+            meta.captureKind == .audio && timeMs >= meta.startedAtMs && timeMs <= resolvedEndMs(for: meta)
+        }
     }
 
+    /// Called on every hover move and playback tick, so it binary-searches the time-sorted
+    /// rows instead of filtering the whole window.
     func indexNearest(to timeMs: Int64,
                       preferredCaptureKind: CaptureKind? = nil,
                       visibleCaptureKinds: Set<CaptureKind>? = nil,
@@ -201,29 +197,49 @@ final class TimelineModel: ObservableObject {
         let allowedKinds = visibleCaptureKinds?.isEmpty == false
             ? visibleCaptureKinds!
             : Set(CaptureKind.allCases)
-
-        var candidateIndices = metas.indices.filter { allowedKinds.contains(metas[$0].captureKind) }
-        if let startedAtRange {
-            candidateIndices = candidateIndices.filter { startedAtRange.contains(metas[$0].startedAtMs) }
+        let inScope: (SnapshotMeta) -> Bool = { meta in
+            allowedKinds.contains(meta.captureKind) && (startedAtRange?.contains(meta.startedAtMs) ?? true)
         }
-        if candidateIndices.isEmpty {
-            candidateIndices = Array(metas.indices)
+        // With nothing in scope, fall back to every row.
+        let scope: (SnapshotMeta) -> Bool = metas.contains(where: inScope) ? inScope : { _ in true }
+
+        if let preferredCaptureKind,
+           let index = nearestIndex(to: timeMs, where: { scope($0) && $0.captureKind == preferredCaptureKind }) {
+            return index
+        }
+        return nearestIndex(to: timeMs, where: scope)
+    }
+
+    /// Nearest row (by start time) matching `matches`; ties go to the newer row. `metas` is
+    /// sorted newest first.
+    private func nearestIndex(to timeMs: Int64, where matches: (SnapshotMeta) -> Bool) -> Int? {
+        // First index whose start is at or before `timeMs`.
+        var low = 0
+        var high = metas.count
+        while low < high {
+            let mid = (low + high) / 2
+            if metas[mid].startedAtMs > timeMs { low = mid + 1 } else { high = mid }
         }
 
-        if let preferredCaptureKind {
-            let preferredIndices = candidateIndices.filter { metas[$0].captureKind == preferredCaptureKind }
-            if !preferredIndices.isEmpty {
-                candidateIndices = preferredIndices
-            }
+        var newer = low - 1
+        while newer >= 0, !matches(metas[newer]) { newer -= 1 }
+        // Among rows sharing that start time, keep the first one.
+        while newer > 0, metas[newer - 1].startedAtMs == metas[newer].startedAtMs, matches(metas[newer - 1]) {
+            newer -= 1
         }
+        var older = low
+        while older < metas.count, !matches(metas[older]) { older += 1 }
 
-        return candidateIndices.min { lhs, rhs in
-            let lhsDelta = abs(metas[lhs].startedAtMs - timeMs)
-            let rhsDelta = abs(metas[rhs].startedAtMs - timeMs)
-            if lhsDelta == rhsDelta {
-                return metas[lhs].startedAtMs > metas[rhs].startedAtMs
-            }
-            return lhsDelta < rhsDelta
+        let hasNewer = newer >= 0
+        let hasOlder = older < metas.count
+        switch (hasNewer, hasOlder) {
+        case (false, false): return nil
+        case (true, false): return newer
+        case (false, true): return older
+        case (true, true):
+            let newerDelta = metas[newer].startedAtMs - timeMs
+            let olderDelta = timeMs - metas[older].startedAtMs
+            return newerDelta <= olderDelta ? newer : older
         }
     }
 
@@ -249,7 +265,7 @@ final class TimelineModel: ObservableObject {
         let captureKinds = selectedCaptureKinds.isEmpty ? nil : Array(selectedCaptureKinds)
         let audioSourceKinds = selectedAudioSourceKinds.isEmpty ? nil : Array(selectedAudioSourceKinds)
 
-        DispatchQueue.global(qos: .userInitiated).async { [spanMs, appIds, captureKinds, audioSourceKinds] in
+        DispatchQueue.global(qos: .userInitiated).async { [weak self, spanMs, appIds, captureKinds, audioSourceKinds] in
             let anchorTime: Int64?
             if let anchorStartedAtMs {
                 anchorTime = anchorStartedAtMs
@@ -285,7 +301,6 @@ final class TimelineModel: ObservableObject {
                 self.hasMoreOlder = true
                 self.metas = sorted
                 self.selectedIndex = self.metas.firstIndex(where: { $0.id == id }) ?? (self.metas.isEmpty ? -1 : 0)
-                self.rebuildAscCache()
                 self.refreshSegments()
                 self.isLoading = false
             }
@@ -304,7 +319,7 @@ final class TimelineModel: ObservableObject {
         let token = requestToken
         let oldestMs = minTimeMs
         let offset = metas.count
-        DispatchQueue.global(qos: .userInitiated).async { [q] in
+        DispatchQueue.global(qos: .userInitiated).async { [weak self, q] in
             // Browsing pages by time (stable under live inserts); text search pages by offset.
             let page = q.text.isEmpty
                 ? q.fetch(limit: Self.pageSize, offset: 0, endMs: min(q.endMs ?? Int64.max, oldestMs))
@@ -326,7 +341,7 @@ final class TimelineModel: ObservableObject {
         }
         let token = requestToken
         let newestMs = maxTimeMs
-        DispatchQueue.global(qos: .userInitiated).async { [q] in
+        DispatchQueue.global(qos: .userInitiated).async { [weak self, q] in
             let page = q.fetch(limit: Self.pageSize, offset: 0, endMs: q.endMs, startMs: max(q.startMs ?? 0, newestMs))
             DispatchQueue.main.async { [weak self] in
                 guard let self, token == self.requestToken else { return }
@@ -353,7 +368,6 @@ final class TimelineModel: ObservableObject {
         if let selectedId, let idx = metas.firstIndex(where: { $0.id == selectedId }) {
             selectedIndex = idx
         }
-        rebuildAscCache()
         refreshSegments()
         return fresh.count
     }
@@ -385,7 +399,7 @@ final class TimelineModel: ObservableObject {
         let token = requestToken
         isLoading = true
 
-        DispatchQueue.global(qos: .userInitiated).async {
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             let deletionSucceeded: Bool
             do {
                 try DB.shared.deleteSnapshot(id: id)
@@ -422,7 +436,6 @@ final class TimelineModel: ObservableObject {
         } else {
             selectedIndex = min(idx, metas.count - 1)
         }
-        rebuildAscCache()
         refreshSegments()
     }
 }

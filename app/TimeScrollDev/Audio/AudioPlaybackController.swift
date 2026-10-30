@@ -21,15 +21,31 @@ final class AudioPlaybackController: NSObject, ObservableObject, AVAudioPlayerDe
     func load(url: URL) {
         guard loadedPath != url.path else { return }
         teardownPlayer(resetTimelineState: true, resetLoadedPath: false)
-        loadedPath = url.path
-        do {
-            let player = try buildPlayer(for: url)
+        let path = url.path
+        loadedPath = path
+        guard url.pathExtension.lowercased() == "tse" else {
+            install(Result { try AVAudioPlayer(contentsOf: url) }, for: url)
+            return
+        }
+        // Decrypting a long recording takes a while; keep it off the main thread.
+        DispatchQueue.global(qos: .userInitiated).async {
+            let decrypted = Result { try FileCrypter.shared.decryptTSE(at: url).1 }
+            DispatchQueue.main.async { [weak self] in
+                guard let self, self.loadedPath == path, self.player == nil else { return }
+                self.install(decrypted.flatMap { data in Result { try AVAudioPlayer(data: data) } }, for: url)
+            }
+        }
+    }
+
+    private func install(_ result: Result<AVAudioPlayer, Error>, for url: URL) {
+        switch result {
+        case .success(let player):
             player.delegate = self
             player.prepareToPlay()
             self.player = player
             self.duration = player.duration
             self.currentTime = 0
-        } catch {
+        case .failure(let error):
             loadedPath = nil
             fputs("[Audio][Playback] Failed to prepare player for \(url.lastPathComponent): \(error.localizedDescription)\n", stderr)
         }
@@ -91,14 +107,6 @@ final class AudioPlaybackController: NSObject, ObservableObject, AVAudioPlayerDe
         }
     }
 
-    private func buildPlayer(for url: URL) throws -> AVAudioPlayer {
-        if url.pathExtension.lowercased() == "tse" {
-            let (_, data) = try FileCrypter.shared.decryptTSE(at: url)
-            return try AVAudioPlayer(data: data)
-        }
-        return try AVAudioPlayer(contentsOf: url)
-    }
-
     private func startTimerIfNeeded() {
         guard updateTimer == nil else { return }
         updateTimer = Timer.scheduledTimer(timeInterval: 0.05,
@@ -111,10 +119,14 @@ final class AudioPlaybackController: NSObject, ObservableObject, AVAudioPlayerDe
 
     @objc
     private func handleTimerTick() {
-        currentTime = player?.currentTime ?? currentTime
-        duration = player?.duration ?? duration
-        isPlaying = player?.isPlaying ?? false
-        if isPlaying == false {
+        // Assign only on change: every @Published write re-renders observers, 20 times a second.
+        let time = player?.currentTime ?? currentTime
+        if time != currentTime { currentTime = time }
+        let total = player?.duration ?? duration
+        if total != duration { duration = total }
+        let playing = player?.isPlaying ?? false
+        if playing != isPlaying { isPlaying = playing }
+        if playing == false {
             stopTimer()
         }
     }

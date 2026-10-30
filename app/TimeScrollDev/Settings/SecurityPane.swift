@@ -46,6 +46,9 @@ struct SecurityPane: View {
                 LabeledContent("After inactivity") {
                     SettingsNumberField(value: $settings.autoLockInactivityMinutes, formatter: Self.intFormatter, unit: "minutes")
                 }
+                Text("Locks when the Mac has had no keyboard or mouse input for this long. Set to 0 to turn off.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
             }
             Section(header: Text("Controls")) {
                 HStack(spacing: 12) {
@@ -103,9 +106,9 @@ struct SecurityPane: View {
         }
     }
 
-    private static var intFormatter: NumberFormatter {
+    private static let intFormatter: NumberFormatter = {
         let f = NumberFormatter(); f.numberStyle = .none; f.minimum = 0; f.maximum = 600; return f
-    }
+    }()
 }
 
 @MainActor
@@ -141,7 +144,8 @@ private struct VaultOnboardingSheet: View {
             HStack {
                 Spacer()
                 Button("Cancel") { onCancel() }
-                Button("Enable Encryption") { onContinue(dontShow) }
+                    .keyboardShortcut(.cancelAction)
+                Button("Continue") { onContinue(dontShow) }
                     .keyboardShortcut(.defaultAction)
             }
         }
@@ -172,9 +176,10 @@ private struct VaultDisableConfirmSheet: View {
             }
             HStack {
                 Spacer()
+                // Destructive: Return cancels instead of turning encryption off.
                 Button("Cancel") { onCancel() }
-                Button("Turn Off Encryption") { onContinue() }
                     .keyboardShortcut(.defaultAction)
+                Button("Turn Off Encryption", role: .destructive) { onContinue() }
             }
         }
 

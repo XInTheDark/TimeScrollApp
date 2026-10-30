@@ -35,6 +35,7 @@ struct VaultPassphraseSheet: View {
             HStack {
                 Spacer()
                 Button("Cancel") { onCancel() }
+                    .keyboardShortcut(.cancelAction)
                 Button("Enable Encryption") { onConfirm(passphrase) }
                     .keyboardShortcut(.defaultAction)
                     .disabled(problem != nil)

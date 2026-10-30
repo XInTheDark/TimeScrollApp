@@ -501,7 +501,7 @@ struct SnapshotStageView: View {
         alert.alertStyle = .warning
         alert.messageText = "Delete Snapshot?"
         alert.informativeText = "This will permanently delete the selected snapshot from disk and remove it from the timeline."
-        alert.addButton(withTitle: "Delete")
+        alert.addButton(withTitle: "Delete").hasDestructiveAction = true
         alert.addButton(withTitle: "Cancel")
         if alert.runModal() == .alertFirstButtonReturn {
             model.deleteSnapshot(id: meta.id)
@@ -675,6 +675,8 @@ private struct CenterOverlay: View {
             }
             .buttonStyle(.plain)
             .disabled(!(model.selectedIndex + 1 < model.metas.count))
+            .help("Previous snapshot")
+            .accessibilityLabel("Previous snapshot")
 
             Text(model.selected.map { Self.df.string(from: Date(timeIntervalSince1970: TimeInterval($0.startedAtMs)/1000)) } ?? "")
                 .font(.system(size: 16, weight: .medium, design: .monospaced))
@@ -687,6 +689,8 @@ private struct CenterOverlay: View {
             }
             .buttonStyle(.plain)
             .disabled(!(model.selectedIndex - 1 >= 0))
+            .help("Next snapshot")
+            .accessibilityLabel("Next snapshot")
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
@@ -708,6 +712,8 @@ private struct CenterOverlay: View {
                     .background(Color.white.opacity(0.08), in: Circle())
             }
             .buttonStyle(.plain)
+            .help(playback.isPlaying ? "Pause audio" : "Play audio")
+            .accessibilityLabel(playback.isPlaying ? "Pause audio" : "Play audio")
 
             Rectangle()
                 .fill(Color.white.opacity(0.14))
@@ -758,6 +764,8 @@ private struct ActionsPanel: View {
                         .font(.system(size: 20))
                 }
                 .buttonStyle(.plain)
+                .help("Snapshot actions")
+                .accessibilityLabel("Snapshot actions")
             }
 
             if model.actionPanelExpanded {
@@ -811,6 +819,7 @@ struct TimelineStripVisibilityButton: View {
                 .font(.system(size: 18))
         }
         .buttonStyle(.plain)
+        .accessibilityLabel("Timeline strips")
         .popover(isPresented: $isPresented, arrowEdge: .top) {
             VStack(alignment: .leading, spacing: 10) {
                 Text("Timeline Strips")
@@ -873,6 +882,8 @@ private struct SnapshotAudioAccessory: View {
                     .background(Color.black.opacity(0.48), in: Circle())
             }
             .buttonStyle(.plain)
+            .help(playback.isPlaying ? "Pause audio" : "Play audio")
+            .accessibilityLabel(playback.isPlaying ? "Pause audio" : "Play audio")
 
             Button {
                 onShowTranscript()

@@ -46,18 +46,20 @@ final class StorageMigrationManager {
         }
 
         // Move/copy data
+        var transferComplete = true
         if moveExisting {
             onProgress?("Moving data…")
-            await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
+            transferComplete = await withCheckedContinuation { (cont: CheckedContinuation<Bool, Never>) in
                 DispatchQueue.global(qos: .userInitiated).async {
-                    StoragePaths.withSecurityScope {
+                    let moved = StoragePaths.withSecurityScope { () -> Bool in
                         do {
-                            try Self.transfer(from: oldRoot, to: newRoot)
+                            return try Self.transfer(from: oldRoot, to: newRoot)
                         } catch {
-                            // Best-effort; continue
+                            fputs("[StorageMigration] transfer failed: \(error.localizedDescription)\n", stderr)
+                            return false
                         }
                     }
-                    cont.resume()
+                    cont.resume(returning: moved)
                 }
             }
         }
@@ -79,15 +81,24 @@ final class StorageMigrationManager {
             }
         }
 
-        // Optionally delete old location (if it still exists)
-        if deleteOld {
+        // Optionally delete old location. Never delete data that failed to move, and in a
+        // user-picked folder only remove TimeScroll's own entries, never the folder itself.
+        if deleteOld && !transferComplete {
+            onProgress?("Some data could not be moved; the previous folder was kept.")
+        } else if deleteOld {
             onProgress?("Cleaning up old location…")
             await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
                 DispatchQueue.global(qos: .utility).async {
                     StoragePaths.withSecurityScope {
                         let fm2 = FileManager.default
-                        if fm2.fileExists(atPath: oldRoot.path) {
-                            _ = try? fm2.removeItem(at: oldRoot)
+                        if StoragePaths.isDefaultRoot(oldRoot) {
+                            if fm2.fileExists(atPath: oldRoot.path) {
+                                _ = try? fm2.removeItem(at: oldRoot)
+                            }
+                        } else {
+                            for entry in StoragePaths.storageEntries(in: oldRoot) {
+                                _ = try? fm2.removeItem(at: entry)
+                            }
                         }
                     }
                     cont.resume()
@@ -110,32 +121,45 @@ final class StorageMigrationManager {
             _ = try? DB.shared.openIfNeeded()
         }
         if wasCapturing { await AppState.shared.startCaptureIfNeeded() }
-        onProgress?("Done")
+        onProgress?(transferComplete ? "Done" : "Done. Some data could not be moved and was left in the previous folder.")
     }
 
     // MARK: - Private helpers
-    nonisolated static func transfer(from oldRoot: URL, to newRoot: URL) throws {
+    /// Moves the old root's data into `newRoot`, preserving names. Only TimeScroll's own entries
+    /// move out of a user-picked folder (see `StoragePaths.storageEntries`). Anything already at
+    /// a destination name is set aside rather than deleted. Returns false if any entry failed.
+    @discardableResult
+    nonisolated static func transfer(from oldRoot: URL, to newRoot: URL) throws -> Bool {
         let fm = FileManager.default
-        // Move/copy everything from oldRoot into newRoot preserving directory names.
-        // This is safer than maintaining a fixed list of entries and ensures future
-        // additions are included automatically.
-        let items = try fm.contentsOfDirectory(at: oldRoot, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles])
-        for src in items {
+        var allMoved = true
+        for src in StoragePaths.storageEntries(in: oldRoot) {
             let dst = newRoot.appendingPathComponent(src.lastPathComponent)
-            if fm.fileExists(atPath: src.path) {
-                if fm.fileExists(atPath: dst.path) { _ = try? fm.removeItem(at: dst) }
+            guard fm.fileExists(atPath: src.path), normalizedPath(of: src) != normalizedPath(of: dst) else { continue }
+            do {
+                if fm.fileExists(atPath: dst.path) { try setAside(dst) }
+                _ = try? fm.createDirectory(at: dst.deletingLastPathComponent(), withIntermediateDirectories: true)
                 do {
-                    _ = try? fm.createDirectory(at: dst.deletingLastPathComponent(), withIntermediateDirectories: true)
                     try fm.moveItem(at: src, to: dst)
                 } catch {
-                    // Cross-volume move or other issue: fallback to copy-then-remove
+                    // Cross-volume move or other issue: copy, then remove the source only once
+                    // the copy is complete.
                     try copyItem(src: src, dst: dst)
-                    if Self.normalizedPath(of: src) != Self.normalizedPath(of: dst) {
-                        _ = try? fm.removeItem(at: src)
-                    }
+                    _ = try? fm.removeItem(at: src)
                 }
+            } catch {
+                fputs("[StorageMigration] could not move \(src.lastPathComponent): \(error.localizedDescription)\n", stderr)
+                allMoved = false
             }
         }
+        return allMoved
+    }
+
+    /// Renames an existing destination entry so a move never overwrites data already there.
+    nonisolated private static func setAside(_ url: URL) throws {
+        let stamp = Int(Date().timeIntervalSince1970)
+        let aside = url.deletingLastPathComponent()
+            .appendingPathComponent("\(url.lastPathComponent).replaced-\(stamp)")
+        try FileManager.default.moveItem(at: url, to: aside)
     }
 
     nonisolated private static func copyItem(src: URL, dst: URL) throws {

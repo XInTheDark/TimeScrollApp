@@ -5,7 +5,7 @@ import CoreVideo
 // Lightweight embedding service
 // Supports multiple embedding providers:
 // - Apple NaturalLanguage (word embeddings, averaged)
-// - Ollama (snowflake-arctic-embed:33m and other models)
+// - Ollama (snowflake-arctic-embed:33m and other models; multimodal models also embed screenshots)
 // All vectors are L2-normalized Float32 so dot(query, doc) ~ cosine.
 final class EmbeddingService {
     static let shared = EmbeddingService()
@@ -152,7 +152,24 @@ final class EmbeddingService {
     var supportsImageDocuments: Bool {
         stateLock.lock()
         defer { stateLock.unlock() }
-        return selectedProvider == .mobileclip2
+        switch selectedProvider {
+        case .appleNL: return false
+        case .ollama: return ollamaProvider?.supportsImageInput ?? false
+        case .mobileclip2: return true
+        }
+    }
+
+    /// Re-checks whether the selected model embeds images (blocking); call off the main thread.
+    func refreshImageSupport() {
+        stateSnapshot().ollamaProvider?.refreshImageSupport()
+    }
+
+    /// Long edge for the private frame copy kept for image embedding. MobileCLIP center-crops and
+    /// resizes to ~256 px anyway; Ollama vision encoders benefit from more detail on screen text.
+    var imageDocumentMaxEdge: CGFloat {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return selectedProvider == .ollama ? 896 : 512
     }
 
     var effectiveThreshold: Double {
@@ -207,7 +224,7 @@ final class EmbeddingService {
         return (Self.l2normalize(raw), known, total)
     }
 
-    func embedDocument(pixelBuffer: CVPixelBuffer, extractedText: String?) -> [Float] {
+    func embedDocument(pixelBuffer: CVPixelBuffer?, extractedText: String?) -> [Float] {
         embedDocument(pixelBuffer: pixelBuffer, extractedText: extractedText, state: stateSnapshot())
     }
 
@@ -217,6 +234,12 @@ final class EmbeddingService {
             guard let extractedText, !extractedText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return [] }
             return embedWithStats(extractedText, usage: .document, state: state).vec
         case .ollama:
+            if let provider = state.ollamaProvider, let pixelBuffer, provider.supportsImageInput {
+                let includeText = UserDefaults.standard.bool(forKey: "settings.multimodalIncludeExtractedText")
+                let vector = provider.embedImageDocument(pixelBuffer: pixelBuffer,
+                                                         extractedText: includeText ? extractedText : nil)
+                if !vector.isEmpty { return Self.l2normalize(vector) }
+            }
             guard let extractedText, !extractedText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return [] }
             return embedWithStats(extractedText, usage: .document, state: state).vec
         case .mobileclip2:
@@ -405,335 +428,5 @@ final class NLEmbeddingProvider {
         }
         if count > 0 { for i in 0..<dim { v[i] /= count } }
         return (v, known, comps.count)
-    }
-}
-
-// MARK: - Ollama provider (sentence transformers via Ollama API)
-final class OllamaEmbeddingProvider {
-    typealias MetadataFetcher = (_ model: String, _ baseURL: String) -> Int?
-
-    var dim: Int
-    let model: String
-    private let baseURL: String
-    private static let defaultDim = 384
-    private static let embedRequestTimeout: TimeInterval = 12
-    private static let metadataRequestTimeout: TimeInterval = 5
-    private static let listRequestTimeout: TimeInterval = 5
-    private static let metadataQueue = DispatchQueue(label: "com.timescroll.ollama.metadata", attributes: .concurrent)
-    private static var dimCache: [String: Int] = [:]
-    private static let dimDefaultsKey = "embedding.ollamaDims"
-    private static var hasLoadedCache = false
-
-    init(model: String,
-         baseURL: String = "http://localhost:11434",
-         eagerlyResolveDimension: Bool = true,
-         metadataFetcher: @escaping MetadataFetcher = OllamaEmbeddingProvider.fetchEmbeddingLength) {
-        self.model = model
-        self.baseURL = baseURL
-        if let cached = Self.cachedDim(for: model) {
-            self.dim = cached
-        } else if eagerlyResolveDimension, let fetched = metadataFetcher(model, baseURL) {
-            self.dim = fetched
-            Self.storeDim(fetched, for: model)
-        } else {
-            self.dim = Self.defaultDim
-        }
-    }
-
-    private func effectiveText(for text: String, usage: EmbeddingService.Usage) -> String {
-        let m = model.lowercased()
-        // embeddinggemma specific prefixes
-        if m.contains("gemma") && m.contains("embed") {
-             switch usage {
-             case .query: return "task: search result | query: \(text)"
-             case .document: return "title: none | text: \(text)"
-             }
-        }
-        return text
-    }
-
-    func embed(text: String) -> [Float] { embedWithStats(text: text).0 }
-
-    func embedWithStats(text: String, usage: EmbeddingService.Usage = .document) -> ([Float], Int, Int) {
-        let textToEmbed = effectiveText(for: text, usage: usage)
-        let tokens = textToEmbed.split(separator: " ").count
-
-        guard let url = URL(string: "\(baseURL)/api/embed") else {
-            print("[Ollama] Invalid URL")
-            return (Array(repeating: 0, count: dim), 0, 0)
-        }
-
-        var request = URLRequest(url: url)
-        request.httpMethod = "POST"
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.timeoutInterval = Self.embedRequestTimeout
-
-        let payload: [String: Any] = [
-            "model": model,
-            "input": textToEmbed
-        ]
-
-        guard let jsonData = try? JSONSerialization.data(withJSONObject: payload) else {
-            print("[Ollama] Failed to serialize JSON")
-            return (Array(repeating: 0, count: dim), 0, 0)
-        }
-        request.httpBody = jsonData
-
-        // Synchronous request (will block)
-        var result: [Float] = Array(repeating: 0, count: dim)
-        guard let data = Self.performSynchronousRequest(request,
-                                                        timeout: Self.embedRequestTimeout,
-                                                        label: "embed") else {
-            return (result, 0, tokens)
-        }
-        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-            print("[Ollama] Failed to parse JSON response")
-            return (result, 0, tokens)
-        }
-
-        // Ollama /api/embed returns: {"model": "...", "embeddings": [[...], ...]}
-        // For single input, we get one embedding
-        if let embeddings = json["embeddings"] as? [[Double]],
-           let embedding = embeddings.first {
-            result = embedding.map { Float($0) }
-        } else if let embedding = json["embedding"] as? [Double] {
-            // Fallback for older API format
-            result = embedding.map { Float($0) }
-        } else {
-            print("[Ollama] No embeddings in response")
-        }
-        // If Ollama returned a different dimension than we expected, update in-memory dim and cache it.
-        if !result.isEmpty && result.count != dim {
-            dim = result.count
-            Self.storeDim(result.count, for: model)
-        }
-        return (result, tokens, tokens)
-    }
-
-    // Check if model is installed
-    static func isModelInstalled(_ model: String, baseURL: String = "http://localhost:11434") -> Bool {
-        guard let url = URL(string: "\(baseURL)/api/tags") else { return false }
-        guard let data = performSynchronousRequest(url: url,
-                                                   timeout: listRequestTimeout,
-                                                   label: "check installed models") else {
-            return false
-        }
-        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let models = json["models"] as? [[String: Any]] else {
-            return false
-        }
-        return models.contains { ($0["name"] as? String)?.hasPrefix(model) == true }
-    }
-
-    // Exposed parser used by listModels and tests
-    static func parseModelsFromData(_ data: Data) -> [String] {
-        var out: [String] = []
-        if let arr = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] {
-            for obj in arr {
-                if let name = obj["name"] as? String { out.append(name) }
-                if let id = obj["id"] as? String { out.append(id) }
-            }
-            return out
-        }
-        if let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
-            if let models = obj["models"] as? [[String: Any]] {
-                for m in models { if let name = m["name"] as? String { out.append(name) } }
-            }
-            return out
-        }
-        return out
-    }
-
-    // List available models from Ollama, preferring /api/models then falling back to /api/tags.
-    static func listModels(baseURL: String = "http://localhost:11434") -> [String] {
-        var out: [String] = []
-
-        func parseModelsJson(_ data: Data) {
-            out.append(contentsOf: parseModelsFromData(data))
-        }
-
-        if let url = URL(string: "\(baseURL)/api/tags") {
-            if let data = performSynchronousRequest(url: url,
-                                                    timeout: listRequestTimeout,
-                                                    label: "list models") {
-                parseModelsJson(data)
-            }
-        }
-
-        let uniq = Array(NSOrderedSet(array: out)) as? [String] ?? out
-        let embedOnly = uniq.filter { $0.lowercased().contains("embed") }
-        return embedOnly.isEmpty ? uniq : embedOnly
-    }
-
-    // Pull model from Ollama
-    static func pullModel(_ model: String, baseURL: String = "http://localhost:11434", completion: @escaping (Bool, String?) -> Void) {
-        guard let url = URL(string: "\(baseURL)/api/pull") else {
-            completion(false, "Invalid URL")
-            return
-        }
-
-        var request = URLRequest(url: url)
-        request.httpMethod = "POST"
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-
-        let payload: [String: Any] = ["model": model]
-        guard let jsonData = try? JSONSerialization.data(withJSONObject: payload) else {
-            completion(false, "Failed to serialize request")
-            return
-        }
-        request.httpBody = jsonData
-
-        URLSession.shared.dataTask(with: request) { data, response, error in
-            if let error = error {
-                completion(false, error.localizedDescription)
-                return
-            }
-            if let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode == 200 {
-                completion(true, nil)
-            } else {
-                completion(false, "HTTP error")
-            }
-        }.resume()
-    }
-
-    // MARK: - Model metadata helpers
-
-    private static func cachedDim(for model: String) -> Int? {
-        ensureDimCacheLoaded()
-        return metadataQueue.sync { dimCache[model] }
-    }
-
-    static func cachedOrDefaultDim(for model: String) -> Int {
-        cachedDim(for: model) ?? defaultDim
-    }
-
-    private static func storeDim(_ dim: Int, for model: String) {
-        metadataQueue.sync(flags: .barrier) {
-            dimCache[model] = dim
-            persistDimCacheLocked()
-        }
-    }
-
-    private static func persistDimCacheLocked() {
-        UserDefaults.standard.set(dimCache, forKey: dimDefaultsKey)
-    }
-
-    private static func ensureDimCacheLoaded() {
-        metadataQueue.sync(flags: .barrier) {
-            guard !hasLoadedCache else { return }
-            hasLoadedCache = true
-            guard let stored = UserDefaults.standard.dictionary(forKey: dimDefaultsKey) else {
-                dimCache = [:]
-                return
-            }
-            var parsed: [String: Int] = [:]
-            for (key, value) in stored {
-                if let intVal = value as? Int {
-                    parsed[key] = intVal
-                } else if let numVal = value as? NSNumber {
-                    parsed[key] = numVal.intValue
-                } else if let strVal = value as? String, let intVal = Int(strVal) {
-                    parsed[key] = intVal
-                }
-            }
-            dimCache = parsed
-        }
-    }
-
-#if DEBUG
-    static func clearCachedDimsForTesting(preserveDefaults: Bool = false) {
-        metadataQueue.sync(flags: .barrier) {
-            dimCache = [:]
-            hasLoadedCache = false
-            if !preserveDefaults {
-                UserDefaults.standard.removeObject(forKey: dimDefaultsKey)
-            }
-        }
-    }
-#endif
-
-    private static func fetchEmbeddingLength(model: String, baseURL: String) -> Int? {
-        guard let url = URL(string: "\(baseURL)/api/show") else { return nil }
-        var request = URLRequest(url: url)
-        request.httpMethod = "POST"
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        let payload: [String: Any] = ["name": model]
-        request.httpBody = try? JSONSerialization.data(withJSONObject: payload)
-        request.timeoutInterval = metadataRequestTimeout
-
-        guard let data = performSynchronousRequest(request,
-                                                   timeout: metadataRequestTimeout,
-                                                   label: "fetch embedding metadata") else {
-            return nil
-        }
-        return parseEmbeddingLength(from: data)
-    }
-
-    static func parseEmbeddingLength(from data: Data) -> Int? {
-        guard let json = try? JSONSerialization.jsonObject(with: data) else { return nil }
-        return parseEmbeddingLength(from: json)
-    }
-
-    private static func parseEmbeddingLength(from json: Any) -> Int? {
-        if let dict = json as? [String: Any] {
-            if let direct = extractLength(from: dict) { return direct }
-            if let details = dict["details"] {
-                if let len = parseEmbeddingLength(from: details) { return len }
-            }
-            if let info = dict["model_info"] {
-                if let len = parseEmbeddingLength(from: info) { return len }
-            }
-        }
-        return nil
-    }
-
-    private static func extractLength(from dict: [String: Any]) -> Int? {
-        let candidateKeys = ["dim", "embedding_length", "hidden_size", "bert.embedding_length", "general.embedding_length"]
-        for key in candidateKeys {
-            if let value = dict[key] {
-                if let intVal = value as? Int { return intVal }
-                if let strVal = value as? String, let intVal = Int(strVal) { return intVal }
-            }
-        }
-        return nil
-    }
-
-    private static func performSynchronousRequest(_ request: URLRequest,
-                                                  timeout: TimeInterval,
-                                                  label: String) -> Data? {
-        var data: Data?
-        var requestError: Error?
-        let semaphore = DispatchSemaphore(value: 0)
-        let task = URLSession.shared.dataTask(with: request) { responseData, _, error in
-            data = responseData
-            requestError = error
-            semaphore.signal()
-        }
-        task.resume()
-
-        if semaphore.wait(timeout: .now() + timeout) == .timedOut {
-            task.cancel()
-            print("[Ollama] \(label) timed out after \(String(format: "%.1f", timeout))s")
-            return nil
-        }
-
-        if let requestError {
-            print("[Ollama] \(label) error: \(requestError)")
-            return nil
-        }
-
-        guard let data else {
-            print("[Ollama] No data received for \(label)")
-            return nil
-        }
-        return data
-    }
-
-    private static func performSynchronousRequest(url: URL,
-                                                  timeout: TimeInterval,
-                                                  label: String) -> Data? {
-        var request = URLRequest(url: url)
-        request.timeoutInterval = timeout
-        return performSynchronousRequest(request, timeout: timeout, label: label)
     }
 }

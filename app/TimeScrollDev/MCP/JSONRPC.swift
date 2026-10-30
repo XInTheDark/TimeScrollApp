@@ -63,9 +63,18 @@ final class LineIO {
 }
 
 // Lightweight file logger for the MCP helper. Keep usage minimal to avoid interfering with stdout.
+// Never log request or response bodies: they carry search queries, OCR text and screenshots,
+// which must not leave the (possibly encrypted) TimeScroll store as plaintext.
 enum MCPFileLogger {
     private static let q = DispatchQueue(label: "timescroll.mcp.logger")
     private static let appGroupID = "group.com.muzhen.TimeScroll.shared"
+    /// The log is truncated once it grows past this size so it cannot grow without bound.
+    private static let maxLogBytes: UInt64 = 1 * 1024 * 1024
+    private static let timestampFormatter: ISO8601DateFormatter = {
+        let f = ISO8601DateFormatter()
+        f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return f
+    }()
 
     static var logURL: URL {
         let base = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: appGroupID)?
@@ -73,23 +82,32 @@ enum MCPFileLogger {
             ?? FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
                 .appendingPathComponent("TimeScrollShared/Logs", isDirectory: true)
         if !FileManager.default.fileExists(atPath: base.path) {
-            try? FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
+            try? FileManager.default.createDirectory(at: base, withIntermediateDirectories: true,
+                                                     attributes: [.posixPermissions: 0o700])
         }
         return base.appendingPathComponent("timescroll-mcp.log")
     }
 
+    /// Helpers before this version logged full request and response bodies; drop such a log once.
+    static func purgeLegacyLogIfNeeded() {
+        let key = "mcp.log.legacyBodiesPurged"
+        let defaults = UserDefaults.standard
+        guard !defaults.bool(forKey: key) else { return }
+        q.sync { _ = try? FileManager.default.removeItem(at: logURL) }
+        defaults.set(true, forKey: key)
+    }
+
     static func log(_ message: String) {
         q.async {
-            let ts: String = {
-                let f = ISO8601DateFormatter()
-                f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-                return f.string(from: Date())
-            }()
-            let line = "\(ts) \(message)\n"
+            let line = "\(timestampFormatter.string(from: Date())) \(message)\n"
             // Avoid distributed notifications — blocked in sandbox for helper.
             let url = logURL
-            if FileManager.default.fileExists(atPath: url.path) == false {
-                _ = FileManager.default.createFile(atPath: url.path, contents: nil)
+            let fm = FileManager.default
+            if let size = (try? fm.attributesOfItem(atPath: url.path))?[.size] as? UInt64, size > maxLogBytes {
+                try? fm.removeItem(at: url)
+            }
+            if fm.fileExists(atPath: url.path) == false {
+                _ = fm.createFile(atPath: url.path, contents: nil, attributes: [.posixPermissions: 0o600])
             }
             do {
                 let handle = try FileHandle(forWritingTo: url)

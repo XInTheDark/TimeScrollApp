@@ -6,13 +6,23 @@ enum DataReset {
         // Stop capture streams if any
         // Caller/UI can restart app afterwards
         let fm = FileManager.default
-        // Remove current storage root (may be custom folder)
+        // Remove the current storage root's data. A custom root is a folder the user picked and
+        // may hold unrelated files, so only TimeScroll's own entries are removed there.
         StoragePaths.withSecurityScope {
             let root = StoragePaths.currentRoot()
-            if fm.fileExists(atPath: root.path) {
-                try? fm.removeItem(at: root)
+            if StoragePaths.isDefaultRoot(root) {
+                if fm.fileExists(atPath: root.path) {
+                    try? fm.removeItem(at: root)
+                }
+            } else {
+                for entry in StoragePaths.storageEntries(in: root) {
+                    try? fm.removeItem(at: entry)
+                }
             }
         }
+        // The vault key and MCP log would otherwise outlive the data they belong to.
+        VaultKeychainStore.delete()
+        try? fm.removeItem(at: StoragePaths.sharedLogURL(filename: "timescroll-mcp.log"))
         // Also delete the default Application Support folder if different, to ensure full reset
         let appSupport = fm.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
         let defaultDir = appSupport.appendingPathComponent("TimeScroll", isDirectory: true)

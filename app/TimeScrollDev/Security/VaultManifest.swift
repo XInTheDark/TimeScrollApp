@@ -8,6 +8,7 @@ import Foundation
 struct VaultManifest: Codable {
     static let currentVersion = 2
     static let recoveryIterations = 600_000
+    private static let acceptedIterations = 100_000...10_000_000
     private static let recoveryAAD = Data("TimeScroll.vault.v2.recovery".utf8)
     private static let fileName = "vault-v2.json"
 
@@ -35,6 +36,11 @@ struct VaultManifest: Codable {
 
     /// Recovers the master secret; throws for a wrong passphrase.
     func openRecovery(passphrase: String) throws -> VaultSecret {
+        // The manifest lives in the user-movable storage folder; refuse tampered work factors
+        // (too weak to matter, or large enough to hang the app).
+        guard Self.acceptedIterations.contains(recoveryIterations) else {
+            throw NSError(domain: "TS.Vault", code: 23, userInfo: [NSLocalizedDescriptionKey: "The vault recovery data is damaged."])
+        }
         let key = try Self.passphraseKey(passphrase, salt: recoverySalt, iterations: recoveryIterations)
         do {
             let box = try AES.GCM.SealedBox(combined: recoverySealedSecret)

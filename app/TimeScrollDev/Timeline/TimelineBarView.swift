@@ -537,9 +537,12 @@ final class TimelineBarNSView: NSView {
                 continue
             }
 
+            // Only redraw when an icon actually arrives; redrawing on a failed lookup would
+            // retry it on every pass and spin the CPU.
             if let bundleId = seg.appBundleId,
-               AppIconCache.shared.cachedIcon(for: bundleId) == nil {
-                AppIconCache.shared.loadIconAsync(for: bundleId) { [weak self] _ in
+               AppIconCache.shared.needsLoad(for: bundleId) {
+                AppIconCache.shared.loadIconAsync(for: bundleId) { [weak self] icon in
+                    guard icon != nil else { return }
                     self?.needsDisplay = true
                 }
             }
@@ -648,8 +651,9 @@ final class TimelineBarNSView: NSView {
                     drawAudioWaveform(overview,
                                       in: segmentRect.insetBy(dx: 1, dy: 1),
                                       color: audioBaseColor(for: meta))
-                } else {
-                    AudioWaveformOverviewCache.shared.loadOverviewAsync(for: meta.path) { [weak self] _ in
+                } else if AudioWaveformOverviewCache.shared.needsLoad(for: meta.path) {
+                    AudioWaveformOverviewCache.shared.loadOverviewAsync(for: meta.path) { [weak self] overview in
+                        guard overview != nil else { return }
                         DispatchQueue.main.async {
                             self?.needsDisplay = true
                         }
@@ -876,8 +880,8 @@ final class TimelineBarNSView: NSView {
                 showPopover(at: p)
                 hoverThrottle = now
             } else if shouldReposition {
-                popover.performClose(nil)
-                showPopover(at: p)
+                // Move the open popover instead of closing and rebuilding it on every mouse move.
+                popover.positioningRect = popoverAnchor(at: p)
                 hoverThrottle = now
             }
 
@@ -1025,20 +1029,27 @@ final class TimelineBarNSView: NSView {
     }
 
     private func showPopover(at point: NSPoint) {
-        let content = HoverPreviewView(viewModel: previewViewModel)
-        let host = NSHostingView(rootView: content)
-        host.frame = NSRect(x: 0, y: 0, width: 260, height: 220)
-        if popover.contentViewController == nil { popover.contentViewController = NSViewController() }
-        popover.contentViewController?.view = host
-        popover.behavior = .transient
-        popover.animates = false
+        if popover.contentViewController == nil {
+            // Built once; the view model drives every later update.
+            let host = NSHostingView(rootView: HoverPreviewView(viewModel: previewViewModel))
+            host.frame = NSRect(x: 0, y: 0, width: 260, height: 220)
+            let controller = NSViewController()
+            controller.view = host
+            popover.contentViewController = controller
+            popover.behavior = .transient
+            popover.animates = false
+        }
+        popover.show(relativeTo: popoverAnchor(at: point), of: self, preferredEdge: .maxY)
+    }
+
+    private func popoverAnchor(at point: NSPoint) -> NSRect {
         let clampedX = max(0, min(bounds.width - 1, point.x))
-        let anchor = NSRect(x: clampedX, y: 0, width: 1, height: 1)
-        popover.show(relativeTo: anchor, of: self, preferredEdge: .maxY)
+        return NSRect(x: clampedX, y: 0, width: 1, height: 1)
     }
 
     private func loadPreview(for index: Int) {
-        guard let m = model else { return }
+        // The debounced call can run after a live refresh replaced `metas`.
+        guard let m = model, m.metas.indices.contains(index) else { return }
         let meta = m.metas[index]
         let url = URL(fileURLWithPath: meta.path)
         let ext = url.pathExtension.lowercased()
@@ -1068,7 +1079,7 @@ final class TimelineBarNSView: NSView {
         )
 
         if let bundleId = meta.appBundleId,
-           AppIconCache.shared.cachedIcon(for: bundleId) == nil {
+           AppIconCache.shared.needsLoad(for: bundleId) {
             AppIconCache.shared.loadIconAsync(for: bundleId) { [weak self] icon in
                 guard let self = self, self.lastPreviewIndex == index else { return }
                 guard let icon else { return }
@@ -1191,8 +1202,11 @@ private struct HoverPreviewView: View {
                 if let icon = viewModel.appIcon {
                     Image(nsImage: icon).resizable().frame(width: 16, height: 16).cornerRadius(3)
                 }
-                Text(viewModel.appName).font(.caption)
-                Spacer()
+                Text(viewModel.appName)
+                    .font(.caption)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                Spacer(minLength: 4)
                 Text(Self.df.string(from: viewModel.date)).font(.caption2).foregroundColor(.secondary)
             }
         }

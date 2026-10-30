@@ -60,12 +60,12 @@ extension AppDelegate {
             }
         }
         powerNotiTokens.append(sleepToken)
-        let handler: (Notification) -> Void = { [weak self] _ in
-            guard let self else { return }
-            let now = Date().timeIntervalSince1970
-            if now - self.lastWakeRestartAt < 2.0 { return }
-            self.lastWakeRestartAt = now
+        let token = nc.addObserver(forName: NSWorkspace.didWakeNotification, object: nil, queue: .main) { [weak self] _ in
             Task { @MainActor in
+                guard let self else { return }
+                let now = Date().timeIntervalSince1970
+                if now - self.lastWakeRestartAt < 2.0 { return }
+                self.lastWakeRestartAt = now
                 try? await Task.sleep(nanoseconds: 800_000_000)
                 if SettingsStore.shared.autoLockOnSleep, VaultManager.shared.isUnlocked {
                     await VaultManager.shared.lock()
@@ -74,7 +74,6 @@ extension AppDelegate {
                 self.refreshMenu()
             }
         }
-        let token = nc.addObserver(forName: NSWorkspace.didWakeNotification, object: nil, queue: .main, using: handler)
         powerNotiTokens.append(token)
     }
 

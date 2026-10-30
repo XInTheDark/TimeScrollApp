@@ -6,7 +6,9 @@ import Foundation
 enum MCPBridge {
     static let helperBundleIdentifier = "com.muzhen.TimeScroll.mcp"
     static let appBundleIdentifier = "com.muzhen.TimeScroll"
-    private static let maxMessageBytes = 64 * 1024 * 1024
+    static let maxMessageBytes = 64 * 1024 * 1024
+    /// Requests are a few hundred bytes; the larger limit is only for responses carrying images.
+    static let maxRequestBytes = 1024 * 1024
 
     static var socketURL: URL {
         FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
@@ -75,7 +77,7 @@ enum MCPBridge {
         }
     }
 
-    static func readMessage<T: Decodable>(_ type: T.Type, from fd: Int32) throws -> T {
+    static func readMessage<T: Decodable>(_ type: T.Type, from fd: Int32, maxBytes: Int = maxMessageBytes) throws -> T {
         var buffer = Data()
         var chunk = [UInt8](repeating: 0, count: 64 * 1024)
         while true {
@@ -90,7 +92,7 @@ enum MCPBridge {
                 break
             }
             buffer.append(contentsOf: chunk[0..<count])
-            guard buffer.count <= maxMessageBytes else {
+            guard buffer.count <= maxBytes else {
                 throw NSError(domain: "TS.MCPBridge", code: 2, userInfo: [NSLocalizedDescriptionKey: "Message too large."])
             }
         }

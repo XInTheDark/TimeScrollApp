@@ -38,7 +38,7 @@ struct PrivacyPane: View {
         }
       }
     }
-    .onChange(of: settings.blacklistBundleIds) { newList in
+    .onChange(of: settings.blacklistBundleIds) { _, newList in
       Task { @MainActor in
         await AppState.shared.captureManager.updateExclusions(with: newList)
       }
@@ -52,6 +52,7 @@ struct PrivacyPane: View {
           .tag(bid)
       }
     }
+    .onDeleteCommand(perform: removeSelected)
     .frame(minHeight: 280)
     .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
   }

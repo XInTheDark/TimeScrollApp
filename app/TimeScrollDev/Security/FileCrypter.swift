@@ -148,9 +148,8 @@ final class FileCrypter {
 
     private func outputLocation(timestampMs: Int64) throws -> (dir: URL, base: String) {
         let day = Date(timeIntervalSince1970: TimeInterval(timestampMs)/1000)
-        let df = DateFormatter(); df.dateFormat = "yyyy-MM-dd"
         let fm = FileManager.default
-        let dir = StoragePaths.snapshotsDir().appendingPathComponent(df.string(from: day), isDirectory: true)
+        let dir = StoragePaths.snapshotsDir().appendingPathComponent(Self.dayFormatter.string(from: day), isDirectory: true)
         if !fm.fileExists(atPath: dir.path) { try fm.createDirectory(at: dir, withIntermediateDirectories: true) }
         var name = "snap-\(timestampMs)"
         var candidate = dir.appendingPathComponent(name + ".tse")
@@ -161,6 +160,12 @@ final class FileCrypter {
         }
         return (dir, name)
     }
+
+    private static let dayFormatter: DateFormatter = {
+        let df = DateFormatter()
+        df.dateFormat = "yyyy-MM-dd"
+        return df
+    }()
 
     private func mimeFor(format: String) -> String {
         switch format.lowercased() {

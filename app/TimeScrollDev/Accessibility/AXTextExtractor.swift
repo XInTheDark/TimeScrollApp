@@ -219,12 +219,18 @@ final class AXTextExtractor {
                     _ = AXUIElementCopyAttributeValue(focusedElement, kAXRoleAttribute as CFString, &focusedRoleRef)
                 }
                 let focusedRole = focusedRoleRef as? String ?? ""
+                var focusedSubroleRef: CFTypeRef?
+                if self.setMessagingTimeout(for: focusedElement, startTime: windowStart, limits: limits) {
+                    _ = AXUIElementCopyAttributeValue(focusedElement, kAXSubroleAttribute as CFString, &focusedSubroleRef)
+                }
+                // Never read the value of a focused password field.
+                let focusedIsSecure = (focusedSubroleRef as? String) == "AXSecureTextField"
 
                 if debugMode {
                     print("[AX] [\(idx)] Also traversing focused element (role=\(focusedRole))")
                 }
 
-                if DispatchTime.now().uptimeMilliseconds < hardDeadline,
+                if DispatchTime.now().uptimeMilliseconds < hardDeadline, !focusedIsSecure,
                    focusedRole == kAXTextAreaRole as String || focusedRole == kAXTextFieldRole as String {
                     if let docValue: String = self.getAXAttr(focusedElement,
                                                              kAXValueAttribute as CFString,

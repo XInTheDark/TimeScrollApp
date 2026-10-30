@@ -96,6 +96,34 @@ enum StoragePaths {
         return base.appendingPathComponent("TimeScroll", isDirectory: true)
     }
 
+    /// Top-level entries TimeScroll creates inside a storage root.
+    static let ownedRootEntryNames = [
+        "db.sqlite", "db.sqlite-wal", "db.sqlite-shm", "db.sqlite-journal",
+        "db.sqlite.enc.tmp", "db.sqlite.plain.tmp",
+        "Snapshots", "Videos", "IngestQueue", "Audio", "Vault", "VectorIndex"
+    ]
+
+    /// The entries to move or delete when relocating or erasing a storage root. The default root
+    /// belongs to TimeScroll entirely; a custom root is whatever folder the user picked (possibly
+    /// one holding unrelated files, like ~/Documents), so only TimeScroll's own entries count there.
+    static func storageEntries(in root: URL) -> [URL] {
+        let fm = FileManager.default
+        if isDefaultRoot(root),
+           let all = try? fm.contentsOfDirectory(at: root, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles]) {
+            return all
+        }
+        return ownedRootEntryNames
+            .map { root.appendingPathComponent($0) }
+            .filter { fm.fileExists(atPath: $0.path) }
+    }
+
+    /// True for the app-managed default location (current or legacy), which holds nothing else.
+    static func isDefaultRoot(_ root: URL) -> Bool {
+        func normalized(_ url: URL) -> String { url.resolvingSymlinksInPath().standardizedFileURL.path }
+        let path = normalized(root)
+        return [defaultRoot(), legacyDefaultRoot()].contains { normalized($0) == path }
+    }
+
     /// Returns the URL for the SQLite database file under the current root.
     static func dbURL() -> URL { currentRoot().appendingPathComponent("db.sqlite") }
 

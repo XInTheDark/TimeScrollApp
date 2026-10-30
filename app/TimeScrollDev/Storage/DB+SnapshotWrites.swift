@@ -135,17 +135,17 @@ extension DB {
         }
     }
 
-    /// Helper: run REPLACE on a specific column where the column value begins with oldPrefix.
+    /// Helper: swap `oldPrefix` for `newPrefix` in a column wherever the value starts with it.
+    /// Compares the leading characters exactly: `LIKE` would treat `%`/`_` in folder names as
+    /// wildcards (and is case-insensitive), and `REPLACE` would also rewrite later occurrences.
     /// Returns number of rows changed by the UPDATE.
     private static func replacePrefixInColumn(db: OpaquePointer, column: String, oldPrefix: String, newPrefix: String) -> Int {
         var stmt: OpaquePointer?
         defer { sqlite3_finalize(stmt) }
-        let sql = "UPDATE ts_snapshot SET \(column) = REPLACE(\(column), ?, ?) WHERE \(column) LIKE ?;"
+        let sql = "UPDATE ts_snapshot SET \(column) = ?2 || substr(\(column), length(?1) + 1) WHERE substr(\(column), 1, length(?1)) = ?1;"
         guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return 0 }
         sqlite3_bind_text(stmt, 1, oldPrefix, -1, SQLITE_TRANSIENT)
         sqlite3_bind_text(stmt, 2, newPrefix, -1, SQLITE_TRANSIENT)
-        let likePat = (oldPrefix + "%")
-        sqlite3_bind_text(stmt, 3, likePat, -1, SQLITE_TRANSIENT)
         _ = sqlite3_step(stmt)
         sqlite3_reset(stmt)
         return Int(sqlite3_changes(db))

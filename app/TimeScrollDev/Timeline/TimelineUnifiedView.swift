@@ -18,6 +18,7 @@ struct TimelineUnifiedView: View {
     @State private var startDate: Date? = nil
     @State private var endDate: Date? = nil
     @State private var keyMonitor: Any? = nil
+    @State private var hostWindow = HostingWindowReference()
     @State private var showingResults: Bool = false
     @State private var preserveOpenedResultContextOnRefresh: Bool = false
     @State private var showCaptureModePopover: Bool = false
@@ -84,6 +85,7 @@ struct TimelineUnifiedView: View {
             model.msPerPoint = min(max(model.msPerPoint, minMsPerPt), maxMsPerPt)
         }
         .onDisappear { removeKeyMonitor() }
+        .background(HostingWindowReader(reference: hostWindow).frame(width: 0, height: 0))
         .onChange(of: vault.isUnlocked) { _, unlocked in
             // When the vault gets unlocked, reload timeline and show a loading state
             if unlocked { model.load() }
@@ -162,6 +164,8 @@ struct TimelineUnifiedView: View {
                         .font(.subheadline.weight(.semibold))
                         .frame(width: 24)
                 }
+                .help("Capture modes")
+                .accessibilityLabel("Capture modes")
                 .buttonStyle(.borderedProminent)
                 .tint((appState.isCapturing || appState.isCaptureStarting) ? .red : .accentColor)
                 .controlSize(.large)
@@ -246,6 +250,8 @@ struct TimelineUnifiedView: View {
                     Image(systemName: "minus")
                 }
                 .buttonStyle(.bordered)
+                .help("Zoom out")
+                .accessibilityLabel("Zoom out")
 
                 Slider(value: Binding(get: {
                     let clamped = min(max(model.msPerPoint, minMsPerPt), maxMsPerPt)
@@ -266,6 +272,8 @@ struct TimelineUnifiedView: View {
                     Image(systemName: "plus")
                 }
                 .buttonStyle(.bordered)
+                .help("Zoom in")
+                .accessibilityLabel("Zoom in")
 
                 Divider().frame(height: 22)
 
@@ -504,6 +512,8 @@ struct TimelineUnifiedView: View {
                     Image(systemName: "chevron.right.to.line")
                 }
                 .buttonStyle(.plain)
+                .help("Jump to latest")
+                .accessibilityLabel("Jump to latest")
                 .padding(8)
             }
         }
@@ -582,6 +592,11 @@ struct TimelineUnifiedView: View {
 
     private func installKeyMonitor() {
         keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
+            // The monitor is app-wide: leave keys alone in Settings, sheets and popovers so arrow
+            // keys keep working there and Delete never offers to delete a snapshot.
+            guard let window = hostWindow.window, event.window === window, window.attachedSheet == nil else {
+                return event
+            }
             // If typing in the search field (NSTextView), intercept Cmd+Return to run Search & Jump
             if let first = NSApp.keyWindow?.firstResponder, first is NSTextView {
                 // keyCode 36 = Return, 76 = keypad Enter
@@ -606,7 +621,7 @@ struct TimelineUnifiedView: View {
                     alert.alertStyle = .warning
                     alert.messageText = "Delete Snapshot?"
                     alert.informativeText = "This will permanently delete the selected snapshot from disk and remove it from the timeline."
-                    alert.addButton(withTitle: "Delete")
+                    alert.addButton(withTitle: "Delete").hasDestructiveAction = true
                     alert.addButton(withTitle: "Cancel")
                     if alert.runModal() == .alertFirstButtonReturn {
                         model.deleteSnapshot(id: sel.id)

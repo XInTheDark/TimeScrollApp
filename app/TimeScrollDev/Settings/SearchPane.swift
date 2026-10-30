@@ -11,6 +11,7 @@ struct SearchPane: View {
     @State private var loadingModels = false
     @State private var modelInstalled = false
     @State private var checkingModelInstall = false
+    @State private var ollamaImageSupport: Bool?
     @State private var mobileCLIPRelease: MobileCLIPLatestRelease?
     @State private var loadingMobileCLIPRelease = false
     @State private var mobileCLIPActionInFlight = false
@@ -104,7 +105,7 @@ struct SearchPane: View {
                 refreshMobileCLIPReleaseIfNeeded()
             }
         }
-        .onChange(of: settings.aiEmbeddingsEnabled) { enabled in
+        .onChange(of: settings.aiEmbeddingsEnabled) { _, enabled in
             if enabled && settings.embeddingProvider == "ollama" {
                 loadOllamaModelsIfNeeded()
                 refreshModelInstallState()
@@ -112,7 +113,7 @@ struct SearchPane: View {
                 refreshMobileCLIPReleaseIfNeeded(force: true)
             }
         }
-        .onChange(of: settings.embeddingProvider) { _ in
+        .onChange(of: settings.embeddingProvider) { _, _ in
             ensureValidModelSelectionForProvider()
             if settings.embeddingProvider == "ollama" {
                 loadOllamaModelsIfNeeded()
@@ -121,7 +122,7 @@ struct SearchPane: View {
             }
             refreshModelInstallState()
         }
-        .onChange(of: settings.embeddingModel) { _ in
+        .onChange(of: settings.embeddingModel) { _, _ in
             refreshModelInstallState()
             mobileCLIPError = nil
         }
@@ -168,8 +169,31 @@ struct SearchPane: View {
             }
 
             modelStatusView
+
+            if modelInstalled && !checkingModelInstall {
+                ollamaImageSupportView
+            }
         }
         .settingsInsetCard()
+    }
+
+    @ViewBuilder
+    private var ollamaImageSupportView: some View {
+        switch ollamaImageSupport {
+        case .some(true):
+            Label("Multimodal model: screenshots are embedded as images", systemImage: "photo")
+                .font(.footnote)
+                .foregroundColor(.secondary)
+
+            Toggle("Blend extracted text into multimodal embeddings", isOn: $settings.multimodalIncludeExtractedText)
+                .toggleStyle(.switch)
+        case .some(false):
+            Text("Text-only model: captures are embedded from their extracted text. Models with the vision capability also embed screenshots.")
+                .font(.footnote)
+                .foregroundColor(.secondary)
+        case .none:
+            EmptyView()
+        }
     }
 
     private var mobileCLIPModelCard: some View {
@@ -359,27 +383,27 @@ struct SearchPane: View {
 }
 
 extension SearchPane {
-    private static var aiIntFormatter: NumberFormatter {
+    private static let aiIntFormatter: NumberFormatter = {
         let formatter = NumberFormatter()
         formatter.numberStyle = .none
         formatter.minimum = 100
         formatter.maximum = 100000
         return formatter
-    }
+    }()
 
-    private static var byteCountFormatter: ByteCountFormatter {
+    private static let byteCountFormatter: ByteCountFormatter = {
         let formatter = ByteCountFormatter()
         formatter.countStyle = .file
         formatter.allowedUnits = [.useMB, .useGB]
         return formatter
-    }
+    }()
 
-    private static var percentFormatter: NumberFormatter {
+    private static let percentFormatter: NumberFormatter = {
         let formatter = NumberFormatter()
         formatter.numberStyle = .percent
         formatter.maximumFractionDigits = 0
         return formatter
-    }
+    }()
 
     private static func percentString(for value: Double) -> String {
         let clamped = max(0, min(1, value))
@@ -578,10 +602,14 @@ extension SearchPane {
         }
         let model = settings.embeddingModel
         checkingModelInstall = true
+        ollamaImageSupport = nil
         DispatchQueue.global(qos: .userInitiated).async {
             let installed = OllamaEmbeddingProvider.isModelInstalled(model)
+            let imageSupport = installed ? OllamaModelCapabilities.shared.refresh(model: model) : nil
             DispatchQueue.main.async {
-                modelInstalled = (settings.embeddingModel == model) ? installed : modelInstalled
+                guard settings.embeddingModel == model else { return }
+                modelInstalled = installed
+                ollamaImageSupport = imageSupport
                 checkingModelInstall = false
             }
         }

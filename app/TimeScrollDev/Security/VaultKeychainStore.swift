@@ -10,15 +10,22 @@ enum VaultKeychainStore {
     private static let service = "com.muzhen.TimeScroll.vault"
     private static let account = "master-secret-v2"
 
+    /// Updates the stored item in place, adding it only when missing, so a failed write never
+    /// leaves the keychain without the previous key.
     static func save(_ secret: VaultSecret) throws {
-        delete()
-        let attributes: [String: Any] = [
+        let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
-            kSecAttrAccount as String: account,
-            kSecAttrLabel as String: "TimeScroll Vault Key",
-            kSecValueData as String: secret.rawData
+            kSecAttrAccount as String: account
         ]
+        let update: [String: Any] = [kSecValueData as String: secret.rawData]
+        let updateStatus = SecItemUpdate(query as CFDictionary, update as CFDictionary)
+        if updateStatus == errSecSuccess { return }
+        guard updateStatus == errSecItemNotFound else { throw error(updateStatus, action: "save") }
+
+        var attributes = query
+        attributes[kSecAttrLabel as String] = "TimeScroll Vault Key"
+        attributes[kSecValueData as String] = secret.rawData
         let status = SecItemAdd(attributes as CFDictionary, nil)
         guard status == errSecSuccess else { throw error(status, action: "save") }
     }

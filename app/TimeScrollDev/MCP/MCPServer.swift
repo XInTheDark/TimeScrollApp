@@ -35,7 +35,7 @@ final class MCPServer {
         do {
             let data = try encoder.encode(obj)
             if let s = String(data: data, encoding: .utf8) {
-                MCPFileLogger.log("out: \(s)")
+                MCPFileLogger.log("out: \(data.count) bytes")
                 print(s)
             }
         } catch {
@@ -50,10 +50,10 @@ final class MCPServer {
 
     func run() {
         for line in io.lines() {
-            MCPFileLogger.log("in: \(line)")
+            MCPFileLogger.log("in: \(line.utf8.count) bytes")
             guard let req = try? JSONDecoder().decode(RPCRequest.self, from: Data(line.utf8)) else {
                 fputs("[timescroll-mcp] bad JSON\n", stderr)
-                MCPFileLogger.log("bad JSON input: \(line.prefix(256))…")
+                MCPFileLogger.log("bad JSON input (\(line.utf8.count) bytes)")
                 continue
             }
             // Handle notifications (no id) so clients don't think we're unresponsive
@@ -120,7 +120,7 @@ final class MCPServer {
         do {
             let a = parseSearchArgs(argsAny)
             let t0 = Date()
-            MCPFileLogger.log("search start id=\(id) q=\(a.query ?? "") limit=\(a.maxResults) imgs=\(a.includeImages) apps=\(a.apps?.count ?? 0)")
+            MCPFileLogger.log("search start id=\(id) queryChars=\(a.query?.count ?? 0) limit=\(a.maxResults) imgs=\(a.includeImages) apps=\(a.apps?.count ?? 0)")
             // The app runs the search (and holds any vault keys); this helper only forwards it.
             let response = try MCPBridgeClient.search(a)
             if let message = response.error {
@@ -180,14 +180,43 @@ final class MCPServer {
         let textOnly = (d["text_only"] as? Bool) ?? false
         var startMs: Int64? = nil, endMs: Int64? = nil
         if let dr = d["date_range"] as? [String: Any] {
-            let f = ISO8601DateFormatter()
-            if let s = dr["from"] as? String, let dt = f.date(from: s) { startMs = Int64(dt.timeIntervalSince1970 * 1000) }
-            if let s = dr["to"]   as? String, let dt = f.date(from: s) { endMs   = Int64(dt.timeIntervalSince1970 * 1000) }
+            if let s = dr["from"] as? String { startMs = Self.parseDateMs(s, endOfDay: false) }
+            if let s = dr["to"] as? String { endMs = Self.parseDateMs(s, endOfDay: true) }
         }
         let apps = (d["apps"] as? [String]).flatMap { $0.isEmpty ? nil : $0 }
         return MCPBridge.SearchRequest(query: query, maxResults: maxResults, includeImages: includeImages,
                                        startMs: startMs, endMs: endMs, textOnly: textOnly, apps: apps,
                                        imageMaxPixel: d["image_max_pixel"] as? Int)
+    }
+}
+
+extension MCPServer {
+    private static let dateTimeFormatter = ISO8601DateFormatter()
+    private static let fractionalDateTimeFormatter: ISO8601DateFormatter = {
+        let f = ISO8601DateFormatter()
+        f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return f
+    }()
+    private static let dateOnlyFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.timeZone = .current
+        f.dateFormat = "yyyy-MM-dd"
+        return f
+    }()
+
+    /// Accepts ISO8601 date-times (with or without fractional seconds) and plain `yyyy-MM-dd`
+    /// dates in the user's time zone; a plain end date covers that whole day.
+    static func parseDateMs(_ text: String, endOfDay: Bool) -> Int64? {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let date = dateTimeFormatter.date(from: trimmed) ?? fractionalDateTimeFormatter.date(from: trimmed) {
+            return Int64(date.timeIntervalSince1970 * 1000)
+        }
+        guard let day = dateOnlyFormatter.date(from: trimmed) else { return nil }
+        let startMs = Int64(day.timeIntervalSince1970 * 1000)
+        guard endOfDay else { return startMs }
+        let nextDay = Calendar.current.date(byAdding: .day, value: 1, to: day) ?? day.addingTimeInterval(86_400)
+        return Int64(nextDay.timeIntervalSince1970 * 1000) - 1
     }
 }
 

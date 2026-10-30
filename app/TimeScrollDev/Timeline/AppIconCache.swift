@@ -6,6 +6,9 @@ final class AppIconCache {
     private let lock = NSLock()
     private var inFlight = Set<String>()
     private var waiters: [String: [(NSImage?) -> Void]] = [:]
+    /// Bundle IDs with no installed app. Remembered so callers (e.g. the timeline's draw pass)
+    /// do not re-query Launch Services, and redraw, for them on every pass.
+    private var missing = Set<String>()
 
     private init() {
         cache.countLimit = 256
@@ -15,10 +18,22 @@ final class AppIconCache {
         cache.object(forKey: bundleId as NSString)
     }
 
+    /// True when no icon is cached and the bundle ID has not already been found to have no app.
+    func needsLoad(for bundleId: String) -> Bool {
+        guard cachedIcon(for: bundleId) == nil else { return false }
+        lock.lock()
+        defer { lock.unlock() }
+        return !missing.contains(bundleId)
+    }
+
     func icon(for bundleId: String) -> NSImage? {
         let key = bundleId as NSString
         if let img = cache.object(forKey: key) { return img }
-        guard let icon = resolveIcon(for: bundleId) else { return nil }
+        guard needsLoad(for: bundleId) else { return nil }
+        guard let icon = resolveIcon(for: bundleId) else {
+            markMissing(bundleId)
+            return nil
+        }
         cache.setObject(icon, forKey: key)
         return icon
     }
@@ -31,6 +46,11 @@ final class AppIconCache {
         }
 
         lock.lock()
+        if missing.contains(bundleId) {
+            lock.unlock()
+            completion?(nil)
+            return
+        }
         if let completion {
             waiters[bundleId, default: []].append(completion)
         }
@@ -46,6 +66,8 @@ final class AppIconCache {
             let icon = self.resolveIcon(for: bundleId)
             if let icon {
                 self.cache.setObject(icon, forKey: key)
+            } else {
+                self.markMissing(bundleId)
             }
 
             self.lock.lock()
@@ -55,6 +77,12 @@ final class AppIconCache {
 
             callbacks.forEach { $0(icon) }
         }
+    }
+
+    private func markMissing(_ bundleId: String) {
+        lock.lock()
+        missing.insert(bundleId)
+        lock.unlock()
     }
 
     private func resolveIcon(for bundleId: String) -> NSImage? {

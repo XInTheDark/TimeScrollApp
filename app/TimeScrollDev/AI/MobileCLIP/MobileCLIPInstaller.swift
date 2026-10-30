@@ -17,7 +17,11 @@ enum MobileCLIPInstaller {
         try FileManager.default.createDirectory(at: tempRoot, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: tempRoot) }
 
-        let archiveURL = tempRoot.appendingPathComponent(asset.name)
+        guard isTrustedDownloadURL(asset.downloadURL) else {
+            throw NSError(domain: "TimeScroll.MobileCLIP", code: 7, userInfo: [NSLocalizedDescriptionKey: "Refusing to download \(model.rawValue) from an unexpected location"])
+        }
+        // Name the archive ourselves: the release metadata's asset name is not trusted as a path.
+        let archiveURL = tempRoot.appendingPathComponent(model.assetFileName)
         try await download(asset: asset, to: archiveURL, progressHandler: progressHandler)
         try verifyChecksumIfPresent(asset: asset, archiveURL: archiveURL)
 
@@ -92,6 +96,12 @@ enum MobileCLIPInstaller {
             try FileManager.default.removeItem(at: destinationURL)
         }
         try FileManager.default.moveItem(at: temporaryURL, to: destinationURL)
+    }
+
+    /// Release assets must come over HTTPS from this model repository's GitHub releases.
+    private static func isTrustedDownloadURL(_ url: URL) -> Bool {
+        guard url.scheme?.lowercased() == "https", url.host?.lowercased() == "github.com" else { return false }
+        return url.path.lowercased().hasPrefix("/xinthedark/mobileclip2-coreml/releases/download/")
     }
 
     private static func verifyChecksumIfPresent(asset: MobileCLIPReleaseAsset, archiveURL: URL) throws {

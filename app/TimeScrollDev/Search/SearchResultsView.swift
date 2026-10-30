@@ -21,6 +21,7 @@ struct SearchResultsView: View {
     @State private var requestToken: Int = 0
 
     private let pageSize: Int = 50
+    private static let resultsTopID = "search-results-top"
     private let search = SearchService()
 
     enum ViewMode: String {
@@ -70,7 +71,7 @@ struct SearchResultsView: View {
                     Text("Tiles").tag(ViewMode.tiles)
                 }
                 .pickerStyle(.segmented)
-                .frame(width: 130)
+                .fixedSize()
 
                 Toggle("AI", isOn: Binding(get: { useAI }, set: { enabled in
                     useAI = enabled
@@ -105,33 +106,42 @@ struct SearchResultsView: View {
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                     .padding(24)
             } else {
-                ScrollView {
-                    if viewMode == .list {
-                        LazyVStack(alignment: .leading, spacing: 12) {
-                            ForEach(Array(rows.enumerated()), id: \.1.id) { index, row in
-                                Button {
-                                    let absoluteIndex = page * pageSize + index
-                                    onOpen(row.result, absoluteIndex)
-                                } label: {
-                                    SearchRowView(row: row)
+                ScrollViewReader { proxy in
+                    ScrollView {
+                        Group {
+                            if viewMode == .list {
+                                LazyVStack(alignment: .leading, spacing: 12) {
+                                    ForEach(Array(rows.enumerated()), id: \.1.id) { index, row in
+                                        Button {
+                                            let absoluteIndex = page * pageSize + index
+                                            onOpen(row.result, absoluteIndex)
+                                        } label: {
+                                            SearchRowView(row: row)
+                                        }
+                                        .buttonStyle(.plain)
+                                    }
                                 }
-                                .buttonStyle(.plain)
+                                .padding(16)
+                            } else {
+                                LazyVGrid(columns: [GridItem(.adaptive(minimum: 240), spacing: 16)], spacing: 16) {
+                                    ForEach(Array(rows.enumerated()), id: \.1.id) { index, row in
+                                        Button {
+                                            let absoluteIndex = page * pageSize + index
+                                            onOpen(row.result, absoluteIndex)
+                                        } label: {
+                                            SearchTileView(row: row)
+                                        }
+                                        .buttonStyle(.plain)
+                                    }
+                                }
+                                .padding(16)
                             }
                         }
-                        .padding(16)
-                    } else {
-                        LazyVGrid(columns: [GridItem(.adaptive(minimum: 240), spacing: 16)], spacing: 16) {
-                            ForEach(Array(rows.enumerated()), id: \.1.id) { index, row in
-                                Button {
-                                    let absoluteIndex = page * pageSize + index
-                                    onOpen(row.result, absoluteIndex)
-                                } label: {
-                                    SearchTileView(row: row)
-                                }
-                                .buttonStyle(.plain)
-                            }
-                        }
-                        .padding(16)
+                        .id(Self.resultsTopID)
+                    }
+                    // A new page starts at its first result, not at the old scroll offset.
+                    .onChange(of: page) { _, _ in
+                        proxy.scrollTo(Self.resultsTopID, anchor: .top)
                     }
                 }
             }
@@ -336,7 +346,9 @@ private struct SearchResultDisplayRow: Identifiable {
             let utf16 = contentNorm.utf16
             let startPos = utf16.distance(from: utf16.startIndex, to: hit.samePosition(in: utf16) ?? utf16.startIndex)
             let origUTF16 = content.utf16
-            let startIdx = origUTF16.index(origUTF16.startIndex, offsetBy: max(0, startPos))
+            // Folding can change the text's length (e.g. "ß" → "ss"); never step past the end.
+            let startIdx = origUTF16.index(origUTF16.startIndex, offsetBy: max(0, startPos), limitedBy: origUTF16.endIndex)
+                ?? origUTF16.endIndex
             let start = startIdx.samePosition(in: content) ?? content.startIndex
             let startOffset = max(0, content.distance(from: content.startIndex, to: start) - 40)
             let snippetStart = content.index(content.startIndex, offsetBy: startOffset)
@@ -353,30 +365,30 @@ private struct SearchResultDisplayRow: Identifiable {
 
         var attributed = AttributedString(snippet)
         let snippetNorm = normalize(snippet)
+        // Matches are found in the folded text; map them back by UTF-16 offset, which is only
+        // valid while folding kept the length unchanged (the usual case).
+        let canHighlight = snippetNorm.utf16.count == snippet.utf16.count
+        func highlight(_ token: String) {
+            guard canHighlight, !token.isEmpty else { return }
+            var searchStart = snippetNorm.startIndex
+            while let range = snippetNorm.range(of: token, range: searchStart..<snippetNorm.endIndex) {
+                let lower = snippetNorm.utf16.distance(from: snippetNorm.utf16.startIndex, to: range.lowerBound)
+                let upper = snippetNorm.utf16.distance(from: snippetNorm.utf16.startIndex, to: range.upperBound)
+                let start = snippet.utf16.index(snippet.utf16.startIndex, offsetBy: lower)
+                let end = snippet.utf16.index(snippet.utf16.startIndex, offsetBy: upper)
+                if let attributedRange = Range(start..<end, in: attributed) {
+                    attributed[attributedRange].inlinePresentationIntent = .stronglyEmphasized
+                }
+                searchStart = range.upperBound
+            }
+        }
         for part in parts {
             if part.isPhrase {
-                let token = normalize(part.text)
-                var searchStart = snippetNorm.startIndex
-                while let range = snippetNorm.range(of: token, range: searchStart..<snippetNorm.endIndex) {
-                    let upper = range.upperBound
-                    if let attributedRange = Range(range, in: attributed) {
-                        attributed[attributedRange].inlinePresentationIntent = .stronglyEmphasized
-                    }
-                    searchStart = upper
-                }
+                highlight(normalize(part.text))
             } else {
                 let base = normalize(part.text)
                 let variants: [String] = intelligentAccuracy ? OCRConfusion.expand(base) : [base]
-                for variant in variants {
-                    var searchStart = snippetNorm.startIndex
-                    while let range = snippetNorm.range(of: variant, range: searchStart..<snippetNorm.endIndex) {
-                        let upper = range.upperBound
-                        if let attributedRange = Range(range, in: attributed) {
-                            attributed[attributedRange].inlinePresentationIntent = .stronglyEmphasized
-                        }
-                        searchStart = upper
-                    }
-                }
+                for variant in variants { highlight(variant) }
             }
         }
 

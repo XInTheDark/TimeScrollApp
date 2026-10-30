@@ -11,9 +11,6 @@ final class SnapshotEmbeddingQueue {
     /// Pending work is bounded; when full, the oldest job is dropped (a rebuild can backfill it).
     private static let maxPending = 32
     private static let batchSize = 16
-    /// Long edge of the private frame copy; MobileCLIP center-crops and resizes to ~256 px anyway.
-    private static let imageMaxEdge: CGFloat = 512
-
     private let queue = DispatchQueue(label: "TimeScroll.EmbeddingQueue", qos: .utility)
     private let lock = NSLock()
     private var pending: [SnapshotEmbeddingWriter.Job] = []
@@ -22,7 +19,10 @@ final class SnapshotEmbeddingQueue {
 
     func enqueue(snapshotId: Int64, pixelBuffer: CVPixelBuffer, extractedText: String?) {
         guard UserDefaults.standard.bool(forKey: "settings.aiEmbeddingsEnabled") else { return }
-        let image = EmbeddingService.shared.supportsImageDocuments ? downscaledCopy(of: pixelBuffer) : nil
+        let service = EmbeddingService.shared
+        let image = service.supportsImageDocuments
+            ? downscaledCopy(of: pixelBuffer, maxEdge: service.imageDocumentMaxEdge)
+            : nil
         let job = SnapshotEmbeddingWriter.Job(snapshotId: snapshotId, image: image, extractedText: extractedText)
 
         lock.lock()
@@ -47,9 +47,9 @@ final class SnapshotEmbeddingQueue {
         }
     }
 
-    private func downscaledCopy(of pixelBuffer: CVPixelBuffer) -> CVPixelBuffer? {
+    private func downscaledCopy(of pixelBuffer: CVPixelBuffer, maxEdge: CGFloat) -> CVPixelBuffer? {
         let source = CIImage(cvPixelBuffer: pixelBuffer)
-        let scale = min(1, Self.imageMaxEdge / max(source.extent.width, source.extent.height))
+        let scale = min(1, maxEdge / max(source.extent.width, source.extent.height))
         let scaled = source.transformed(by: CGAffineTransform(scaleX: scale, y: scale))
         let width = Int(scaled.extent.width.rounded(.down)), height = Int(scaled.extent.height.rounded(.down))
         guard width > 0, height > 0 else { return nil }

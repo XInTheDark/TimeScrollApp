@@ -140,14 +140,14 @@ struct StoragePane: View {
             Section {
                 Toggle("Keep highlight boxes only for recent snapshots", isOn: $settings.recentOCRBoxesOnly)
                     .help("Older highlight boxes are pruned after the aging window to save database space.")
-                    .onChange(of: settings.recentOCRBoxesOnly) { enabled in
+                    .onChange(of: settings.recentOCRBoxesOnly) { _, enabled in
                         guard enabled else { return }
                         triggerOCRBoxPrune()
                     }
 
                 Toggle("Auto-compact older snapshots", isOn: $settings.autoCompactEnabled)
                     .help("Automatically rewrites older snapshots using the settings below.")
-                    .onChange(of: settings.autoCompactEnabled) { enabled in
+                    .onChange(of: settings.autoCompactEnabled) { _, enabled in
                         guard enabled else { return }
                         triggerStorageMaintenance()
                     }
@@ -274,9 +274,10 @@ private struct DataResetConfirmSheet: View {
                 .padding(.top, 4)
             HStack {
                 Spacer()
+                // Destructive: Return cancels instead of erasing everything.
                 Button("Cancel") { onCancel() }
-                Button("Delete and Reset") { onContinue() }
                     .keyboardShortcut(.defaultAction)
+                Button("Delete and Reset", role: .destructive) { onContinue() }
             }
         }
         .padding(18)

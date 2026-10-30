@@ -198,7 +198,7 @@ struct OnboardingView: View {
 
                 Toggle("Enable audio capture features", isOn: $enableAudioFeature)
                     .toggleStyle(.switch)
-                    .onChange(of: enableAudioFeature) { enabled in
+                    .onChange(of: enableAudioFeature) { _, enabled in
                         if enabled && !captureScreen && !captureMicrophone && !captureSystemAudio {
                             captureScreen = true
                         }

@@ -8,7 +8,7 @@ struct UpdatesPane: View {
         Form {
             Section(header: Text("Channel")) {
                 Toggle("Include beta/pre-release updates", isOn: $settings.updateChannelBeta)
-                    .onChange(of: settings.updateChannelBeta) { _ in applySparkle() }
+                    .onChange(of: settings.updateChannelBeta) { _, _ in applySparkle() }
                 Text(settings.updateChannelBeta
                      ? "You will receive updates from the beta feed."
                      : "You will receive updates from the stable feed.")
@@ -18,7 +18,7 @@ struct UpdatesPane: View {
 
             Section(header: Text("Automatic updates")) {
                 Toggle("Automatically check for updates", isOn: $settings.enableAutoCheckUpdates)
-                    .onChange(of: settings.enableAutoCheckUpdates) { _ in applySparkle() }
+                    .onChange(of: settings.enableAutoCheckUpdates) { _, _ in applySparkle() }
 
                 LabeledContent("Check interval") {
                     SettingsSlider(
@@ -28,10 +28,10 @@ struct UpdatesPane: View {
                         valueText: "\(settings.autoCheckIntervalHours) h"
                     )
                 }
-                .onChange(of: settings.autoCheckIntervalHours) { _ in applySparkle() }
+                .onChange(of: settings.autoCheckIntervalHours) { _, _ in applySparkle() }
 
                 Toggle("Automatically download and install updates", isOn: $settings.autoDownloadInstallUpdates)
-                    .onChange(of: settings.autoDownloadInstallUpdates) { _ in applySparkle() }
+                    .onChange(of: settings.autoDownloadInstallUpdates) { _, _ in applySparkle() }
 
                 Text("On your first launch after a update, you may see a first‑run Gatekeeper prompt.")
                     .font(.footnote)

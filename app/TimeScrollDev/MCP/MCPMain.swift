@@ -5,6 +5,7 @@ struct MCPMain {
 	static func start() {
 		setbuf(stdout, nil) // flush JSON lines promptly
 		fputs("[timescroll-mcp] starting\n", stderr)
+		MCPFileLogger.purgeLegacyLogIfNeeded()
 		MCPFileLogger.log("helper starting")
 		let server = MCPServer()
 		DispatchQueue.global(qos: .userInitiated).async {

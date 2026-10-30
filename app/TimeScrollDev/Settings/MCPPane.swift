@@ -4,6 +4,7 @@ struct MCPPane: View {
     @Binding var mcpEnabled: Bool
 
     @State private var jsonText: String
+    @State private var logStatus: String?
 
     init(mcpEnabled: Binding<Bool>) {
         self._mcpEnabled = mcpEnabled
@@ -18,12 +19,16 @@ struct MCPPane: View {
     }
 
     private static func makeConfigJSON(helperPath: String) -> String {
-        """
+        // The bundle may live in a folder whose name needs JSON escaping.
+        let command = helperPath
+            .replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "\"", with: "\\\"")
+        return """
         {
             "mcpServers": {
                 "timescroll": {
                     "type": "stdio",
-                    "command": "\(helperPath)",
+                    "command": "\(command)",
                     "args": [],
                     "env": {}
                 }
@@ -63,7 +68,7 @@ struct MCPPane: View {
                 }
             }
 
-            Section(header: Text("Claude Desktop")) {
+            Section(header: Text("Claude Code")) {
                 VStack(alignment: .leading, spacing: 6) {
                     Text("Install command").font(.headline)
                     HStack(spacing: 8) {
@@ -81,8 +86,14 @@ struct MCPPane: View {
 
             Section(header: Text("Logs")) {
                 VStack(alignment: .leading, spacing: 8) {
-                    Button("Open Logs") { revealLogs() }
-                        .buttonStyle(.bordered)
+                    HStack(spacing: 8) {
+                        Button("Show Logs in Finder") { revealLogs() }
+                        Button("Clear Logs") { clearLogs() }
+                    }
+                    .buttonStyle(.bordered)
+                    Text(logStatus ?? "Logs record request sizes and timings only, never queries or results.")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
                 }
             }
         }
@@ -90,11 +101,27 @@ struct MCPPane: View {
     }
 
     private func revealLogs() {
-        guard let url = logURL else { return }
-        NSWorkspace.shared.activateFileViewerSelecting([url])
+        let url = logURL
+        if FileManager.default.fileExists(atPath: url.path) {
+            NSWorkspace.shared.activateFileViewerSelecting([url])
+        } else {
+            // Nothing has been logged yet: open the folder instead of silently doing nothing.
+            _ = NSWorkspace.shared.open(url.deletingLastPathComponent())
+        }
     }
 
-    private var logURL: URL? {
+    private func clearLogs() {
+        do {
+            if FileManager.default.fileExists(atPath: logURL.path) {
+                try FileManager.default.removeItem(at: logURL)
+            }
+            logStatus = "Logs cleared."
+        } catch {
+            logStatus = "Could not clear logs: \(error.localizedDescription)"
+        }
+    }
+
+    private var logURL: URL {
         StoragePaths.sharedLogURL(filename: "timescroll-mcp.log")
     }
 }

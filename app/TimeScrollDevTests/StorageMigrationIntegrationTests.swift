@@ -21,12 +21,18 @@ final class StorageMigrationIntegrationTests: XCTestCase {
         let vid = videosDir.appendingPathComponent("seg-1.mov")
         try "video".data(using: .utf8)!.write(to: vid)
 
+        // A custom root may hold the user's own files; they must stay put.
+        let unrelated = oldRoot.appendingPathComponent("Taxes 2024.pdf")
+        try "mine".data(using: .utf8)!.write(to: unrelated)
+
         // Run transfer
-        try StorageMigrationManager.transfer(from: oldRoot, to: newRoot)
+        XCTAssertTrue(try StorageMigrationManager.transfer(from: oldRoot, to: newRoot))
 
         // Both files should exist under newRoot
         XCTAssertTrue(fm.fileExists(atPath: newRoot.appendingPathComponent("Snapshots/day/img.png").path))
         XCTAssertTrue(fm.fileExists(atPath: newRoot.appendingPathComponent("Videos/seg-1.mov").path))
+        XCTAssertTrue(fm.fileExists(atPath: unrelated.path))
+        XCTAssertFalse(fm.fileExists(atPath: newRoot.appendingPathComponent("Taxes 2024.pdf").path))
 
         // Clean up
         try? fm.removeItem(at: oldRoot)

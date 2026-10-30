@@ -31,11 +31,11 @@ public struct RowOut {
 
 public final class SearchFacade {
     private let prefs: PreferencesService
-    private static let tz = TimeZone(identifier: "Asia/Singapore")!
+    /// Times are reported in the user's own time zone so MCP clients see local wall-clock times.
     private static let isoF: ISO8601DateFormatter = {
         let f = ISO8601DateFormatter()
         f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        f.timeZone = tz
+        f.timeZone = .current
         return f
     }()
 
@@ -131,7 +131,16 @@ public final class SearchFacade {
     }
 
     private static func nsImageToJPEG(_ img: NSImage) -> Data? {
-        guard let tiff = img.tiffRepresentation, let rep = NSBitmapImageRep(data: tiff) else { return nil }
+        // Encode straight from the CGImage; a TIFF round trip copies the full bitmap twice.
+        var rect = CGRect(origin: .zero, size: img.size)
+        let rep: NSBitmapImageRep
+        if let cgImage = img.cgImage(forProposedRect: &rect, context: nil, hints: nil) {
+            rep = NSBitmapImageRep(cgImage: cgImage)
+        } else if let tiff = img.tiffRepresentation, let decoded = NSBitmapImageRep(data: tiff) {
+            rep = decoded
+        } else {
+            return nil
+        }
         return rep.representation(using: .jpeg, properties: [.compressionFactor: jpegQuality])
     }
 }

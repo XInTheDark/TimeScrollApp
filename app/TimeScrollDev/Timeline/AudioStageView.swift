@@ -333,9 +333,9 @@ private struct AudioFloatingOverlay: View {
             .help("Previous snapshot")
             .accessibilityLabel("Previous snapshot")
 
-            Text(model.selected.map { Self.dateFormatter.string(from: Date(timeIntervalSince1970: TimeInterval($0.startedAtMs) / 1000)) } ?? "")
-                .font(.system(size: 16, weight: .medium, design: .monospaced))
-                .foregroundColor(.white)
+            TimelineDateButton(text: model.selected.map { Self.dateFormatter.string(from: Date(timeIntervalSince1970: TimeInterval($0.startedAtMs) / 1000)) } ?? "",
+                               selectedMs: model.selected?.startedAtMs,
+                               calendar: model.dayCalendar)
 
             Button(action: { model.next() }) {
                 Image(systemName: "chevron.right.circle.fill")

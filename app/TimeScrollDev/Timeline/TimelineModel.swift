@@ -35,8 +35,12 @@ final class TimelineModel: ObservableObject {
 
     private var requestToken: Int = 0
 
+    let dayCalendar = DayCalendarController()
+
     // Paging: the timeline holds a window of rows and extends it as the user scrolls back.
     nonisolated static let pageSize = 1000
+    static let minMsPerPoint: Double = 100             // 100ms per pt at max zoom-in
+    static let maxMsPerPoint: Double = 300_000         // 5m per pt at max zoom-out (keeps things "pretty small")
     @Published private(set) var hasMoreOlder: Bool = false
     private var isLoadingOlder = false
     private var activeQuery: TimelineQuery?

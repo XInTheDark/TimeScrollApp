@@ -88,14 +88,15 @@ struct TimelineBarContainer: NSViewRepresentable {
             context.coordinator.shouldScrollToEndIfNeeded = false
         }
 
-        // Keep the selected snapshot visible (centered) when selection changes
+        // Keep the selected snapshot visible: re-center only when it is off-screen,
+        // so clicking or scrubbing never moves the timeline under the cursor.
         if let sel = model.selected {
             if context.coordinator.lastSelectedId != sel.id {
                 context.coordinator.lastSelectedId = sel.id
                 let xSel = doc.timelineX(for: sel.startedAtMs)
                 let vis = scroll.contentView.bounds
                 let targetX = max(0, min(doc.bounds.width - vis.width, xSel - vis.width/2))
-                if abs(targetX - vis.origin.x) > 8 {
+                if !vis.insetBy(dx: 24, dy: 0).contains(NSPoint(x: xSel, y: vis.midY)) {
                     scroll.contentView.scroll(to: NSPoint(x: targetX, y: 0))
                     scroll.reflectScrolledClipView(scroll.contentView)
                 }
@@ -104,10 +105,15 @@ struct TimelineBarContainer: NSViewRepresentable {
             context.coordinator.lastSelectedId = nil
         }
 
-        // If zoom level changed, re-center around the current snapshot
+        // If zoom level changed, keep the pinch point fixed, or re-center around the current snapshot
         if context.coordinator.lastMsPerPoint != model.msPerPoint || compressionChanged {
             context.coordinator.lastMsPerPoint = model.msPerPoint
-            if let sel = model.selected {
+            if let anchor = doc.zoomAnchor {
+                let vis = scroll.contentView.bounds
+                let targetX = max(0, min(doc.bounds.width - vis.width, doc.timelineX(for: anchor.timeMs) - anchor.viewportX))
+                scroll.contentView.scroll(to: NSPoint(x: targetX, y: 0))
+                scroll.reflectScrolledClipView(scroll.contentView)
+            } else if let sel = model.selected {
                 let xSel = doc.timelineX(for: sel.startedAtMs)
                 let vis = scroll.contentView.bounds
                 let targetX = max(0, min(doc.bounds.width - vis.width, xSel - vis.width/2))
@@ -115,6 +121,8 @@ struct TimelineBarContainer: NSViewRepresentable {
                 scroll.reflectScrolledClipView(scroll.contentView)
             }
         }
+
+        doc.zoomAnchor = nil
 
         // Handle explicit jump-to-end requests
         if context.coordinator.lastJumpToken != model.jumpToEndToken {
@@ -169,7 +177,23 @@ struct TimelineBarContainer: NSViewRepresentable {
 final class TimelineBarScrollView: NSScrollView {
     var invertScrollDirection: Bool = false
 
+    override func reflectScrolledClipView(_ cView: NSClipView) {
+        super.reflectScrolledClipView(cView)
+        // The hover popover is anchored in document coordinates and would travel with the content.
+        (documentView as? TimelineBarNSView)?.dismissHoverPopover()
+    }
+
     override func scrollWheel(with event: NSEvent) {
+        // Option/Command + scroll zooms, like pinching (matches the snapshot view).
+        if event.modifierFlags.contains(.option) || event.modifierFlags.contains(.command),
+           let doc = documentView as? TimelineBarNSView {
+            // Trackpad inertia would keep zooming after the fingers lift.
+            guard event.momentumPhase.isEmpty else { return }
+            // Mouse wheels report lines, trackpads report points.
+            let delta = event.scrollingDeltaY * (event.hasPreciseScrollingDeltas ? 1 : 10)
+            doc.zoom(by: 1 + delta / 100, at: event.locationInWindow)
+            return
+        }
         guard let documentView else {
             super.scrollWheel(with: event)
             return
@@ -467,7 +491,10 @@ final class TimelineBarNSView: NSView {
     private weak var layoutModel: TimelineModel?
     private var layoutRevision: UInt64?
     private var audioSpans: [MergedAudioDisplaySpan] = []
-    private var isDraggingTimeline = false
+    /// Set by pinch-zoom so the container keeps the time under the cursor in place.
+    var zoomAnchor: (timeMs: Int64, viewportX: CGFloat)?
+    private var scrubCaptureKind: CaptureKind?
+    private var scrubTimeMs: Int64?
 
     override var isFlipped: Bool { true }
     override var acceptsFirstResponder: Bool { true }
@@ -747,18 +774,14 @@ final class TimelineBarNSView: NSView {
         // Include the preceding major tick and label overhang at the viewport edges.
         let start = max(m.minTimeMs, layout.time(atX: visibleRect.minX - 100) - majorStep)
         let end = min(m.maxTimeMs, layout.time(atX: visibleRect.maxX + 100) + majorStep)
-        let labelStyle: [NSAttributedString.Key: Any] = [
-            .font: NSFont.systemFont(ofSize: 10, weight: .regular),
-            .foregroundColor: NSColor.secondaryLabelColor
-        ]
         let yTop = rect.minY + 8
         let tickHeightMajor: CGFloat = 8
         let tickHeightMinor: CGFloat = 4
-        // First major aligned to step
         if end <= start { return }
-        let firstMajor = ((start / majorStep) + 1) * majorStep
+        // Align majors to local wall-clock steps so midnight is always a major tick.
+        let tzOffsetMs = Int64(TimeZone.current.secondsFromGMT(for: Date(timeIntervalSince1970: TimeInterval(start) / 1000))) * 1000
+        let firstMajor = (((start + tzOffsetMs) / majorStep) + 1) * majorStep - tzOffsetMs
         var t = firstMajor
-        let df = TimelineBarNSView.timeFormatter
         while t < end {
             let xPos = timelineX(for: t)
             // Major tick
@@ -768,11 +791,11 @@ final class TimelineBarNSView: NSView {
             p.line(to: NSPoint(x: xPos, y: yTop + tickHeightMajor))
             p.lineWidth = 1
             p.stroke()
-            // Label
+            // Label: date at midnight, time otherwise
             let date = Date(timeIntervalSince1970: TimeInterval(t)/1000)
-            let str = df.string(from: date) as NSString
-            let size = str.size(withAttributes: labelStyle)
-            str.draw(at: NSPoint(x: xPos - size.width/2, y: yTop + tickHeightMajor + 2), withAttributes: labelStyle)
+            let isMidnight = Calendar.current.startOfDay(for: date) == date
+            drawTickLabel(isMidnight ? Self.dayFormatter.string(from: date) : Self.timeFormatter.string(from: date),
+                          emphasized: isMidnight, centeredAt: xPos, y: yTop + tickHeightMajor + 2)
             // Minor ticks between this and next major
             var mt = t + minorStep
             let nextMajor = t + majorStep
@@ -792,25 +815,46 @@ final class TimelineBarNSView: NSView {
 
     private func drawCompressedTicks(in rect: NSRect) {
         guard !layout.timesAsc.isEmpty else { return }
-        let firstTime = layout.timesAsc.first ?? 0
-        let lastTime = layout.timesAsc.last ?? firstTime
-        let labelStyle: [NSAttributedString.Key: Any] = [
-            .font: NSFont.systemFont(ofSize: 10, weight: .regular),
-            .foregroundColor: NSColor.secondaryLabelColor
-        ]
         let yTop = rect.minY + 8
         let majorTickHeight: CGFloat = 8
         let minorTickHeight: CGFloat = 4
-        let df = TimelineBarNSView.timeFormatter
+        let labelGap: CGFloat = 10
         var lastMajorX = -CGFloat.greatestFiniteMagnitude
         var lastMinorX = -CGFloat.greatestFiniteMagnitude
+        var lastLabelMaxX = -CGFloat.greatestFiniteMagnitude
+        var lastLabelText = ""
+        // A day change is labelled with the date on the next major tick that has room for it.
+        var nextDayStartMs = Int64.min
+        var dayChangePending = false
 
+        // Walk every point (not just visible ones) so tick placement is stable while scrolling.
         for (timeMs, xPos) in zip(layout.timesAsc, layout.positionsAsc) {
-            let isMajor = xPos - lastMajorX >= 90 || timeMs == firstTime || timeMs == lastTime
+            if timeMs >= nextDayStartMs {
+                let date = Date(timeIntervalSince1970: TimeInterval(timeMs) / 1000)
+                let nextDay = Calendar.current.date(byAdding: .day, value: 1, to: Calendar.current.startOfDay(for: date)) ?? date
+                nextDayStartMs = Int64(nextDay.timeIntervalSince1970 * 1000)
+                dayChangePending = true
+            }
+            let isMajor = xPos - lastMajorX >= 60 || (dayChangePending && xPos - lastMajorX >= 22)
             let needsMinor = xPos - lastMinorX >= 22
             guard isMajor || needsMinor else { continue }
             lastMinorX = xPos
-            if isMajor { lastMajorX = xPos }
+            var label: String?
+            if isMajor {
+                lastMajorX = xPos
+                let date = Date(timeIntervalSince1970: TimeInterval(timeMs) / 1000)
+                let text = dayChangePending ? Self.dayTimeFormatter.string(from: date) : Self.timeFormatter.string(from: date)
+                let width = tickLabelSize(text, emphasized: dayChangePending).width
+                // Space against where the label is really drawn (edge labels are pulled inside the view).
+                let originX = labelOriginX(centeredAt: xPos, width: width)
+                if text != lastLabelText, originX >= lastLabelMaxX + labelGap {
+                    label = text
+                    lastLabelText = text
+                    lastLabelMaxX = originX + width
+                }
+            }
+            let showsDay = label != nil && dayChangePending
+            if showsDay { dayChangePending = false }
             guard xPos >= visibleRect.minX - 100, xPos <= visibleRect.maxX + 100 else { continue }
 
             let tickHeight = isMajor ? majorTickHeight : minorTickHeight
@@ -822,20 +866,43 @@ final class TimelineBarNSView: NSView {
             path.lineWidth = 1
             path.stroke()
 
-            if isMajor {
-                let label = df.string(from: Date(timeIntervalSince1970: TimeInterval(timeMs) / 1000)) as NSString
-                let size = label.size(withAttributes: labelStyle)
-                label.draw(at: NSPoint(x: xPos - size.width / 2, y: yTop + majorTickHeight + 2), withAttributes: labelStyle)
+            if let label {
+                drawTickLabel(label, emphasized: showsDay, centeredAt: xPos, y: yTop + majorTickHeight + 2)
             }
         }
     }
 
-    private static let timeFormatter: DateFormatter = {
+    private static func labelAttributes(emphasized: Bool) -> [NSAttributedString.Key: Any] {
+        [
+            .font: NSFont.systemFont(ofSize: 10, weight: emphasized ? .semibold : .regular),
+            .foregroundColor: emphasized ? NSColor.labelColor : NSColor.secondaryLabelColor
+        ]
+    }
+
+    private func tickLabelSize(_ text: String, emphasized: Bool) -> NSSize {
+        (text as NSString).size(withAttributes: Self.labelAttributes(emphasized: emphasized))
+    }
+
+    private func drawTickLabel(_ text: String, emphasized: Bool, centeredAt x: CGFloat, y: CGFloat) {
+        let width = tickLabelSize(text, emphasized: emphasized).width
+        (text as NSString).draw(at: NSPoint(x: labelOriginX(centeredAt: x, width: width), y: y),
+                                withAttributes: Self.labelAttributes(emphasized: emphasized))
+    }
+
+    /// Keeps labels at the content edges fully visible.
+    private func labelOriginX(centeredAt x: CGFloat, width: CGFloat) -> CGFloat {
+        min(max(bounds.minX + 2, x - width / 2), bounds.maxX - width - 2)
+    }
+
+    private static func formatter(template: String) -> DateFormatter {
         let f = DateFormatter()
-        f.dateStyle = .short
-        f.timeStyle = .short
+        f.setLocalizedDateFormatFromTemplate(template)
         return f
-    }()
+    }
+
+    private static let timeFormatter = formatter(template: "jmm")
+    private static let dayFormatter = formatter(template: "EEEdMMM")
+    private static let dayTimeFormatter = formatter(template: "EEEdMMMjmm")
 
     private func pickMajorTickStep(msPerPoint: Double) -> Int64 {
         // Ensure ~>=80 px between major ticks
@@ -854,11 +921,6 @@ final class TimelineBarNSView: NSView {
         let options: NSTrackingArea.Options = [.mouseMoved, .mouseEnteredAndExited, .activeInActiveApp, .inVisibleRect]
         tracking = NSTrackingArea(rect: bounds, options: options, owner: self, userInfo: nil)
         addTrackingArea(tracking!)
-    }
-
-    override func resetCursorRects() {
-        super.resetCursorRects()
-        addCursorRect(bounds, cursor: isDraggingTimeline ? .closedHand : .openHand)
     }
 
     override func mouseMoved(with event: NSEvent) {
@@ -909,68 +971,46 @@ final class TimelineBarNSView: NSView {
     }
 
     override func mouseExited(with event: NSEvent) {
-        onHoverExit?()
-        popover.performClose(nil)
-        lastPreviewIndex = nil
-        pendingPreviewIndex = nil
-        loadingTimer?.cancel()
-        loadingTimer = nil
-        previewDebounce?.cancel()
-        previewDebounce = nil
+        cancelTimelineHoverPreview()
     }
 
+    override func magnify(with event: NSEvent) {
+        zoom(by: 1 + event.magnification, at: event.locationInWindow)
+    }
+
+    /// Zooms around the time under `windowPoint`; `factor` > 1 zooms in.
+    func zoom(by factor: CGFloat, at windowPoint: NSPoint) {
+        guard let model, let clip = enclosingScrollView?.contentView else { return }
+        let x = convert(windowPoint, from: nil).x
+        zoomAnchor = (timeAt(x: x), x - clip.bounds.minX)
+        let scale = max(0.1, factor)
+        model.msPerPoint = min(max(model.msPerPoint / scale, TimelineModel.minMsPerPoint), TimelineModel.maxMsPerPoint)
+    }
+
+    // Click or drag scrubs: the selection follows the cursor. Panning is done with the
+    // scroll wheel / trackpad. Handled per event (not in a tracking loop) so the
+    // main snapshot view keeps updating while dragging.
     override func mouseDown(with event: NSEvent) {
         guard model != nil else { return }
         window?.makeFirstResponder(self)
+        cancelTimelineHoverPreview()
+        let point = convert(event.locationInWindow, from: nil)
+        scrubCaptureKind = TimelineTrackLayout(in: bounds, visibleCaptureKinds: visibleCaptureKinds).preferredCaptureKind(at: point)
+        scrubTimeMs = nil
+        scrub(toX: point.x)
+    }
 
-        let startPoint = convert(event.locationInWindow, from: nil)
-        let preferredCaptureKind = TimelineTrackLayout(in: bounds, visibleCaptureKinds: visibleCaptureKinds).preferredCaptureKind(at: startPoint)
-        guard let scrollView = enclosingScrollView else {
-            onJump?(timeAt(x: startPoint.x), preferredCaptureKind)
-            return
-        }
+    override func mouseDragged(with event: NSEvent) {
+        guard model != nil else { return }
+        _ = autoscroll(with: event)
+        scrub(toX: convert(event.locationInWindow, from: nil).x)
+    }
 
-        let startOriginX = scrollView.contentView.bounds.origin.x
-        let maxX = max(0, bounds.width - scrollView.contentView.bounds.width)
-        let dragThreshold: CGFloat = 3
-        var didDrag = false
-
-        while let nextEvent = window?.nextEvent(matching: [.leftMouseDragged, .leftMouseUp]) {
-            let currentPoint = convert(nextEvent.locationInWindow, from: nil)
-
-            switch nextEvent.type {
-            case .leftMouseDragged:
-                guard maxX > 0 else { continue }
-                let dragDeltaX = currentPoint.x - startPoint.x
-                if !didDrag, abs(dragDeltaX) >= dragThreshold {
-                    didDrag = true
-                    beginTimelineDrag()
-                    cancelTimelineHoverPreview()
-                }
-                guard didDrag else { continue }
-
-                let targetX = min(max(0, startOriginX - dragDeltaX), maxX)
-                scrollView.contentView.scroll(to: NSPoint(x: targetX, y: 0))
-                scrollView.reflectScrolledClipView(scrollView.contentView)
-
-            case .leftMouseUp:
-                if didDrag {
-                    endTimelineDrag()
-                } else {
-                    onJump?(timeAt(x: startPoint.x), preferredCaptureKind)
-                }
-                return
-
-            default:
-                break
-            }
-        }
-
-        if didDrag {
-            endTimelineDrag()
-        } else {
-            onJump?(timeAt(x: startPoint.x), preferredCaptureKind)
-        }
+    private func scrub(toX x: CGFloat) {
+        let t = timeAt(x: min(max(visibleRect.minX, x), visibleRect.maxX))
+        guard t != scrubTimeMs else { return }
+        scrubTimeMs = t
+        onJump?(t, scrubCaptureKind)
     }
 
     override func rightMouseDown(with event: NSEvent) {
@@ -1003,22 +1043,12 @@ final class TimelineBarNSView: NSView {
                                   visibleCaptureKinds: visibleCaptureKinds)
     }
 
-    private func beginTimelineDrag() {
-        guard !isDraggingTimeline else { return }
-        isDraggingTimeline = true
-        NSCursor.closedHand.push()
-        window?.invalidateCursorRects(for: self)
-    }
-
-    private func endTimelineDrag() {
-        guard isDraggingTimeline else { return }
-        isDraggingTimeline = false
-        NSCursor.pop()
-        window?.invalidateCursorRects(for: self)
-    }
-
     private func cancelTimelineHoverPreview() {
         onHoverExit?()
+        dismissHoverPopover()
+    }
+
+    func dismissHoverPopover() {
         popover.performClose(nil)
         lastPreviewIndex = nil
         pendingPreviewIndex = nil
@@ -1039,7 +1069,11 @@ final class TimelineBarNSView: NSView {
             popover.behavior = .transient
             popover.animates = false
         }
-        popover.show(relativeTo: popoverAnchor(at: point), of: self, preferredEdge: .maxY)
+        // This view is flipped, so .minY is the top edge: the preview opens above the timeline.
+        popover.show(relativeTo: popoverAnchor(at: point), of: self, preferredEdge: .minY)
+        // If AppKit still has to place it over the timeline, let the mouse pass through
+        // so the popover does not trigger mouseExited and close itself.
+        popover.contentViewController?.view.window?.ignoresMouseEvents = true
     }
 
     private func popoverAnchor(at point: NSPoint) -> NSRect {

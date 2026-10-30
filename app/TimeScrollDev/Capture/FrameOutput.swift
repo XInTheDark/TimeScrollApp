@@ -35,6 +35,9 @@ final class FrameOutput: NSObject, SCStreamOutput {
     var lastGrid: LumaGridSignature?
     /// Frontmost app + focused window title of the last persisted frame.
     var lastFrontContext: String?
+    /// "Active display" mode: frames persist only while this returns true. Nil captures always.
+    let isActiveDisplay: (() -> Bool)?
+    var wasActiveDisplay = false
     var stableCount: Int = 0
     /// Last snapshot whose Accessibility text was indexed in full, with its normalized lines.
     var lastTextAnchor: (id: Int64, fingerprint: TextFingerprint, lines: Set<String>)?
@@ -64,10 +67,12 @@ final class FrameOutput: NSObject, SCStreamOutput {
     init(onSnapshot: @escaping (URL) -> Void,
          hevcStore: HEVCVideoStore,
          displayBounds: CGRect,
+         isActiveDisplay: (() -> Bool)? = nil,
          onProbeIntervalChanged: @escaping (CFTimeInterval) -> Void = { _ in }) {
         self.onSnapshot = onSnapshot
         self.hevcStore = hevcStore
         self.displayBounds = displayBounds
+        self.isActiveDisplay = isActiveDisplay
         self.onProbeIntervalChanged = onProbeIntervalChanged
         super.init()
         currentInterval = baseInterval
@@ -92,6 +97,19 @@ final class FrameOutput: NSObject, SCStreamOutput {
         guard evaluationGate.wait(timeout: .now()) == .success else { return }
         var handedOff = false
         defer { if !handedOff { evaluationGate.signal() } }
+
+        if let isActiveDisplay {
+            guard isActiveDisplay() else {
+                wasActiveDisplay = false
+                return
+            }
+            if !wasActiveDisplay {
+                // Another display was shown meanwhile, so record this one even if it is unchanged.
+                wasActiveDisplay = true
+                lastHash = nil
+                lastGrid = nil
+            }
+        }
 
         // Lightweight thermal governance check (every ~1s)
         applyThermalGovernorIfNeeded()
@@ -273,9 +291,16 @@ final class FrameOutput: NSObject, SCStreamOutput {
         return bundleId + "\u{1F}" + title
     }
 
-    func shutdown() {
-        workQueue.sync {}
-        ocrQueue.sync {}
+    /// Lets in-flight capture and OCR work finish, but waits at most `timeout`. A Vision OCR call
+    /// that never returns would otherwise block quitting and capture restarts (e.g. on wake) forever.
+    func shutdown(timeout: TimeInterval = 2.0) {
+        let drained = DispatchSemaphore(value: 0)
+        workQueue.async { [ocrQueue] in
+            ocrQueue.async { drained.signal() }
+        }
+        if drained.wait(timeout: .now() + timeout) == .timedOut {
+            fputs("[Capture] Shutdown timed out waiting for capture/OCR work; continuing.\n", stderr)
+        }
         hevcStore.shutdown()
     }
 }

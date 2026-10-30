@@ -24,8 +24,8 @@ struct TimelineUnifiedView: View {
     @State private var showCaptureModePopover: Bool = false
     @State private var timelineResizeStartHeight: Double?
 
-    private let minMsPerPt: Double = 100             // 100ms per pt at max zoom-in
-    private let maxMsPerPt: Double = 300_000         // 5m per pt at max zoom-out (keeps things "pretty small")
+    private let minMsPerPt = TimelineModel.minMsPerPoint
+    private let maxMsPerPt = TimelineModel.maxMsPerPoint
     private let zoomStep: Double = 1.25
 
     private var activeFilterCount: Int {
@@ -598,13 +598,15 @@ struct TimelineUnifiedView: View {
                 return event
             }
             // If typing in the search field (NSTextView), intercept Cmd+Return to run Search & Jump
-            if let first = NSApp.keyWindow?.firstResponder, first is NSTextView {
+            if let first = window.firstResponder as? NSTextView {
                 // keyCode 36 = Return, 76 = keypad Enter
                 if (event.keyCode == 36 || event.keyCode == 76) && event.modifierFlags.contains(.command) {
                     searchAndJump()
                     return nil
                 }
-                return event
+                // The search field has focus on launch; while it is empty, left/right still navigate.
+                let isArrow = event.keyCode == 123 || event.keyCode == 124
+                guard isArrow, first.string.isEmpty else { return event }
             }
             // Ignore other modified keypresses
             if event.modifierFlags.contains(.command) || event.modifierFlags.contains(.option) || event.modifierFlags.contains(.control) {

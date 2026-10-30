@@ -75,6 +75,10 @@ extension AppDelegate {
             }
         }
         powerNotiTokens.append(token)
+        let screensToken = NotificationCenter.default.addObserver(forName: NSApplication.didChangeScreenParametersNotification, object: nil, queue: .main) { _ in
+            Task { @MainActor in AppState.shared.displaysDidChange() }
+        }
+        powerNotiTokens.append(screensToken)
     }
 
     func updateActivationPolicy() {

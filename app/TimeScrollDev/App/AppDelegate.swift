@@ -121,6 +121,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return .terminateLater
     }
 
+    // Dock click with no visible window: show the existing timeline window instead of letting
+    // SwiftUI create another one next to it.
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        if !flag { showMainWindow() }
+        return false
+    }
+
+    // A menu-bar app keeps running with no windows (e.g. "start minimized" hides them at launch).
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
+        false
+    }
+
     func applicationWillTerminate(_ notification: Notification) {
         SettingsStore.shared.flush()
         // Ensure any open HEVC writers are flushed (best-effort with timeout)

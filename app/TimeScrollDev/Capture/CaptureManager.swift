@@ -8,6 +8,9 @@ final class CaptureManager: NSObject {
     private var configuredProbeIntervals: [Double] = []
     private var outputs: [FrameOutput] = []
     private var capturedDisplays: [SCDisplay] = []
+    /// Every display ScreenCaptureKit offered when capture started, whether or not it is captured.
+    /// Displays are enumerated only on start, so a monitor plugged in later is missed until a restart.
+    private var availableDisplayIDs: Set<CGDirectDisplayID> = []
     private let outputQueue = DispatchQueue(label: "TimeScroll.Capture.Output")
     private let streamDelegate = StreamDelegate()
     private var appSwitchObserver: AppSwitchObserver?
@@ -23,9 +26,11 @@ final class CaptureManager: NSObject {
 
         // Determine which displays to capture based on settings (background-safe via UserDefaults)
         let d = UserDefaults.standard
-        let modeRaw = d.string(forKey: "settings.captureDisplayMode") ?? "first"
-        let captureAll = (modeRaw == "all")
-        let displays: [SCDisplay] = captureAll ? content.displays : (content.displays.first.map { [$0] } ?? [])
+        let mode = SettingsStore.DisplayCaptureMode(rawValue: d.string(forKey: "settings.captureDisplayMode") ?? "") ?? SettingsStore.defaultDisplayCaptureMode
+        // "Main" is the display with the menu bar; SCShareableContent's order is arbitrary.
+        let mainDisplay = content.displays.first { $0.displayID == CGMainDisplayID() } ?? content.displays.first
+        let displays: [SCDisplay] = mode == .first ? (mainDisplay.map { [$0] } ?? []) : content.displays
+        let activeDisplay = mode == .active ? ActiveDisplayTracker(displayIDs: displays.map(\.displayID)) : nil
         guard !displays.isEmpty else { throw NSError(domain: "TS", code: -2) }
         let baseCaptureInterval = {
             let value = d.double(forKey: "settings.captureMinInterval")
@@ -70,6 +75,7 @@ final class CaptureManager: NSObject {
                 onSnapshot: onSnapshot,
                 hevcStore: HEVCVideoStore(namespace: String(display.displayID)),
                 displayBounds: CGDisplayBounds(display.displayID),
+                isActiveDisplay: activeDisplay.map { tracker in { tracker.isActive(display.displayID) } },
                 onProbeIntervalChanged: { [weak self] probeInterval in
                     self?.scheduleProbeIntervalUpdate(probeInterval, for: streamIndex)
                 }
@@ -87,6 +93,7 @@ final class CaptureManager: NSObject {
         configuredProbeIntervals = newProbeIntervals
         outputs = newOutputs
         capturedDisplays = displays
+        availableDisplayIDs = Set(content.displays.map(\.displayID))
         appSwitchObserver?.invalidate()
         // Outputs are only touched on outputQueue, where their sample handlers also run.
         nonisolated(unsafe) let switchOutputs = newOutputs
@@ -112,6 +119,15 @@ final class CaptureManager: NSObject {
         configuredProbeIntervals.removeAll()
         outputs.removeAll()
         capturedDisplays.removeAll()
+        availableDisplayIDs.removeAll()
+    }
+
+    /// Whether ScreenCaptureKit now offers a different set of displays than when capture started.
+    /// Compares ScreenCaptureKit with itself, so mirrored or sleeping displays cannot cause false positives.
+    func displaysChangedSinceStart() async -> Bool {
+        guard !availableDisplayIDs.isEmpty,
+              let content = try? await shareableContent() else { return false }
+        return Set(content.displays.map(\.displayID)) != availableDisplayIDs
     }
 
     /// Best-effort fallback for process termination after normal shutdown was skipped.
@@ -197,5 +213,10 @@ final class StreamDelegate: NSObject, SCStreamDelegate {
         #if DEBUG
         print("SCStream stopped with error:", error)
         #endif
+        // Without this the app keeps showing itself as recording after replayd crashes.
+        let userStopped = (error as? SCStreamError)?.code == .userStopped
+        Task { @MainActor in
+            AppState.shared.screenStreamDidStop(userStopped: userStopped)
+        }
     }
 }

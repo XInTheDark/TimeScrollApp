@@ -4,7 +4,10 @@ import SwiftUI
 
 extension AppDelegate {
     func showMainWindow() {
-        if let window = mainWC?.window {
+        // Reuse the SwiftUI scene's window (id "main") even while hidden, e.g. by "start minimized";
+        // a second timeline window would duplicate the model, live refresh and key handling.
+        let sceneWindow = NSApp.windows.first { $0.identifier?.rawValue == "main" }
+        if let window = sceneWindow ?? mainWC?.window {
             NSApp.setActivationPolicy(.regular)
             window.makeKeyAndOrderFront(nil)
             NSApp.activate(ignoringOtherApps: true)

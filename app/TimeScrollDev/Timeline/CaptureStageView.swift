@@ -5,10 +5,13 @@ struct CaptureStageView: View {
     let globalQuery: String
 
     var body: some View {
-        if model.selected?.captureKind == .audio {
-            AudioStageView(model: model)
-        } else {
-            SnapshotStageView(model: model, globalQuery: globalQuery)
+        ZStack {
+            if model.selected?.captureKind == .audio {
+                AudioStageView(model: model)
+            } else {
+                SnapshotStageView(model: model, globalQuery: globalQuery)
+            }
+            DayCalendarHost(calendar: model.dayCalendar, model: model)
         }
     }
 }

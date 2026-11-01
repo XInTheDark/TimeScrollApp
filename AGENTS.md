@@ -31,6 +31,7 @@ A local-first macOS app that records the screen (optionally microphone and syste
 - Always build after changing code, and fix every error and new warning.
 - Focused tests: `xcodebuild -project app/TimeScroll.xcodeproj -scheme TimeScroll -quiet test -destination 'platform=macOS,arch=arm64' -only-testing:TimeScrollTests/<SuiteName>` (`arch=arm64` avoids the ambiguous-destination warning).
 - Full suite: the same command without `-only-testing` and with `-destination 'platform=macOS'`. It is not fully maintained, so report unrelated failures; do not hide them.
+- CI (`.github/workflows/ci.yml`, GitHub-hosted macOS): unsigned build, unit tests, the opt-in benchmark suites (run locally with `TEST_RUNNER_TIMESCROLL_BENCHMARKS=1`), and a launch check that samples idle CPU and memory (`scripts/ci/launch_smoke.sh`). It cannot grant Screen Recording or Accessibility, so capture and Direct mode on real apps still need a local check.
 - Swift Testing gotcha: compare an `Int64?` in `#expect` against a wrapped literal (`== Int64(1_800_000)`); a bare `30 * 60 * 1000` can fail even when the printed values match.
 - Do NOT launch the Debug build to check things. It shares its bundle id (`com.muzhen.TimeScroll`), data directory, vault and MCP socket with an installed TimeScroll, so a second instance can capture alongside it and write to the same database. Launch it only if the user asks, with any installed copy quit first.
 
@@ -49,16 +50,19 @@ You must look at your UI, not just compile it.
 2. Render the changed view offscreen with synthetic data from a throwaway unit test: host it in an `NSWindow`, call `bitmapImageRepForCachingDisplay`, write a PNG, and read the PNG. Cover light and dark appearance, narrow and wide windows, and empty, loading, long-text and many-item states. A single screenshot is the minimum, not the target.
 3. Inspect each image for clipping, overlap, truncation, misalignment, poor contrast and inconsistent spacing. Fix what you find and render again. Do not claim a UI works from the code alone.
 4. Delete the throwaway test and revert anything you loosened to make it possible (for example a `private(set)`).
+   - Tests are hosted inside the app, so they share its real `UserDefaults`. Never assign an `@AppStorage`/`UserDefaults`-backed property (for example `model.msPerPoint`) in a test or harness: it silently overwrites the user's own settings. If a value must be set, snapshot the preference keys before the run, compare after, and restore any that changed.
 5. A still image cannot show drag, pinch, scroll, hover, focus or animation. List those in your manual checklist.
 
 ## Performance & power
 CPU, power, memory and disk I/O must never regress. This app is always on.
 - Prefer designs that cost nothing when nothing happens: react to events instead of polling, coalesce and debounce, reuse existing signals and queues, load only what is visible, bound every buffer, cache results, do work lazily.
 - Treat these as hot paths and keep them cheap and allocation-light: the capture callback, OCR, database writes, timeline `draw`, mouse-move and hover handlers.
+- Draw and scroll code runs every frame. Its cost must follow what is visible, not the size of the data: compute anything derived from the whole data set (tick plans, label text, measurements) once per layout, cache it, and draw only the visible slice. A per-frame loop over all snapshots with string formatting made scrolling visibly choppy (17.9 ms per frame against 12.3 ms before, on 30k snapshots).
 - If you suspect a change costs more resources, first look for an alternative that lowers the cost, and try it yourself. Do not just ship the expensive version.
 - If cost remains after that, put a clear **⚠️ Performance/power impact** note in the commit message and PR description: what runs, how often, on which thread, and the measured numbers.
 - Any large or logically complex new feature (new background work, a new query over the whole database, anything per-frame or per-snapshot, new indexes or caches) must be benchmarked before and after on the same data, and the numbers reported. Measure with a large synthetic database (100k+ snapshots), `time`/signposts for latency, and Activity Monitor, `top -pid`, or Instruments (Time Profiler, Energy Log) for CPU, wake-ups and memory. No numbers, no merge.
 - Measure first for anything that looks harmless but sits in a loop or on a timer.
+- Keep the numbers in `docs/performance/`: one Markdown file per feature with the machine, macOS and Xcode versions, build flags, dataset and method, plus the raw benchmark output in `docs/performance/data/`.
 
 ## Coding style
 - Swift 6, 2-space indentation. Types use UpperCamelCase; methods and properties lowerCamelCase. One primary type per file. Organize by feature folder.

@@ -358,7 +358,22 @@ struct OnboardingView: View {
             if useDirectMode || hasAccessibility {
                 accessibilityCard
             }
+
+            if !allShownPermissionsGranted {
+                Label("If TimeScroll already shows as enabled in System Settings but is still not granted here, remove it from the list with the minus (−) button, then add it again.",
+                      systemImage: "info.circle")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
         }
+    }
+
+    private var allShownPermissionsGranted: Bool {
+        if captureSelection.requiresScreenRecordingPermission && !hasScreenRecording { return false }
+        if captureSelection.requiresMicrophonePermission && !hasMicrophone { return false }
+        if useDirectMode && !hasAccessibility { return false }
+        return true
     }
 
     private var footer: some View {

@@ -35,6 +35,9 @@ struct TimelineBarContainer: NSViewRepresentable {
     let isCompressed: Bool
     let invertScrollDirection: Bool
     let visibleCaptureKinds: Set<CaptureKind>
+    var showsSessions: Bool = false
+    var sessions: [ActivitySession] = []
+    var sessionsRevision: UInt64 = 0
     let onJump: (Int64, CaptureKind?) -> Void
     let onHover: (Int64) -> Void
     let onHoverExit: () -> Void
@@ -51,6 +54,7 @@ struct TimelineBarContainer: NSViewRepresentable {
         doc.model = model
         doc.isCompressed = isCompressed
         doc.visibleCaptureKinds = visibleCaptureKinds
+        doc.setSessions(sessions, revision: sessionsRevision, shown: showsSessions)
         doc.refreshLayout()
         doc.onJump = onJump
         doc.onHover = onHover
@@ -69,6 +73,7 @@ struct TimelineBarContainer: NSViewRepresentable {
         doc.model = model
         doc.isCompressed = isCompressed
         doc.visibleCaptureKinds = visibleCaptureKinds
+        doc.setSessions(sessions, revision: sessionsRevision, shown: showsSessions)
         doc.refreshLayout()
         let contentWidth = max(scroll.bounds.width, doc.requiredContentWidth())
         doc.setFrameSize(NSSize(width: contentWidth, height: timelineContentHeight(for: scroll.bounds.height)))
@@ -318,6 +323,22 @@ private struct TimelineAxisLayout {
         return positionsAsc[lowerIndex] + (positionsAsc[upperIndex] - positionsAsc[lowerIndex]) * fraction
     }
 
+    /// Capture times in `[fromMs, throughMs]`, ascending.
+    func times(from fromMs: Int64, through throughMs: Int64) -> [Int64] {
+        func firstIndex(where isPast: (Int64) -> Bool) -> Int {
+            var low = 0
+            var high = timesAsc.count
+            while low < high {
+                let mid = (low + high) / 2
+                if isPast(timesAsc[mid]) { high = mid } else { low = mid + 1 }
+            }
+            return low
+        }
+        let lower = firstIndex { $0 >= fromMs }
+        let upper = firstIndex { $0 > throughMs }
+        return lower < upper ? Array(timesAsc[lower..<upper]) : []
+    }
+
     func time(atX x: CGFloat) -> Int64 {
         guard !timesAsc.isEmpty else { return 0 }
         guard positionsAsc.count > 1 else { return timesAsc[0] }
@@ -390,29 +411,40 @@ private struct TimelineAxisLayout {
 }
 
 private struct TimelineTrackLayout {
+    private static let sessionBandY: CGFloat = 32
+    private static let sessionBandGap: CGFloat = 3
+
     let screenRect: NSRect?
     let audioRect: NSRect?
+    /// Nil unless sessions are shown and the rows still fit below the band at their compact sizes.
+    let sessionRect: NSRect?
 
-    init(in bounds: NSRect, visibleCaptureKinds: Set<CaptureKind>) {
-        let topInset: CGFloat = 34
+    init(in bounds: NSRect, visibleCaptureKinds: Set<CaptureKind>, showsSessions: Bool = false) {
         let bottomInset: CGFloat = 12
         let hasScreen = visibleCaptureKinds.contains(.screen)
         let hasAudio = visibleCaptureKinds.contains(.audio)
+        // With the band, rows may shrink a little so it fits at the default timeline height.
+        let bandTopInset = Self.sessionBandY + TimelineSessionBandRenderer.height + Self.sessionBandGap
+        let compactRows = (hasScreen ? 18 : 0) + (hasAudio ? 14 : 0) + (hasScreen && hasAudio ? 5 : 0) as CGFloat
+        let showsBand = showsSessions && bounds.height - bandTopInset - bottomInset >= compactRows
+        let topInset: CGFloat = showsBand ? bandTopInset : 34
+        let screenMin: CGFloat = showsBand ? 18 : 20
+        let audioMin: CGFloat = showsBand ? 14 : 16
         let usableHeight = max(24, bounds.height - topInset - bottomInset)
-        let rowSpacing: CGFloat = hasScreen && hasAudio ? 8 : 0
+        let rowSpacing: CGFloat = hasScreen && hasAudio ? (showsBand ? 5 : 8) : 0
         let screenHeight: CGFloat = {
             guard hasScreen else { return 0 }
             if hasAudio {
-                return min(28, max(20, usableHeight * 0.38))
+                return min(28, max(screenMin, usableHeight * 0.38))
             }
-            return min(30, max(22, usableHeight * 0.58))
+            return min(30, max(screenMin + 2, usableHeight * 0.58))
         }()
         let audioHeight: CGFloat = {
             guard hasAudio else { return 0 }
             if hasScreen {
-                return min(24, max(16, screenHeight * 0.8))
+                return min(24, max(audioMin, screenHeight * 0.8))
             }
-            return min(24, max(16, usableHeight * 0.42))
+            return min(24, max(audioMin, usableHeight * 0.42))
         }()
         let totalHeight =
             (hasScreen ? screenHeight : 0)
@@ -420,6 +452,11 @@ private struct TimelineTrackLayout {
             + rowSpacing
         let availableHeight = max(totalHeight, bounds.height - topInset - bottomInset)
         var currentY = topInset + max(0, (availableHeight - totalHeight) / 2)
+        // The band sits right on top of the first row, wherever the rows end up centered.
+        sessionRect = showsBand
+            ? NSRect(x: bounds.minX, y: currentY - Self.sessionBandGap - TimelineSessionBandRenderer.height,
+                     width: bounds.width, height: TimelineSessionBandRenderer.height)
+            : nil
 
         if hasScreen {
             screenRect = NSRect(x: bounds.minX, y: currentY, width: bounds.width, height: screenHeight)
@@ -490,7 +527,34 @@ final class TimelineBarNSView: NSView {
     private var layout = TimelineAxisLayout.empty
     private weak var layoutModel: TimelineModel?
     private var layoutRevision: UInt64?
+    private struct TickCacheKey: Equatable {
+        let revision: UInt64?
+        let msPerPoint: Double
+        let width: CGFloat
+    }
+    private var tickCache: (key: TickCacheKey, ticks: [TimelineTick])?
+    private struct ScreenBlockCacheKey: Equatable {
+        let revision: UInt64?
+        let segmentCount: Int
+        let msPerPoint: Double
+        let isCompressed: Bool
+    }
+    private var screenBlockCache: (key: ScreenBlockCacheKey, blocks: [TimelineScreenBlock])?
     private var audioSpans: [MergedAudioDisplaySpan] = []
+    private(set) var showsSessions = false
+    private var sessions: [ActivitySession] = []
+    private var sessionsRevision: UInt64 = 0
+    private struct SessionBandCacheKey: Equatable {
+        let revision: UInt64?
+        let sessionsRevision: UInt64
+        let msPerPoint: Double
+        let isCompressed: Bool
+    }
+    private var sessionBandCache: (key: SessionBandCacheKey, bands: [TimelineSessionBand])?
+    /// Label widths do not change with zoom, so replanning while pinching measures only new text.
+    private var sessionLabelWidths: [String: CGFloat] = [:]
+    /// A click on the session band fits the session; the drag that may follow must not scrub.
+    private var isPressingSessionBand = false
     /// Set by pinch-zoom so the container keeps the time under the cursor in place.
     var zoomAnchor: (timeMs: Int64, viewportX: CGFloat)?
     private var scrubCaptureKind: CaptureKind?
@@ -501,6 +565,18 @@ final class TimelineBarNSView: NSView {
 
     func requiredContentWidth() -> CGFloat {
         layout.contentWidth
+    }
+
+    func setSessions(_ sessions: [ActivitySession], revision: UInt64, shown: Bool) {
+        guard revision != sessionsRevision || shown != showsSessions else { return }
+        self.sessions = sessions
+        sessionsRevision = revision
+        showsSessions = shown
+        needsDisplay = true
+    }
+
+    private var trackLayout: TimelineTrackLayout {
+        TimelineTrackLayout(in: bounds, visibleCaptureKinds: visibleCaptureKinds, showsSessions: showsSessions)
     }
 
     func refreshLayout() {
@@ -535,46 +611,51 @@ final class TimelineBarNSView: NSView {
         dirtyRect.fill()
 
         drawTicks(model: m, in: bounds)
+        drawSessionBands(model: m)
         drawSegments(model: m, in: bounds)
         drawSelection(model: m, in: bounds)
         drawPlaybackCursor(model: m, in: bounds)
     }
 
     private func drawSegments(model m: TimelineModel, in rect: NSRect) {
-        let trackLayout = TimelineTrackLayout(in: rect, visibleCaptureKinds: visibleCaptureKinds)
+        let trackLayout = TimelineTrackLayout(in: rect, visibleCaptureKinds: visibleCaptureKinds, showsSessions: showsSessions)
         if let audioRect = trackLayout.audioRect, visibleCaptureKinds.contains(.audio) {
             drawAudioSegments(model: m, in: audioRect)
         }
 
-        for seg in m.segments where seg.captureKind == .screen && visibleCaptureKinds.contains(.screen) {
-            guard let row = trackLayout.screenRect else { continue }
-            let x0 = timelineX(for: seg.startMs)
-            let x1 = timelineX(for: seg.endMs)
-            let w = max(1, x1 - x0)
-            let r = NSRect(x: x0, y: row.minY, width: w, height: row.height)
+        guard visibleCaptureKinds.contains(.screen), let row = trackLayout.screenRect else { return }
+        let blocks = screenBlocks(model: m)
+        var index = TimelineScreenBlockPlanner.firstIndex(endingAtOrAfter: visibleRect.minX - 1, in: blocks)
+        while index < blocks.count, blocks[index].x0 <= visibleRect.maxX + 1 {
+            let block = blocks[index]
+            index += 1
+            let w = block.width
+            let r = NSRect(x: block.x0, y: row.minY, width: w, height: row.height)
             guard needsToDraw(r.insetBy(dx: -1, dy: -1)) else { continue }
-            let segmentPath = NSBezierPath(roundedRect: r, xRadius: 6, yRadius: 6)
-            segmentColor(for: seg).setFill()
+            let radius = min(6, w / 2)
+            let segmentPath = NSBezierPath(roundedRect: r, xRadius: radius, yRadius: radius)
+            AppColor.color(for: block.appBundleId).setFill()
             segmentPath.fill()
-            NSColor.separatorColor.withAlphaComponent(0.16).setStroke()
-            segmentPath.lineWidth = 1
-            segmentPath.stroke()
+            if w >= TimelineScreenBlockPlanner.minWidth {
+                NSColor.separatorColor.withAlphaComponent(0.16).setStroke()
+                segmentPath.lineWidth = 1
+                segmentPath.stroke()
+            }
 
-            guard w >= 18 else {
+            guard w >= 18, let bundleId = block.appBundleId else {
                 continue
             }
 
             // Only redraw when an icon actually arrives; redrawing on a failed lookup would
             // retry it on every pass and spin the CPU.
-            if let bundleId = seg.appBundleId,
-               AppIconCache.shared.needsLoad(for: bundleId) {
+            if AppIconCache.shared.needsLoad(for: bundleId) {
                 AppIconCache.shared.loadIconAsync(for: bundleId) { [weak self] icon in
                     guard icon != nil else { return }
                     self?.needsDisplay = true
                 }
             }
 
-            guard let icon = segmentIcon(for: seg) else {
+            guard let icon = AppIconCache.shared.cachedIcon(for: bundleId) else {
                 continue
             }
 
@@ -602,6 +683,73 @@ final class TimelineBarNSView: NSView {
         }
     }
 
+    /// Planning walks every screen segment, so it is cached until the segments or the layout change.
+    private func screenBlocks(model m: TimelineModel) -> [TimelineScreenBlock] {
+        let key = ScreenBlockCacheKey(revision: layoutRevision, segmentCount: m.segments.count,
+                                      msPerPoint: layout.msPerPoint, isCompressed: layout.isCompressed)
+        if let cached = screenBlockCache, cached.key == key { return cached.blocks }
+        let spans = m.segments.lazy.filter { $0.captureKind == .screen }.map {
+            TimelineScreenBlockPlanner.Span(x0: self.timelineX(for: $0.startMs),
+                                            x1: self.timelineX(for: $0.endMs),
+                                            appBundleId: $0.appBundleId)
+        }
+        let blocks = TimelineScreenBlockPlanner.plan(spans: Array(spans), fillsGaps: layout.isCompressed)
+        screenBlockCache = (key, blocks)
+        return blocks
+    }
+
+    private func drawSessionBands(model m: TimelineModel) {
+        guard let row = trackLayout.sessionRect, !sessions.isEmpty else { return }
+        let selectedIndex = m.selected.flatMap { TimelineSessionBandPlanner.sessionIndex(containing: $0.startedAtMs, in: sessions) }
+        TimelineSessionBandRenderer.draw(bands: sessionBands(), selectedIndex: selectedIndex, in: row,
+                                         visibleRect: visibleRect, needsToDraw: { needsToDraw($0) })
+    }
+
+    /// Planning measures every label, so it is cached until the sessions or the layout change.
+    private func sessionBands() -> [TimelineSessionBand] {
+        let key = SessionBandCacheKey(revision: layoutRevision, sessionsRevision: sessionsRevision,
+                                      msPerPoint: layout.msPerPoint, isCompressed: layout.isCompressed)
+        if let cached = sessionBandCache, cached.key == key { return cached.bands }
+        if sessionLabelWidths.count > 20_000 { sessionLabelWidths.removeAll(keepingCapacity: true) }
+        let bands = TimelineSessionBandPlanner.plan(sessions: sessions, x: { self.timelineX(for: $0) },
+                                                    fillsGaps: layout.isCompressed,
+                                                    labelWidth: { text in
+            if let width = self.sessionLabelWidths[text] { return width }
+            let width = TimelineSessionBandRenderer.labelWidth(text)
+            self.sessionLabelWidths[text] = width
+            return width
+        })
+        sessionBandCache = (key, bands)
+        return bands
+    }
+
+    private func session(at point: NSPoint) -> ActivitySession? {
+        guard let row = trackLayout.sessionRect, row.insetBy(dx: 0, dy: -2).contains(point),
+              let band = TimelineSessionBandPlanner.band(at: point.x, in: sessionBands()) else { return nil }
+        return sessions[band.sessionIndex]
+    }
+
+    /// Selects the session's first snapshot and zooms so the session fills most of the viewport.
+    private func fit(_ session: ActivitySession) {
+        guard let model, let clip = enclosingScrollView?.contentView else { return }
+        let targetWidth = clip.bounds.width * 0.8
+        let msPerPoint = TimelineZoomFit.msPerPoint(timesAsc: layout.times(from: session.startMs, through: session.endMs),
+                                                    targetWidth: targetWidth,
+                                                    isCompressed: layout.isCompressed,
+                                                    compressedGapWidth: TimelineAxisLayout.compressedGapWidth,
+                                                    range: TimelineModel.minMsPerPoint...TimelineModel.maxMsPerPoint)
+        let leadingX = max(0, (clip.bounds.width - targetWidth) / 2)
+        onJump?(session.startMs, .screen)
+        if abs(msPerPoint - model.msPerPoint) > 0.5 {
+            zoomAnchor = (session.startMs, leadingX)
+            model.msPerPoint = msPerPoint
+        } else if let scroll = enclosingScrollView {
+            let targetX = max(0, min(bounds.width - clip.bounds.width, timelineX(for: session.startMs) - leadingX))
+            clip.scroll(to: NSPoint(x: targetX, y: 0))
+            scroll.reflectScrolledClipView(clip)
+        }
+    }
+
     private func drawSelection(model m: TimelineModel, in rect: NSRect) {
         guard let s = m.selected else { return }
         let xSel = timelineX(for: s.startedAtMs)
@@ -622,33 +770,6 @@ final class TimelineBarNSView: NSView {
         NSColor.controlAccentColor.withAlphaComponent(0.9).setStroke()
         path.lineWidth = 2
         path.stroke()
-    }
-
-    private func segmentColor(for segment: TimelineSegment) -> NSColor {
-        switch segment.captureKind {
-        case .screen:
-            return AppColor.color(for: segment.appBundleId)
-        case .audio:
-            switch segment.audioSourceKind {
-            case .microphone:
-                return NSColor.systemPink
-            case .system:
-                return NSColor.systemOrange
-            case nil:
-                return NSColor.systemPurple
-            }
-        }
-    }
-
-    private func segmentIcon(for segment: TimelineSegment) -> NSImage? {
-        if let bundleId = segment.appBundleId {
-            return AppIconCache.shared.cachedIcon(for: bundleId)
-        }
-        if segment.captureKind == .audio {
-            return NSImage(systemSymbolName: segment.audioSourceKind?.systemImage ?? segment.captureKind.systemImage,
-                           accessibilityDescription: segment.audioSourceKind?.displayName ?? segment.captureKind.displayName)
-        }
-        return nil
     }
 
     private func drawAudioSegments(model m: TimelineModel, in rect: NSRect) {
@@ -815,61 +936,46 @@ final class TimelineBarNSView: NSView {
 
     private func drawCompressedTicks(in rect: NSRect) {
         guard !layout.timesAsc.isEmpty else { return }
+        let ticks = compressedTicks()
         let yTop = rect.minY + 8
         let majorTickHeight: CGFloat = 8
         let minorTickHeight: CGFloat = 4
-        let labelGap: CGFloat = 10
-        var lastMajorX = -CGFloat.greatestFiniteMagnitude
-        var lastMinorX = -CGFloat.greatestFiniteMagnitude
-        var lastLabelMaxX = -CGFloat.greatestFiniteMagnitude
-        var lastLabelText = ""
-        // A day change is labelled with the date on the next major tick that has room for it.
-        var nextDayStartMs = Int64.min
-        var dayChangePending = false
+        let visibleMaxX = visibleRect.maxX + 100
 
-        // Walk every point (not just visible ones) so tick placement is stable while scrolling.
-        for (timeMs, xPos) in zip(layout.timesAsc, layout.positionsAsc) {
-            if timeMs >= nextDayStartMs {
-                let date = Date(timeIntervalSince1970: TimeInterval(timeMs) / 1000)
-                let nextDay = Calendar.current.date(byAdding: .day, value: 1, to: Calendar.current.startOfDay(for: date)) ?? date
-                nextDayStartMs = Int64(nextDay.timeIntervalSince1970 * 1000)
-                dayChangePending = true
-            }
-            let isMajor = xPos - lastMajorX >= 60 || (dayChangePending && xPos - lastMajorX >= 22)
-            let needsMinor = xPos - lastMinorX >= 22
-            guard isMajor || needsMinor else { continue }
-            lastMinorX = xPos
-            var label: String?
-            if isMajor {
-                lastMajorX = xPos
-                let date = Date(timeIntervalSince1970: TimeInterval(timeMs) / 1000)
-                let text = dayChangePending ? Self.dayTimeFormatter.string(from: date) : Self.timeFormatter.string(from: date)
-                let width = tickLabelSize(text, emphasized: dayChangePending).width
-                // Space against where the label is really drawn (edge labels are pulled inside the view).
-                let originX = labelOriginX(centeredAt: xPos, width: width)
-                if text != lastLabelText, originX >= lastLabelMaxX + labelGap {
-                    label = text
-                    lastLabelText = text
-                    lastLabelMaxX = originX + width
-                }
-            }
-            let showsDay = label != nil && dayChangePending
-            if showsDay { dayChangePending = false }
-            guard xPos >= visibleRect.minX - 100, xPos <= visibleRect.maxX + 100 else { continue }
-
-            let tickHeight = isMajor ? majorTickHeight : minorTickHeight
-            let color = isMajor ? NSColor.separatorColor : NSColor.separatorColor.withAlphaComponent(0.5)
+        var index = TimelineTickPlanner.firstIndex(atOrAfter: visibleRect.minX - 100, in: ticks)
+        while index < ticks.count, ticks[index].x <= visibleMaxX {
+            let tick = ticks[index]
+            index += 1
+            let color = tick.isMajor ? NSColor.separatorColor : NSColor.separatorColor.withAlphaComponent(0.5)
             color.setStroke()
             let path = NSBezierPath()
-            path.move(to: NSPoint(x: xPos, y: yTop))
-            path.line(to: NSPoint(x: xPos, y: yTop + tickHeight))
+            path.move(to: NSPoint(x: tick.x, y: yTop))
+            path.line(to: NSPoint(x: tick.x, y: yTop + (tick.isMajor ? majorTickHeight : minorTickHeight)))
             path.lineWidth = 1
             path.stroke()
 
-            if let label {
-                drawTickLabel(label, emphasized: showsDay, centeredAt: xPos, y: yTop + majorTickHeight + 2)
+            if let label = tick.label {
+                drawTickLabel(label, emphasized: tick.emphasized, centeredAt: tick.x, y: yTop + majorTickHeight + 2)
             }
         }
+    }
+
+    /// Planning walks every snapshot, so it is cached until the layout or the view width changes.
+    private func compressedTicks() -> [TimelineTick] {
+        let key = TickCacheKey(revision: layoutRevision, msPerPoint: layout.msPerPoint, width: bounds.width)
+        if let cached = tickCache, cached.key == key { return cached.ticks }
+        let ticks = TimelineTickPlanner.plan(
+            timesAsc: layout.timesAsc,
+            positionsAsc: layout.positionsAsc,
+            viewWidth: bounds.width,
+            labelText: { timeMs, includesDay in
+                let date = Date(timeIntervalSince1970: TimeInterval(timeMs) / 1000)
+                return (includesDay ? Self.dayTimeFormatter : Self.timeFormatter).string(from: date)
+            },
+            labelWidth: { [self] text, emphasized in tickLabelSize(text, emphasized: emphasized).width }
+        )
+        tickCache = (key, ticks)
+        return ticks
     }
 
     private static func labelAttributes(emphasized: Bool) -> [NSAttributedString.Key: Any] {
@@ -885,13 +991,8 @@ final class TimelineBarNSView: NSView {
 
     private func drawTickLabel(_ text: String, emphasized: Bool, centeredAt x: CGFloat, y: CGFloat) {
         let width = tickLabelSize(text, emphasized: emphasized).width
-        (text as NSString).draw(at: NSPoint(x: labelOriginX(centeredAt: x, width: width), y: y),
-                                withAttributes: Self.labelAttributes(emphasized: emphasized))
-    }
-
-    /// Keeps labels at the content edges fully visible.
-    private func labelOriginX(centeredAt x: CGFloat, width: CGFloat) -> CGFloat {
-        min(max(bounds.minX + 2, x - width / 2), bounds.maxX - width - 2)
+        let originX = TimelineTickPlanner.labelOriginX(centeredAt: x, width: width, viewWidth: bounds.width)
+        (text as NSString).draw(at: NSPoint(x: originX, y: y), withAttributes: Self.labelAttributes(emphasized: emphasized))
     }
 
     private static func formatter(template: String) -> DateFormatter {
@@ -927,8 +1028,11 @@ final class TimelineBarNSView: NSView {
         guard model != nil else { return }
         let p = convert(event.locationInWindow, from: nil)
         let t = timeAt(x: p.x)
-        let preferredCaptureKind = TimelineTrackLayout(in: bounds, visibleCaptureKinds: visibleCaptureKinds).preferredCaptureKind(at: p)
+        let hoveredSession = showsSessions ? session(at: p) : nil
+        // Over a session the preview is the screen snapshot under the cursor, plus the session's summary.
+        let preferredCaptureKind = hoveredSession == nil ? trackLayout.preferredCaptureKind(at: p) : .screen
         onHover?(t)
+        setHoverSession(hoveredSession)
 
         // Throttle popover repositioning
         let now = Date()
@@ -995,13 +1099,19 @@ final class TimelineBarNSView: NSView {
         window?.makeFirstResponder(self)
         cancelTimelineHoverPreview()
         let point = convert(event.locationInWindow, from: nil)
-        scrubCaptureKind = TimelineTrackLayout(in: bounds, visibleCaptureKinds: visibleCaptureKinds).preferredCaptureKind(at: point)
+        isPressingSessionBand = false
+        if showsSessions, let session = session(at: point) {
+            isPressingSessionBand = true
+            fit(session)
+            return
+        }
+        scrubCaptureKind = trackLayout.preferredCaptureKind(at: point)
         scrubTimeMs = nil
         scrub(toX: point.x)
     }
 
     override func mouseDragged(with event: NSEvent) {
-        guard model != nil else { return }
+        guard model != nil, !isPressingSessionBand else { return }
         _ = autoscroll(with: event)
         scrub(toX: convert(event.locationInWindow, from: nil).x)
     }
@@ -1017,7 +1127,7 @@ final class TimelineBarNSView: NSView {
         guard model != nil else { return }
         let p = convert(event.locationInWindow, from: nil)
         let t = timeAt(x: p.x)
-        let preferredCaptureKind = TimelineTrackLayout(in: bounds, visibleCaptureKinds: visibleCaptureKinds).preferredCaptureKind(at: p)
+        let preferredCaptureKind = trackLayout.preferredCaptureKind(at: p)
         let menu = NSMenu()
         let jump = NSMenuItem(title: "Jump to here", action: #selector(ctxJump(_:)), keyEquivalent: "")
         jump.representedObject = TimelineJumpTarget(timeMs: t, preferredCaptureKind: preferredCaptureKind)
@@ -1049,6 +1159,8 @@ final class TimelineBarNSView: NSView {
     }
 
     func dismissHoverPopover() {
+        // Called for every scroll tick; do nothing unless a preview is open or pending.
+        guard popover.isShown || lastPreviewIndex != nil || pendingPreviewIndex != nil else { return }
         popover.performClose(nil)
         lastPreviewIndex = nil
         pendingPreviewIndex = nil
@@ -1062,18 +1174,40 @@ final class TimelineBarNSView: NSView {
         if popover.contentViewController == nil {
             // Built once; the view model drives every later update.
             let host = NSHostingView(rootView: HoverPreviewView(viewModel: previewViewModel))
-            host.frame = NSRect(x: 0, y: 0, width: 260, height: 220)
+            host.frame = NSRect(origin: .zero, size: hoverPopoverSize)
             let controller = NSViewController()
             controller.view = host
             popover.contentViewController = controller
             popover.behavior = .transient
             popover.animates = false
         }
+        popover.contentSize = hoverPopoverSize
         // This view is flipped, so .minY is the top edge: the preview opens above the timeline.
         popover.show(relativeTo: popoverAnchor(at: point), of: self, preferredEdge: .minY)
         // If AppKit still has to place it over the timeline, let the mouse pass through
         // so the popover does not trigger mouseExited and close itself.
         popover.contentViewController?.view.window?.ignoresMouseEvents = true
+    }
+
+    private var hoverPopoverSize: NSSize {
+        NSSize(width: SessionHoverContent.width, height: HoverPreviewViewModel.baseHeight + (previewViewModel.sessionContent?.height ?? 0))
+    }
+
+    /// Adds the session summary under the thumbnail while the cursor is on a session band.
+    private func setHoverSession(_ session: ActivitySession?) {
+        guard previewViewModel.session != session else { return }
+        let icons = Dictionary(uniqueKeysWithValues: (session?.apps ?? []).compactMap { app in
+            app.bundleId.flatMap { id in AppIconCache.shared.cachedIcon(for: id).map { (id, $0) } }
+        })
+        previewViewModel.setSession(session, icons: icons)
+        if popover.isShown { popover.contentSize = hoverPopoverSize }
+        guard let session else { return }
+        for bundleId in session.apps.compactMap(\.bundleId) where AppIconCache.shared.needsLoad(for: bundleId) {
+            AppIconCache.shared.loadIconAsync(for: bundleId) { [weak self] icon in
+                guard let self, let icon, self.previewViewModel.session == session else { return }
+                self.previewViewModel.sessionIcons[bundleId] = icon
+            }
+        }
     }
 
     private func popoverAnchor(at point: NSPoint) -> NSRect {
@@ -1187,6 +1321,19 @@ private class HoverPreviewViewModel: ObservableObject {
     @Published var appName: String = ""
     @Published var date: Date = Date()
     @Published var isLoading: Bool = true
+    @Published var session: ActivitySession? = nil
+    @Published var sessionContent: SessionHoverContent? = nil
+    @Published var sessionIcons: [String: NSImage] = [:]
+
+    static let baseHeight: CGFloat = 220
+
+    func setSession(_ session: ActivitySession?, icons: [String: NSImage]) {
+        withAnimation(.easeInOut(duration: 0.15)) {
+            self.session = session
+            self.sessionContent = session.map(SessionHoverContent.init(session:))
+            self.sessionIcons = icons
+        }
+    }
 
     func update(thumbnail: NSImage?, appIcon: NSImage?, appName: String, date: Date, isLoading: Bool) {
         withAnimation(.easeInOut(duration: 0.15)) {
@@ -1243,9 +1390,14 @@ private struct HoverPreviewView: View {
                 Spacer(minLength: 4)
                 Text(Self.df.string(from: viewModel.date)).font(.caption2).foregroundColor(.secondary)
             }
+            if let content = viewModel.sessionContent {
+                Divider().padding(.top, 2)
+                SessionHoverSection(content: content, icons: viewModel.sessionIcons)
+            }
         }
         .padding(8)
-        .frame(width: 260)
+        .frame(width: SessionHoverContent.width,
+               height: HoverPreviewViewModel.baseHeight + (viewModel.sessionContent?.height ?? 0))
     }
 
     private static let df: DateFormatter = {

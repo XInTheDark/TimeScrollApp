@@ -27,6 +27,14 @@ final class SettingsStore: ObservableObject {
     nonisolated static let defaultWhisperModelID: String = "base"
     nonisolated static let defaultAudioSegmentDurationSeconds: Int = 15
 
+    /// Saved "Duplicate tolerance", or the default when none is saved. 0 is a valid saved value.
+    /// Read here and by capture so the settings pane and capture always agree.
+    nonisolated static func storedDedupThreshold(in defaults: UserDefaults) -> Int {
+        defaults.object(forKey: "settings.dedupHammingThreshold") != nil
+            ? defaults.integer(forKey: "settings.dedupHammingThreshold")
+            : defaultDedupHammingThreshold
+    }
+
     private init() {
         load()
     }
@@ -74,6 +82,8 @@ final class SettingsStore: ObservableObject {
     @Published var fuzziness: Fuzziness = .low { didSet { if !isLoading { save() } } }
     @Published var retentionDays: Int = SettingsStore.defaultRetentionDays { didSet { if !isLoading { save() } } }
     @Published var showHighlights: Bool = true { didSet { if !isLoading { save() } } }
+    @Published var searchGroupsSessions: Bool = true { didSet { if !isLoading { save() } } }
+    @Published var sessionSensitivity: SessionSensitivity = .balanced { didSet { if !isLoading { save() } } }
     @Published var recentOCRBoxesOnly: Bool = false { didSet { if !isLoading { save() } } }
     @Published var debugMode: Bool = false { didSet { if !isLoading { save() } } }
     @Published var refreshOnNewSnapshot: Bool = true { didSet { if !isLoading { save() } } }
@@ -174,6 +184,10 @@ final class SettingsStore: ObservableObject {
         if defaults.object(forKey: "settings.showHighlights") != nil {
             showHighlights = defaults.bool(forKey: "settings.showHighlights")
         }
+        if defaults.object(forKey: "settings.searchGroupSessions") != nil {
+            searchGroupsSessions = defaults.bool(forKey: "settings.searchGroupSessions")
+        }
+        sessionSensitivity = SessionSensitivity.stored(in: defaults)
         if defaults.object(forKey: "settings.recentOCRBoxesOnly") != nil {
             recentOCRBoxesOnly = defaults.bool(forKey: "settings.recentOCRBoxesOnly")
         }
@@ -200,7 +214,7 @@ final class SettingsStore: ObservableObject {
         let mle = defaults.integer(forKey: "settings.maxLongEdge"); if mle >= 0 { maxLongEdge = mle }
         let q = defaults.double(forKey: "settings.lossyQuality"); if q > 0 { lossyQuality = q }
         if defaults.object(forKey: "settings.dedupEnabled") != nil { dedupEnabled = defaults.bool(forKey: "settings.dedupEnabled") }
-        let thr = defaults.integer(forKey: "settings.dedupHammingThreshold"); if thr > 0 { dedupHammingThreshold = thr }
+        dedupHammingThreshold = Self.storedDedupThreshold(in: defaults)
         if defaults.object(forKey: "settings.adaptiveSampling") != nil { adaptiveSampling = defaults.bool(forKey: "settings.adaptiveSampling") }
         let maxInt = defaults.double(forKey: "settings.adaptiveMaxInterval"); if maxInt > 0 { adaptiveMaxInterval = maxInt }
         if defaults.object(forKey: "settings.autoCompactEnabled") != nil { autoCompactEnabled = defaults.bool(forKey: "settings.autoCompactEnabled") }
@@ -359,6 +373,8 @@ final class SettingsStore: ObservableObject {
         StoragePaths.setShared(fuzziness.rawValue, forKey: "settings.fuzziness")
         defaults.set(retentionDays, forKey: "settings.retentionDays")
         defaults.set(showHighlights, forKey: "settings.showHighlights")
+        defaults.set(searchGroupsSessions, forKey: "settings.searchGroupSessions")
+        defaults.set(sessionSensitivity.rawValue, forKey: SessionSensitivity.defaultsKey)
         defaults.set(recentOCRBoxesOnly, forKey: "settings.recentOCRBoxesOnly")
         defaults.set(debugMode, forKey: "settings.debugMode")
         defaults.set(refreshOnNewSnapshot, forKey: "settings.refreshOnNewSnapshot")

@@ -15,6 +15,7 @@ extension DB {
             _ = sqlite3_exec(db, "DELETE FROM ts_text_chunk;", nil, nil, nil)
             _ = sqlite3_exec(db, "DELETE FROM ts_text_store;", nil, nil, nil)
             _ = sqlite3_exec(db, "UPDATE ts_snapshot SET text_ref_id=NULL, text_store_id=NULL;", nil, nil, nil)
+            _ = sqlite3_exec(db, "DELETE FROM ts_session_sketch; \(Self.allSessionDaysDeletionSQL)", nil, nil, nil)
         }
     }
 
@@ -47,6 +48,9 @@ extension DB {
             DELETE FROM ts_embedding WHERE snapshot_id IN (SELECT id FROM ts_snapshot WHERE started_at_ms < \(cutoff));
             DELETE FROM ts_snapshot WHERE started_at_ms < \(cutoff);
             DELETE FROM ts_text_store WHERE id NOT IN (SELECT DISTINCT text_store_id FROM ts_snapshot WHERE text_store_id IS NOT NULL);
+            \(Self.orphanedSessionSketchDeletionSQL)
+            DELETE FROM ts_session_day WHERE window_start_ms < \(cutoff);
+            DELETE FROM ts_activity_session WHERE day_start_ms NOT IN (SELECT day_start_ms FROM ts_session_day);
             COMMIT;
             """
             let before = sqlite3_total_changes(db)
@@ -84,36 +88,68 @@ extension DB {
         return referenced
     }
 
+    /// Deletes one snapshot row, then removes media no remaining row uses once the deletion is
+    /// committed. A shared HEVC segment stays while other snapshots of its minute remain.
     func deleteSnapshot(id: Int64) throws {
-        try onQueueSync {
+        let files = try onQueueSync { () -> [String] in
             try openIfNeeded()
-            guard let db = db else { return }
+            guard let db = db else { return [] }
 
-            // Lookup file path (and optional thumb path) before deleting rows
-            var pStmt: OpaquePointer?
-            defer { sqlite3_finalize(pStmt) }
-            var pathToDelete: String? = nil
-            var thumbToDelete: String? = nil
-            if sqlite3_prepare_v2(db, "SELECT path, thumb_path FROM ts_snapshot WHERE id=? LIMIT 1;", -1, &pStmt, nil) == SQLITE_OK {
-                sqlite3_bind_int64(pStmt, 1, id)
-                if sqlite3_step(pStmt) == SQLITE_ROW {
-                    if let c = sqlite3_column_text(pStmt, 0) { pathToDelete = String(cString: c) }
-                    if let c2 = sqlite3_column_text(pStmt, 1) { thumbToDelete = String(cString: c2) }
+            var path: String?
+            var thumbPath: String?
+            var startedAtMs: Int64 = 0
+            var stmt: OpaquePointer?
+            defer { sqlite3_finalize(stmt) }
+            if sqlite3_prepare_v2(db, "SELECT path, thumb_path, started_at_ms FROM ts_snapshot WHERE id=? LIMIT 1;", -1, &stmt, nil) == SQLITE_OK {
+                sqlite3_bind_int64(stmt, 1, id)
+                if sqlite3_step(stmt) == SQLITE_ROW {
+                    if let c = sqlite3_column_text(stmt, 0) { path = String(cString: c) }
+                    if let c = sqlite3_column_text(stmt, 1) { thumbPath = String(cString: c) }
+                    startedAtMs = sqlite3_column_int64(stmt, 2)
                 }
             }
 
-            // Best-effort file deletions
-            let fm = FileManager.default
-            if let p = pathToDelete { _ = try? fm.removeItem(atPath: p) }
-            if let t = thumbToDelete { _ = try? fm.removeItem(atPath: t) }
+            let sql = """
+            BEGIN IMMEDIATE;
+            \(Self.textIndexDeletionSQL(snapshotIdsSQL: "\(id)", legacyTablesExist: Self.legacyTextTablesExist(db: db)))
+            \(Self.ocrLayoutDeletionSQL(snapshotIdsSQL: "\(id)"))
+            DELETE FROM ts_embedding WHERE snapshot_id=\(id);
+            DELETE FROM ts_snapshot WHERE id=\(id);
+            DELETE FROM ts_text_store WHERE id NOT IN (SELECT DISTINCT text_store_id FROM ts_snapshot WHERE text_store_id IS NOT NULL);
+            \(Self.orphanedSessionSketchDeletionSQL)
+            \(Self.sessionDayInvalidationSQL(windowContaining: "\(startedAtMs)"))
+            COMMIT;
+            """
+            guard sqlite3_exec(db, sql, nil, nil, nil) == SQLITE_OK else {
+                let message = String(cString: sqlite3_errmsg(db))
+                _ = sqlite3_exec(db, "ROLLBACK;", nil, nil, nil)
+                throw NSError(domain: "TS.DB", code: 81, userInfo: [NSLocalizedDescriptionKey: message])
+            }
+            let nowMs = Int64(Date().timeIntervalSince1970 * 1000)
+            return DeletedSnapshotMedia.filesToRemove(path: path, thumbPath: thumbPath, startedAtMs: startedAtMs, nowMs: nowMs) { file in
+                // Unknown (query failed) counts as referenced, so the file is kept.
+                isMediaReferenced(DeletedSnapshotMedia.equivalentPaths(of: file), db: db) ?? true
+            }
+        }
+        let fm = FileManager.default
+        for file in files { _ = try? fm.removeItem(atPath: file) }
+        purgeOrphanedAudioAssets()
+    }
 
-            // Delete associated text and boxes, then primary row
-            _ = sqlite3_exec(db, Self.textIndexDeletionSQL(snapshotIdsSQL: "\(id)", legacyTablesExist: Self.legacyTextTablesExist(db: db)), nil, nil, nil)
-            _ = sqlite3_exec(db, Self.ocrLayoutDeletionSQL(snapshotIdsSQL: "\(id)"), nil, nil, nil)
-            _ = sqlite3_exec(db, "DELETE FROM ts_embedding WHERE snapshot_id=\(id);", nil, nil, nil)
-            _ = sqlite3_exec(db, "DELETE FROM ts_snapshot WHERE id=\(id);", nil, nil, nil)
-            _ = sqlite3_exec(db, "DELETE FROM ts_text_store WHERE id NOT IN (SELECT DISTINCT text_store_id FROM ts_snapshot WHERE text_store_id IS NOT NULL);", nil, nil, nil)
-            purgeOrphanedAudioAssets()
+    /// Whether any remaining row uses one of `paths` as its media or thumbnail; nil if the query fails.
+    private func isMediaReferenced(_ paths: [String], db: OpaquePointer) -> Bool? {
+        let placeholders = paths.map { _ in "?" }.joined(separator: ",")
+        let sql = "SELECT 1 FROM ts_snapshot WHERE path IN (\(placeholders)) OR thumb_path IN (\(placeholders)) LIMIT 1;"
+        var stmt: OpaquePointer?
+        defer { sqlite3_finalize(stmt) }
+        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return nil }
+        for (offset, path) in (paths + paths).enumerated() {
+            sqlite3_bind_text(stmt, Int32(offset + 1), path, -1, SQLITE_TRANSIENT)
+        }
+        switch sqlite3_step(stmt) {
+        case SQLITE_ROW: return true
+        case SQLITE_DONE: return false
+        default: return nil
         }
     }
 }

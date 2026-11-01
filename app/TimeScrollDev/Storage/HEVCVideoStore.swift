@@ -82,6 +82,15 @@ final class HEVCVideoStore {
         }
     }
 
+    /// Closes (and, with the vault on, seals) the open segment once its minute has passed,
+    /// without encoding a frame. Same cutoff as `_append`.
+    func closeIfExpired(nowMs: Int64) {
+        queue.async {
+            guard let c = self.current, nowMs >= c.startMs + self.segmentMs - 1 else { return }
+            try? self.closeCurrent()
+        }
+    }
+
     func urlFor(timestampMs: Int64, encrypt: Bool) -> URL {
         let start = alignedStart(timestampMs)
         return encrypt ? finalEncURL(forStart: start) : plainURL(forStart: start)

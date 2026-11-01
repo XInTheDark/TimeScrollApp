@@ -11,8 +11,6 @@ import AppKit
 @main
 struct TimeScrollApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
-    @AppStorage("ui.timeline.compressed") private var compressedTimeline: Bool = true
-    @AppStorage("ui.timeline.invertScrollDirection") private var invertTimelineScrollDirection: Bool = false
 
     init() {
         UserDefaults.standard.register(defaults: [
@@ -20,6 +18,7 @@ struct TimeScrollApp: App {
             "ui.timeline.invertScrollDirection": false,
             "ui.timeline.showScreenStrips": true,
             "ui.timeline.showAudioStrips": true,
+            "ui.timeline.showSessions": true,
             "ui.timeline.height": 116.0
         ])
         // Ensure App Group defaults are ready before any StoragePaths usage
@@ -57,12 +56,6 @@ struct TimeScrollApp: App {
         Window("TimeScroll", id: "main") {
             ContentView()
                 .environmentObject(SettingsStore.shared)
-        }
-        .commands {
-            CommandGroup(after: .toolbar) {
-                Toggle("Compressed Timeline", isOn: $compressedTimeline)
-                Toggle("Invert Timeline Scroll", isOn: $invertTimelineScrollDirection)
-            }
         }
         Settings {
             PreferencesView()

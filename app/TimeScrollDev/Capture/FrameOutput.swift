@@ -39,10 +39,14 @@ final class FrameOutput: NSObject, SCStreamOutput {
     let isActiveDisplay: (() -> Bool)?
     var wasActiveDisplay = false
     var stableCount: Int = 0
+    /// Set when a snapshot is appended to the HEVC segment; the next skipped frame flushes it.
+    var needsHEVCFlushFrame = false
     /// Last snapshot whose Accessibility text was indexed in full, with its normalized lines.
     var lastTextAnchor: (id: Int64, fingerprint: TextFingerprint, lines: Set<String>)?
     /// Global bounds of the captured display, used to place Accessibility text boxes.
     let displayBounds: CGRect
+    /// Accessibility text per window on this display, reused while a window is unchanged on screen.
+    let axTextCache = AXWindowTextCache()
 
     // Thermal governance
     var lastThermalState: ProcessInfo.ThermalState = .nominal
@@ -145,7 +149,7 @@ final class FrameOutput: NSObject, SCStreamOutput {
         let maxEdge = (defaults.object(forKey: "settings.maxLongEdge") != nil) ? defaults.integer(forKey: "settings.maxLongEdge") : SettingsStore.defaultMaxLongEdge
         let quality = (defaults.object(forKey: "settings.lossyQuality") != nil) ? defaults.double(forKey: "settings.lossyQuality") : SettingsStore.defaultLossyQuality
         let dedupEnabled = (defaults.object(forKey: "settings.dedupEnabled") != nil) ? defaults.bool(forKey: "settings.dedupEnabled") : true
-        let thr = (defaults.object(forKey: "settings.dedupHammingThreshold") != nil) ? defaults.integer(forKey: "settings.dedupHammingThreshold") : SettingsStore.defaultDedupHammingThreshold
+        let thr = SettingsStore.storedDedupThreshold(in: defaults)
         let adaptive = (defaults.object(forKey: "settings.adaptiveSampling") != nil) ? defaults.bool(forKey: "settings.adaptiveSampling") : SettingsStore.defaultAdaptiveSampling
         let vaultOn = (defaults.object(forKey: "settings.vaultEnabled") != nil) ? defaults.bool(forKey: "settings.vaultEnabled") : false
         let allowWhileLocked = (defaults.object(forKey: "settings.captureWhileLocked") != nil) ? defaults.bool(forKey: "settings.captureWhileLocked") : true
@@ -164,14 +168,9 @@ final class FrameOutput: NSObject, SCStreamOutput {
         if dedupEnabled {
             hashVal = hasher.hash64(pixelBuffer: pixelBuffer)
             grid = LumaGridSignature(pixelBuffer: pixelBuffer)
-            if isNearDuplicate(grid: grid, hash: hashVal, frontContext: frontContext, sensitivity: thr) {
-                // For HEVC we still append frames to the segment to keep the video continuous,
-                // but we skip DB/metadata work for unchanged frames.
+            if skipsAsDuplicate(grid: grid, hash: hashVal, frontContext: frontContext, sensitivity: thr) {
                 if fmt == .hevc {
-                    let tsMs = Int64(Date().timeIntervalSince1970 * 1000)
-                    if !vaultOn || (vaultOn && (unlockedFlag ? true : allowWhileLocked)) {
-                        self.hevcStore.append(pixelBuffer: pixelBuffer, timestampMs: tsMs, encrypt: vaultOn)
-                    }
+                    handleSkippedHEVCFrame(pixelBuffer, encrypt: vaultOn)
                 }
                 if adaptive {
                     stableCount += 1
@@ -180,6 +179,10 @@ final class FrameOutput: NSObject, SCStreamOutput {
                 }
                 return
             }
+        }
+        if grid == nil, processing == SettingsStore.TextProcessingMode.accessibility.rawValue {
+            // Direct mode compares grids to reuse the text of unchanged windows, even without dedup.
+            grid = LumaGridSignature(pixelBuffer: pixelBuffer)
         }
 
         // Retain the pixel buffer to safely use it across queues.
@@ -210,6 +213,7 @@ final class FrameOutput: NSObject, SCStreamOutput {
                     vaultOn: vaultOn,
                     allowWhileLocked: allowWhileLocked,
                     hash64: hashVal,
+                    grid: grid,
                     appBundleId: bid,
                     appName: name
                 )
@@ -262,13 +266,22 @@ final class FrameOutput: NSObject, SCStreamOutput {
                     self.lastPersistedPTS = pts
                     self.reportProbeIntervalIfNeeded()
 
-                    self.processText(snapshotId: rowId, retainedPixelBuffer: retainedPixelBuffer)
+                    self.processText(snapshotId: rowId, retainedPixelBuffer: retainedPixelBuffer, grid: grid)
                 }
             } catch {
                 retainedPixelBuffer.release()
                 // swallow for now
             }
         }
+    }
+
+    /// True if the frame should be skipped as a near-duplicate of the last capture. A skipped frame
+    /// with a new frontmost app/window looks the same as the capture, so that context becomes the
+    /// baseline; otherwise every later frame would compare with zero tolerance until the next capture.
+    func skipsAsDuplicate(grid: LumaGridSignature?, hash: UInt64, frontContext: String?, sensitivity: Int) -> Bool {
+        guard isNearDuplicate(grid: grid, hash: hash, frontContext: frontContext, sensitivity: sensitivity) else { return false }
+        lastFrontContext = frontContext
+        return true
     }
 
     /// A frame is a near-duplicate if few grid cells changed. A frontmost app/window change drops

@@ -5,12 +5,14 @@ struct TimelineUnifiedView: View {
     @ObservedObject var appState = AppState.shared
     @StateObject var model = TimelineModel()
     @StateObject private var liveRefresh = TimelineLiveRefreshScheduler()
+    @StateObject private var sessionLoader = TimelineSessionLoader()
     @EnvironmentObject var settings: SettingsStore
     @ObservedObject var vault = VaultManager.shared
     @AppStorage("ui.timeline.compressed") private var compressedTimeline: Bool = true
     @AppStorage("ui.timeline.invertScrollDirection") private var invertTimelineScrollDirection: Bool = false
     @AppStorage("ui.timeline.showScreenStrips") private var showScreenTimelineStrips: Bool = true
     @AppStorage("ui.timeline.showAudioStrips") private var showAudioTimelineStrips: Bool = true
+    @AppStorage("ui.timeline.showSessions") private var showTimelineSessions: Bool = true
     @AppStorage("ui.timeline.height") private var storedTimelineHeight: Double = 116
 
     @State private var query: String = ""
@@ -20,7 +22,6 @@ struct TimelineUnifiedView: View {
     @State private var keyMonitor: Any? = nil
     @State private var hostWindow = HostingWindowReference()
     @State private var showingResults: Bool = false
-    @State private var preserveOpenedResultContextOnRefresh: Bool = false
     @State private var showCaptureModePopover: Bool = false
     @State private var timelineResizeStartHeight: Double?
 
@@ -103,7 +104,6 @@ struct TimelineUnifiedView: View {
             let trimmed = newVal.trimmingCharacters(in: .whitespacesAndNewlines)
             if trimmed.isEmpty && showingResults {
                 // Clear applied query on the model and reload latest
-                preserveOpenedResultContextOnRefresh = false
                 model.query = ""
                 model.load()
                 showingResults = false
@@ -122,15 +122,23 @@ struct TimelineUnifiedView: View {
         .onChange(of: settings.audioFeatureEnabled) { _, _ in
             ensureSelectionMatchesVisibleTimelineTracks()
         }
+        .onChange(of: model.dataRevision, initial: true) { _, _ in refreshSessions() }
+        .onChange(of: showTimelineSessions) { _, _ in refreshSessions() }
+        .onChange(of: settings.sessionSensitivity) { _, _ in refreshSessions() }
+        .onChange(of: vault.isUnlocked) { _, _ in refreshSessions() }
         .frame(minWidth: 1000, minHeight: 700)
+    }
+
+    /// Sessions for the loaded range; the provider serves unchanged days from its cache.
+    private func refreshSessions() {
+        sessionLoader.refresh(fromMs: model.minTimeMs, toMs: model.maxTimeMs + 1,
+                              sensitivity: settings.sessionSensitivity, enabled: showTimelineSessions)
     }
 
     @MainActor
     private func reloadTimelineKeepingSelection() {
-        if preserveOpenedResultContextOnRefresh,
-           !showingResults,
-           let selected = model.selected {
-            model.openSnapshot(id: selected.id, anchorStartedAtMs: selected.startedAtMs)
+        if model.isAnchoredWindow, !showingResults {
+            model.refreshAnchoredWindow()
             return
         }
 
@@ -277,7 +285,7 @@ struct TimelineUnifiedView: View {
 
                 Divider().frame(height: 22)
 
-                TimelineLiveToggle(isOn: $model.followLatest)
+                TimelineViewOptionsMenu(followLatest: $model.followLatest)
             }
             .fixedSize(horizontal: true, vertical: false)
 
@@ -440,12 +448,10 @@ struct TimelineUnifiedView: View {
                                       captureKinds: (model.selectedCaptureKinds.isEmpty ? nil : Array(model.selectedCaptureKinds).sorted { $0.rawValue < $1.rawValue }),
                                       audioSourceKinds: (model.selectedAudioSourceKinds.isEmpty ? nil : Array(model.selectedAudioSourceKinds).sorted { $0.rawValue < $1.rawValue }),
                                       onOpen: { row, _ in
-                                          preserveOpenedResultContextOnRefresh = true
                                           showingResults = false
                                           model.openSnapshot(id: row.id, anchorStartedAtMs: row.startedAtMs)
                                       },
                                       onClose: {
-                                          preserveOpenedResultContextOnRefresh = false
                                           model.load()
                                           showingResults = false
                                       })
@@ -499,6 +505,9 @@ struct TimelineUnifiedView: View {
                                      isCompressed: compressedTimeline,
                                      invertScrollDirection: invertTimelineScrollDirection,
                                      visibleCaptureKinds: visibleTimelineCaptureKinds,
+                                     showsSessions: showTimelineSessions,
+                                     sessions: sessionLoader.sessions,
+                                     sessionsRevision: sessionLoader.revision,
                                      onJump: { time, preferredCaptureKind in
                                          model.jump(to: time,
                                                     preferredCaptureKind: preferredCaptureKind,
@@ -576,14 +585,12 @@ struct TimelineUnifiedView: View {
     }
 
     private func showResults() {
-        preserveOpenedResultContextOnRefresh = false
         applyFilters()
         showingResults = true
         showFilters = false
     }
 
     private func searchAndJump() {
-        preserveOpenedResultContextOnRefresh = false
         applyFilters()
         model.load()
         showingResults = false
@@ -643,7 +650,7 @@ struct TimelineUnifiedView: View {
     }
 
     private func jumpToEnd() {
-        preserveOpenedResultContextOnRefresh = false
+        if model.isAnchoredWindow { model.load() }
         if !model.metas.isEmpty { model.selectedIndex = 0 }
         model.jumpToEndToken &+= 1
     }
@@ -726,27 +733,6 @@ private struct TimelineResizeHandle: View {
                 hovering = false
             }
         }
-    }
-}
-
-private struct TimelineLiveToggle: View {
-    @Binding var isOn: Bool
-
-    var body: some View {
-        HStack(spacing: 8) {
-            Image(systemName: "dot.radiowaves.left.and.right")
-                .font(.subheadline.weight(.semibold))
-                .foregroundStyle(isOn ? Color.accentColor : Color.secondary)
-                .accessibilityHidden(true)
-
-            Toggle("", isOn: $isOn)
-                .labelsHidden()
-                .toggleStyle(.switch)
-        }
-        .fixedSize(horizontal: true, vertical: false)
-        .help("Follow newest snapshots")
-        .accessibilityElement(children: .combine)
-        .accessibilityLabel("Live follow")
     }
 }
 

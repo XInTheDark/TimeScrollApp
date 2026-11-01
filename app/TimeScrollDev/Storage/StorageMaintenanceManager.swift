@@ -55,6 +55,7 @@ final class StorageMaintenanceManager {
         if let removed = try? DB.shared.purgeOlderThan(days: retentionDays), removed > 0 {
             afterLargeDelete = true
         }
+        OrphanSegmentSweeper.sweepIfDue()
 
         if defaults.object(forKey: "settings.autoCompactEnabled") != nil
             ? defaults.bool(forKey: "settings.autoCompactEnabled")
@@ -75,6 +76,7 @@ final class StorageMaintenanceManager {
 
         DB.shared.pruneOldOCRBoxesIfConfigured()
         TextIndexBackfill.shared.resumeIfNeeded()
+        SessionSketchBackfill.shared.resumeIfNeeded()
         DB.shared.runAutomaticMaintenance(force: forceMaintenance, afterLargeDelete: afterLargeDelete)
     }
 }

@@ -137,6 +137,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         SettingsStore.shared.flush()
         // Ensure any open HEVC writers are flushed (best-effort with timeout)
         AppState.shared.captureManager.flushWriters()
+        // Let Chromium and Electron apps drop the accessibility trees Direct mode asked for.
+        AXManualAccessibilityLeases.shared.releaseAll()
         StorageMaintenanceManager.shared.stop()
         MCPBridgeServer.shared.stop()
         UsageTracker.shared.appWillTerminate()

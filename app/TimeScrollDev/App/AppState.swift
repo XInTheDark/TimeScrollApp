@@ -141,6 +141,7 @@ final class AppState: ObservableObject {
         captureTransitionInProgress = true
         isCaptureStarting = false
         await captureManager.stop()
+        AXManualAccessibilityLeases.shared.releaseAllInBackground()
         await audioCaptureController.stop(drainProcessing: false)
         isCapturing = false
         audioPausedForVault = false

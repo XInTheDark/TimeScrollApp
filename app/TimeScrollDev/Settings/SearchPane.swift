@@ -7,7 +7,8 @@ struct SearchPane: View {
     @ObservedObject private var rebuildController = EmbeddingRebuildController.shared
     @State private var isInstallingModel = false
     @State private var installError: String?
-    @State private var availableOllamaModels: [String] = []
+    @State private var listedOllamaModels: [String] = []
+    @State private var ollamaUnreachable = false
     @State private var loadingModels = false
     @State private var modelInstalled = false
     @State private var checkingModelInstall = false
@@ -42,6 +43,8 @@ struct SearchPane: View {
                     Toggle("Use intelligent OCR matching", isOn: $settings.intelligentAccuracy)
                 }
             }
+
+            SearchSessionsSection(settings: settings)
 
             SettingsSectionCard(title: "AI Search", subtitle: aiSectionSubtitle) {
                 VStack(alignment: .leading, spacing: 14) {
@@ -126,6 +129,12 @@ struct SearchPane: View {
             refreshModelInstallState()
             mobileCLIPError = nil
         }
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+            // Ollama may have been started or restarted while TimeScroll was in the background.
+            guard settings.aiEmbeddingsEnabled, settings.embeddingProvider == "ollama" else { return }
+            loadOllamaModelsIfNeeded()
+            refreshModelInstallState()
+        }
     }
 
     private var aiSectionSubtitle: String {
@@ -158,7 +167,7 @@ struct SearchPane: View {
             } else {
                 LabeledContent("Model") {
                     Picker("", selection: $settings.embeddingModel) {
-                        ForEach(availableOllamaModels, id: \.self) { model in
+                        ForEach(OllamaModelChoices.choices(listed: listedOllamaModels, selected: settings.embeddingModel), id: \.self) { model in
                             Text(model).tag(model)
                         }
                     }
@@ -299,6 +308,19 @@ struct SearchPane: View {
                 Text("Checking install status…")
                     .font(.footnote)
                     .foregroundColor(.secondary)
+            }
+        } else if ollamaUnreachable {
+            HStack(spacing: 8) {
+                Label("Can't reach Ollama. Is it running?", systemImage: "exclamationmark.triangle.fill")
+                    .font(.footnote)
+                    .foregroundColor(.secondary)
+
+                Spacer()
+
+                Button("Retry") {
+                    loadOllamaModelsIfNeeded()
+                    refreshModelInstallState()
+                }
             }
         } else if modelInstalled {
             Label("Model installed", systemImage: "checkmark.circle.fill")
@@ -473,13 +495,15 @@ extension SearchPane {
         return "This model will appear here after its zip is published in the linked release feed."
     }
 
-    private func loadOllamaModelsIfNeeded() {
-        guard availableOllamaModels.isEmpty, !loadingModels else { return }
+    /// Lists models unless a previous call already got an answer from Ollama.
+    private func loadOllamaModelsIfNeeded(force: Bool = false) {
+        guard force || listedOllamaModels.isEmpty, !loadingModels else { return }
         loadingModels = true
         DispatchQueue.global(qos: .userInitiated).async {
             let models = OllamaEmbeddingProvider.listModels()
             DispatchQueue.main.async {
-                availableOllamaModels = models.isEmpty ? ["snowflake-arctic-embed:33m"] : models
+                ollamaUnreachable = models == nil
+                if let models { listedOllamaModels = models }
                 loadingModels = false
             }
         }
@@ -489,11 +513,12 @@ extension SearchPane {
         isInstallingModel = true
         installError = nil
 
-        let model = settings.embeddingModel.isEmpty ? "snowflake-arctic-embed:33m" : settings.embeddingModel
+        let model = settings.embeddingModel.isEmpty ? OllamaModelChoices.fallbackModel : settings.embeddingModel
         OllamaEmbeddingProvider.pullModel(model) { success, error in
             DispatchQueue.main.async {
                 isInstallingModel = false
                 if success {
+                    loadOllamaModelsIfNeeded(force: true)
                     refreshModelInstallState()
                 } else {
                     installError = error ?? "Failed to install model"

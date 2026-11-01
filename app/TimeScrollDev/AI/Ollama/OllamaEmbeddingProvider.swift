@@ -135,17 +135,17 @@ final class OllamaEmbeddingProvider {
 
     // Check if model is installed
     static func isModelInstalled(_ model: String, baseURL: String = "http://localhost:11434") -> Bool {
-        guard let url = URL(string: "\(baseURL)/api/tags") else { return false }
-        guard let data = OllamaSyncRequest.get(url,
-                                                   timeout: listRequestTimeout,
-                                                   label: "check installed models") else {
-            return false
+        fetchModelNames(baseURL: baseURL, label: "check installed models")?
+            .contains { $0.hasPrefix(model) } ?? false
+    }
+
+    /// Names reported by `/api/tags`; nil when Ollama could not be reached (as opposed to no models).
+    static func fetchModelNames(baseURL: String = "http://localhost:11434", label: String = "list models") -> [String]? {
+        guard let url = URL(string: "\(baseURL)/api/tags"),
+              let data = OllamaSyncRequest.get(url, timeout: listRequestTimeout, label: label) else {
+            return nil
         }
-        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let models = json["models"] as? [[String: Any]] else {
-            return false
-        }
-        return models.contains { ($0["name"] as? String)?.hasPrefix(model) == true }
+        return parseModelsFromData(data)
     }
 
     // Exposed parser used by listModels and tests
@@ -167,23 +167,11 @@ final class OllamaEmbeddingProvider {
         return out
     }
 
-    // List available models from Ollama, preferring /api/models then falling back to /api/tags.
-    static func listModels(baseURL: String = "http://localhost:11434") -> [String] {
-        var out: [String] = []
-
-        func parseModelsJson(_ data: Data) {
-            out.append(contentsOf: parseModelsFromData(data))
-        }
-
-        if let url = URL(string: "\(baseURL)/api/tags") {
-            if let data = OllamaSyncRequest.get(url,
-                                                    timeout: listRequestTimeout,
-                                                    label: "list models") {
-                parseModelsJson(data)
-            }
-        }
-
-        let uniq = Array(NSOrderedSet(array: out)) as? [String] ?? out
+    /// Models to offer in settings, embedding models first-class when any exist.
+    /// nil when Ollama could not be reached, so callers can retry instead of caching an empty list.
+    static func listModels(baseURL: String = "http://localhost:11434") -> [String]? {
+        guard let names = fetchModelNames(baseURL: baseURL) else { return nil }
+        let uniq = Array(NSOrderedSet(array: names)) as? [String] ?? names
         let embedOnly = uniq.filter { $0.lowercased().contains("embed") }
         return embedOnly.isEmpty ? uniq : embedOnly
     }

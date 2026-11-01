@@ -19,8 +19,12 @@ struct SearchResultsView: View {
     @State private var useAI: Bool = false
     @State private var viewMode: ViewMode = ViewMode(rawValue: UserDefaults.standard.string(forKey: "settings.searchViewMode") ?? "list") ?? .list
     @State private var requestToken: Int = 0
+    @State private var showsSessions: Bool = false
+    @State private var cards: [SearchSessionCard] = []
+    @State private var sessionPager: SearchSessionPager?
 
     private let pageSize: Int = 50
+    private let sessionPageSize: Int = 20
     private static let resultsTopID = "search-results-top"
     private let search = SearchService()
 
@@ -51,6 +55,12 @@ struct SearchResultsView: View {
         .onChange(of: endMs) { _, _ in resetAndReload() }
         .onChange(of: captureKinds) { _, _ in resetAndReload() }
         .onChange(of: audioSourceKinds) { _, _ in resetAndReload() }
+        .onChange(of: settings.searchGroupsSessions) { _, _ in resetAndReload() }
+        .onChange(of: settings.sessionSensitivity) { _, _ in resetAndReload() }
+    }
+
+    private var isEmpty: Bool {
+        showsSessions ? cards.isEmpty : rows.isEmpty
     }
 
     private var header: some View {
@@ -101,7 +111,7 @@ struct SearchResultsView: View {
 
     private var resultsBody: some View {
         ZStack {
-            if rows.isEmpty && !isLoading {
+            if isEmpty && !isLoading {
                 SearchEmptyStateView(query: trimmedQuery, useAI: useAI)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                     .padding(24)
@@ -109,7 +119,9 @@ struct SearchResultsView: View {
                 ScrollViewReader { proxy in
                     ScrollView {
                         Group {
-                            if viewMode == .list {
+                            if showsSessions {
+                                sessionCards
+                            } else if viewMode == .list {
                                 LazyVStack(alignment: .leading, spacing: 12) {
                                     ForEach(Array(rows.enumerated()), id: \.1.id) { index, row in
                                         Button {
@@ -168,6 +180,24 @@ struct SearchResultsView: View {
         .animation(.easeInOut(duration: 0.16), value: viewMode)
     }
 
+    @ViewBuilder
+    private var sessionCards: some View {
+        let cardsView = ForEach(cards) { card in
+            SearchSessionCardView(group: card.group,
+                                  bestRow: card.bestRow,
+                                  query: trimmedQuery,
+                                  intelligentAccuracy: settings.intelligentAccuracy,
+                                  onOpen: { onOpen($0, 0) })
+        }
+        if viewMode == .list {
+            LazyVStack(alignment: .leading, spacing: 12) { cardsView }
+                .padding(16)
+        } else {
+            LazyVGrid(columns: [GridItem(.adaptive(minimum: 380), spacing: 16, alignment: .top)], spacing: 16) { cardsView }
+                .padding(16)
+        }
+    }
+
     private var pager: some View {
         HStack(spacing: 10) {
             Button {
@@ -180,7 +210,11 @@ struct SearchResultsView: View {
             Text("Page \(page + 1)")
                 .font(.subheadline.weight(.medium))
 
-            if !rows.isEmpty {
+            if showsSessions, !cards.isEmpty {
+                Text("• \(cards.count) \(cards.count == 1 ? "session" : "sessions") shown")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+            } else if !showsSessions, !rows.isEmpty {
                 Text("• \(rows.count) shown")
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
@@ -201,11 +235,17 @@ struct SearchResultsView: View {
 
     private func resetAndReload() {
         page = 0
+        sessionPager = nil
         loadPage(0)
     }
 
     private func loadPage(_ requestedPage: Int) {
         guard requestedPage >= 0 else { return }
+        if settings.searchGroupsSessions {
+            loadSessionPage(requestedPage)
+            return
+        }
+        showsSessions = false
         requestToken &+= 1
         let token = requestToken
         isLoading = true
@@ -279,9 +319,77 @@ struct SearchResultsView: View {
             }
         }
     }
+
+    private func loadSessionPage(_ requestedPage: Int) {
+        requestToken &+= 1
+        let token = requestToken
+        isLoading = true
+        let pager = sessionPager ?? makeSessionPager()
+        sessionPager = pager
+        let trimmed = trimmedQuery
+        let ia = settings.intelligentAccuracy
+
+        pager.page(requestedPage, size: sessionPageSize) { result in
+            DispatchQueue.global(qos: .userInitiated).async {
+                // Only the best hit of each shown session needs its text, for the snippet.
+                let best = result.groups.map(\.best)
+                let hydrated = (try? DB.shared.hydrateSearchResultContents(best)) ?? best
+                let prepared = zip(result.groups, hydrated).map { group, hit in
+                    SearchSessionCard(group: group,
+                                      bestRow: SearchResultDisplayRow(result: hit, query: trimmed, intelligentAccuracy: ia))
+                }
+                DispatchQueue.main.async {
+                    guard token == requestToken else { return }
+                    showsSessions = true
+                    if requestedPage > 0 && prepared.isEmpty {
+                        hasNext = false
+                        isLoading = false
+                        return
+                    }
+                    cards = prepared
+                    hasNext = result.hasNext
+                    page = requestedPage
+                    isLoading = false
+                }
+            }
+        }
+    }
+
+    private func makeSessionPager() -> SearchSessionPager {
+        let trimmed = trimmedQuery
+        let fuzz = settings.fuzziness
+        let ia = settings.intelligentAccuracy
+        let aiEnabled = useAI && settings.aiEmbeddingsEnabled
+        let apps = appBundleIds
+        let start = startMs
+        let end = endMs
+        let captureKindsFilter = captureKinds
+        let audioSourceKindsFilter = audioSourceKinds
+        let sensitivity = settings.sessionSensitivity
+        let searchService = search
+
+        return SearchSessionPager(fetch: { limit, offset in
+            let metas: [SnapshotMeta]
+            if trimmed.isEmpty {
+                metas = searchService.latestMetas(limit: limit, offset: offset, appBundleIds: apps, startMs: start, endMs: end,
+                                                  captureKinds: captureKindsFilter, audioSourceKinds: audioSourceKindsFilter)
+            } else if aiEnabled {
+                metas = searchService.searchAIMetas(trimmed, appBundleIds: apps, startMs: start, endMs: end,
+                                                    captureKinds: captureKindsFilter, audioSourceKinds: audioSourceKindsFilter,
+                                                    limit: limit, offset: offset)
+            } else {
+                metas = searchService.searchMetas(trimmed, fuzziness: fuzz, intelligentAccuracy: ia, appBundleIds: apps,
+                                                  startMs: start, endMs: end, captureKinds: captureKindsFilter,
+                                                  audioSourceKinds: audioSourceKindsFilter, limit: limit, offset: offset)
+            }
+            return metas.map(SearchResult.init(meta:))
+        }, sessionsFor: { times in
+            ActivitySessionProvider.shared.sessions(coveringTimes: times, sensitivity: sensitivity)
+        })
+    }
 }
 
-private struct SearchResultDisplayRow: Identifiable {
+struct SearchResultDisplayRow: Identifiable {
     let result: SearchResult
     let snippet: AttributedString?
     let fallbackSnippet: String
@@ -492,7 +600,7 @@ private struct SearchRowView: View {
     }()
 }
 
-private struct SearchTileView: View {
+struct SearchTileView: View {
     let row: SearchResultDisplayRow
     @State private var isHovering: Bool = false
 
@@ -602,7 +710,7 @@ private struct SearchResultBadge: View {
     }
 }
 
-private struct SearchResultIdentityIcon: View {
+struct SearchResultIdentityIcon: View {
     let row: SearchResult
     let size: CGFloat
     let cornerRadius: CGFloat
@@ -642,7 +750,7 @@ private struct SearchResultSymbolIcon: View {
     }
 }
 
-private struct AppBundleIconView: View {
+struct AppBundleIconView: View {
     let bundleId: String
     let size: CGFloat
     let cornerRadius: CGFloat
@@ -679,7 +787,7 @@ private struct AppBundleIconView: View {
     }
 }
 
-private struct SearchResultThumbnailView: View {
+struct SearchResultThumbnailView: View {
     let row: SearchResult
     let maxPixel: Int
     var width: CGFloat? = nil

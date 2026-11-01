@@ -1,536 +1,145 @@
-import Foundation
-import ApplicationServices
 import AppKit
-import Cocoa
+import ApplicationServices
+import Foundation
 
+/// Reads the text of the windows visible on one display over Accessibility ("Direct" mode).
+/// Windows are planned from the CG window list without IPC; windows that did not change on screen
+/// reuse their cached text; the rest are read in parallel per app (an app answers Accessibility
+/// requests one at a time), each window bounded by its own deadline.
 final class AXTextExtractor {
     static let shared = AXTextExtractor()
     private init() {}
-    private let cacheLock = NSLock()
-    private var appCache: [pid_t: AXUIElement] = [:]
-    private var windowCache: [pid_t: WindowCacheEntry] = [:]
-
-    private struct WindowCacheEntry {
-        let windows: [AXUIElement]
-        let fetchedAt: TimeInterval
-    }
-
-    /// Roles that typically don't contain user-visible text content
-    private static let skipRoles: Set<String> = [
-        "AXScrollBar", "AXSplitter", "AXRuler", "AXGrowArea", "AXMatte",
-        "AXValueIndicator", "AXToolbar", "AXMenuBar", "AXMenu",
-        "AXProgressIndicator", "AXBusyIndicator", "AXUnknown", "AXImage",
-        "AXColorWell", "AXColumn", "AXHandle", "AXLayoutArea", "AXLayoutItem",
-        "AXLevelIndicator", "AXOutline", "AXRelevanceIndicator",
-    ]
-
-    /// Max depth for debug logging (to avoid log spam)
-    private static let debugLogDepth = 4
-
-    struct Limits {
-        let maxWindows: Int          // e.g. 24
-        let maxCharsPerWindow: Int   // e.g. 40_000
-        let maxTotalChars: Int       // e.g. 200_000
-        let maxDepth: Int            // e.g. 12
-        let softTimeBudgetMs: Int    // e.g. 120
-        let hardTimeBudgetMs: Int    // e.g. 300
-    }
-
-    func isTrusted() -> Bool { AXIsProcessTrusted() }
-
-    /// Window info prepared for extraction
-    private struct WindowTask {
-        let pid: pid_t
-        let appAX: AXUIElement
-        let targetWin: AXUIElement
-    }
 
     /// Text plus normalized boxes (Vision convention: origin bottom-left, 0...1) for short text
     /// elements that lie on the captured display.
     struct Capture {
         let text: String
         let lines: [OCRLine]
+
+        static let empty = Capture(text: "", lines: [])
     }
 
-    /// Elements with longer text (documents, text areas) are not boxed: their frame covers the
-    /// whole area and would not localize a match.
-    private static let maxBoxedTextLength = 500
+    private let directory = AXWindowDirectory()
+    private let bundleIDs = AXBundleIDCache()
+    private let leases = AXManualAccessibilityLeases.shared
 
-    /// Returns concatenated text across visible, on-screen windows (filtered by bundle IDs).
-    func collectText(blacklistBundleIds: Set<String>,
-                     limits: Limits = .default) -> String {
-        collect(blacklistBundleIds: blacklistBundleIds, displayBounds: nil, limits: limits).text
-    }
+    func isTrusted() -> Bool { AXIsProcessTrusted() }
 
-    /// Like `collectText`, also returning element boxes relative to `displayBounds`
-    /// (global display coordinates, as from `CGDisplayBounds`). Uses parallel extraction.
-    func collect(blacklistBundleIds: Set<String>,
-                 displayBounds: CGRect?,
-                 limits: Limits = .default) -> Capture {
-        guard isTrusted() else { return Capture(text: "", lines: []) }
+    /// Text of the windows visible on the display at `displayBounds` (global coordinates, as from
+    /// `CGDisplayBounds`). `grid` is the luma grid of the frame being indexed; with `cache` (one per
+    /// display) it lets unchanged windows skip their Accessibility reads.
+    func collect(displayBounds: CGRect,
+                 blacklistBundleIds: Set<String>,
+                 grid: LumaGridSignature?,
+                 cache: AXWindowTextCache,
+                 limits: AXTextLimits = .default) -> Capture {
+        guard isTrusted() else { return .empty }
+        let debug = UserDefaults.standard.bool(forKey: "settings.debugMode")
+        let startNanos = AXDeadline.now()
+        let now = ProcessInfo.processInfo.systemUptime
 
-        let debugMode = UserDefaults.standard.bool(forKey: "settings.debugMode")
-        let tStart = DispatchTime.now().uptimeMilliseconds
+        guard let info = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] else {
+            return .empty
+        }
+        let windows = AXScreenWindow.parse(info)
+        let contentPIDs = Set(windows.filter { $0.layer >= 0 && $0.layer < AXWindowPlanner.maxContentLayer }.map(\.pid))
+        directory.retain(only: Set(windows.map(\.id)))
+        bundleIDs.retain(only: Set(windows.map(\.pid)))
+        leases.refresh(onScreen: contentPIDs, now: now)
 
-        // 1) Get all on-screen windows in Z-order (front-to-back)
-        guard let infoList = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] else {
-            return Capture(text: "", lines: [])
+        let plan = AXWindowPlanner.plan(windows: windows, displayBounds: displayBounds, maxWindows: limits.maxWindows) { pid in
+            guard !blacklistBundleIds.isEmpty, let id = self.bundleIDs.bundleID(for: pid) else { return false }
+            return blacklistBundleIds.contains(id)
+        }
+        let reused = cache.reusableText(for: plan, grid: grid, displayBounds: displayBounds, now: now)
+
+        // Windows to read, grouped by app in front-to-back order of each app's frontmost window.
+        var appOrder: [pid_t] = []
+        var appWindows: [pid_t: [Int]] = [:]
+        for (index, planned) in plan.enumerated() where reused[index] == nil {
+            let pid = planned.window.pid
+            if appWindows[pid] == nil { appOrder.append(pid) }
+            appWindows[pid, default: []].append(index)
         }
 
-        let mainScreenArea = NSScreen.main?.frame.area ?? 0
-        let minVisibleArea = mainScreenArea * 0.10
-
-        // ========== PHASE 1: Sequential - identify visible windows ==========
-        var windowTasks: [WindowTask] = []
-        var coveredRects: [CGRect] = []
-        let visiblePIDs = Set(infoList.compactMap { $0[kCGWindowOwnerPID as String] as? pid_t })
-        purgeCaches(activePIDs: visiblePIDs)
-
-        for entry in infoList {
-            if windowTasks.count >= limits.maxWindows { break }
-
-            guard let pid = entry[kCGWindowOwnerPID as String] as? pid_t,
-                  let boundsDict = entry[kCGWindowBounds as String] as? [String: Any],
-                  let bounds = CGRect(dictionaryRepresentation: boundsDict as CFDictionary) else { continue }
-
-            if let alpha = entry[kCGWindowAlpha as String] as? Double, alpha < 0.01 { continue }
-
-            if let app = NSRunningApplication(processIdentifier: pid),
-               let bid = app.bundleIdentifier, blacklistBundleIds.contains(bid) {
-                continue
-            }
-
-            // Visibility Check (Monte Carlo)
-            let samples = 40
-            var visibleSamples = 0
-            for _ in 0..<samples {
-                let x = CGFloat.random(in: bounds.minX...bounds.maxX)
-                let y = CGFloat.random(in: bounds.minY...bounds.maxY)
-                let point = CGPoint(x: x, y: y)
-                if !coveredRects.contains(where: { $0.contains(point) }) {
-                    visibleSamples += 1
-                }
-            }
-
-            let visibleFraction = Double(visibleSamples) / Double(samples)
-            let estimatedVisibleArea = bounds.area * visibleFraction
-
-            if debugMode {
-                print("[AX] Win pid=\(pid) bounds=\(bounds) visible=\(String(format: "%.2f", visibleFraction)) area=\(estimatedVisibleArea) min=\(minVisibleArea)")
-            }
-
-            coveredRects.append(bounds)
-
-            if estimatedVisibleArea < minVisibleArea {
-                if debugMode { print("[AX] Skipping window due to low visibility") }
-                continue
-            }
-
-            // Set up AX elements
-            let appAX = appElement(for: pid, debugMode: debugMode)
-            let candidates = windows(for: pid, appAX: appAX)
-            guard !candidates.isEmpty else { continue }
-
-            // Find best match by frame
-            var bestWin: AXUIElement?
-            var bestDist: CGFloat = 50.0
-
-            for w in candidates {
-                var posVal: CFTypeRef?
-                var sizeVal: CFTypeRef?
-                var p = CGPoint.zero
-                var s = CGSize.zero
-
-                if AXUIElementCopyAttributeValue(w, kAXPositionAttribute as CFString, &posVal) == .success,
-                   AXUIElementCopyAttributeValue(w, kAXSizeAttribute as CFString, &sizeVal) == .success {
-                    AXValueGetValue(posVal as! AXValue, .cgPoint, &p)
-                    AXValueGetValue(sizeVal as! AXValue, .cgSize, &s)
-
-                    let axFrame = CGRect(origin: p, size: s)
-                    let dist = abs(axFrame.midX - bounds.midX) + abs(axFrame.midY - bounds.midY) +
-                               abs(axFrame.width - bounds.width) + abs(axFrame.height - bounds.height)
-
-                    if dist < bestDist {
-                        bestDist = dist
-                        bestWin = w
-                    }
-                }
-            }
-
-            if let targetWin = bestWin {
-                windowTasks.append(WindowTask(pid: pid, appAX: appAX, targetWin: targetWin))
-            }
-        }
-
-        if windowTasks.isEmpty { return Capture(text: "", lines: []) }
-
-        // ========== PHASE 2: Parallel - extract text from each window ==========
-        let results = UnsafeMutablePointer<String>.allocate(capacity: windowTasks.count)
-        results.initialize(repeating: "", count: windowTasks.count)
-        let boxResults = UnsafeMutablePointer<[(text: String, frame: CGRect)]>.allocate(capacity: windowTasks.count)
-        boxResults.initialize(repeating: [], count: windowTasks.count)
+        let fresh = UnsafeMutableBufferPointer<AXWindowTextCache.Result?>.allocate(capacity: plan.count)
+        fresh.initialize(repeating: nil)
         defer {
-            results.deinitialize(count: windowTasks.count)
-            results.deallocate()
-            boxResults.deinitialize(count: windowTasks.count)
-            boxResults.deallocate()
+            _ = fresh.deinitialize()
+            fresh.deallocate()
         }
-        let collectBoxes = displayBounds != nil
-
-        DispatchQueue.concurrentPerform(iterations: windowTasks.count) { idx in
-            let task = windowTasks[idx]
-            let windowStart = DispatchTime.now().uptimeMilliseconds
-            let hardDeadline = windowStart + limits.hardTimeBudgetMs
-
-            var seenText = Set<String>()
-            var textBuf = String()
-            var boxes: [(text: String, frame: CGRect)] = []
-            let collectLimit = limits.maxCharsPerWindow * 2
-
-            let addText: (String, AXUIElement) -> Void = { s, element in
-                if !s.isEmpty && textBuf.count < collectLimit && !seenText.contains(s) {
-                    seenText.insert(s)
-                    textBuf.append(s)
-                    textBuf.append("\n")
-                    if collectBoxes, s.count <= Self.maxBoxedTextLength,
-                       let frame = self.frame(of: element, startTime: windowStart, limits: limits) {
-                        boxes.append((s, frame))
-                    }
-                }
-            }
-
-            // Traverse the window
-            self.traverse(task.targetWin,
-                          depth: 0,
-                          limits: limits,
-                          startTime: windowStart,  // Per-window time budget
-                          onText: addText)
-
-            // Also traverse focused element
-            var focusedRef: CFTypeRef?
-            if DispatchTime.now().uptimeMilliseconds < hardDeadline,
-               self.setMessagingTimeout(for: task.appAX, startTime: windowStart, limits: limits),
-               AXUIElementCopyAttributeValue(task.appAX, kAXFocusedUIElementAttribute as CFString, &focusedRef) == .success,
-               let focused = focusedRef {
-                let focusedElement = focused as! AXUIElement
-
-                var focusedRoleRef: CFTypeRef?
-                if self.setMessagingTimeout(for: focusedElement, startTime: windowStart, limits: limits) {
-                    _ = AXUIElementCopyAttributeValue(focusedElement, kAXRoleAttribute as CFString, &focusedRoleRef)
-                }
-                let focusedRole = focusedRoleRef as? String ?? ""
-                var focusedSubroleRef: CFTypeRef?
-                if self.setMessagingTimeout(for: focusedElement, startTime: windowStart, limits: limits) {
-                    _ = AXUIElementCopyAttributeValue(focusedElement, kAXSubroleAttribute as CFString, &focusedSubroleRef)
-                }
-                // Never read the value of a focused password field.
-                let focusedIsSecure = (focusedSubroleRef as? String) == "AXSecureTextField"
-
-                if debugMode {
-                    print("[AX] [\(idx)] Also traversing focused element (role=\(focusedRole))")
-                }
-
-                if DispatchTime.now().uptimeMilliseconds < hardDeadline, !focusedIsSecure,
-                   focusedRole == kAXTextAreaRole as String || focusedRole == kAXTextFieldRole as String {
-                    if let docValue: String = self.getAXAttr(focusedElement,
-                                                             kAXValueAttribute as CFString,
-                                                             startTime: windowStart,
-                                                             limits: limits) {
-                        if !docValue.isEmpty && docValue.count > 10 {
-                            if debugMode {
-                                print("[AX] [\(idx)]   -> document value: \(docValue.count) chars")
-                            }
-                            addText(docValue, focusedElement)
-                        }
-                    }
-                }
-
-                if DispatchTime.now().uptimeMilliseconds < hardDeadline {
-                    self.traverse(focusedElement,
-                                  depth: 0,
-                                  limits: limits,
-                                  startTime: windowStart,
-                                  onText: addText)
-                }
-            }
-
-            // Truncate middle if exceeds limit
-            if textBuf.count > limits.maxCharsPerWindow {
-                let half = limits.maxCharsPerWindow / 2
-                let start = textBuf.prefix(half)
-                let end = textBuf.suffix(half)
-                textBuf = String(start) + "\n...[truncated]...\n" + String(end)
-            }
-
-            let windowMs = DispatchTime.now().uptimeMilliseconds - windowStart
-            if debugMode {
-                print("[AX] [\(idx)] Window pid=\(task.pid) extracted \(textBuf.count) chars in \(windowMs)ms")
-            }
-
-            results[idx] = textBuf
-            boxResults[idx] = boxes
+        DispatchQueue.concurrentPerform(iterations: appOrder.count) { appIndex in
+            let pid = appOrder[appIndex]
+            let indices = appWindows[pid] ?? []
+            let results = self.readApp(pid: pid, windows: indices.map { plan[$0] }, cache: cache,
+                                       limits: limits, now: now, debug: debug)
+            for (index, result) in zip(indices, results) { fresh[index] = result }
         }
 
-        // ========== PHASE 3: Merge results (in Z-order) ==========
-        var out = String()
-        var totalChars = 0
-        for idx in 0..<windowTasks.count {
-            let text = results[idx]
-            if !text.isEmpty {
-                let allow = min(text.count, limits.maxTotalChars - totalChars)
-                out.append(contentsOf: text.prefix(allow))
-                totalChars += allow
-                if totalChars >= limits.maxTotalChars { break }
-            }
+        let results = plan.indices.map { index in
+            fresh[index] ?? AXWindowTextCache.Result(text: reused[index] ?? .empty, documents: [], isFresh: false)
         }
+        cache.store(plan: plan, results: results, grid: grid, now: now)
+        let capture = AXTextMerger.merge(results.map(\.text), displayBounds: displayBounds, maxTotalChars: limits.maxTotalChars)
 
-        var lines: [OCRLine] = []
-        if let displayBounds, displayBounds.width > 0, displayBounds.height > 0 {
-            for idx in 0..<windowTasks.count {
-                for box in boxResults[idx] {
-                    let visible = box.frame.intersection(displayBounds)
-                    guard !visible.isNull, visible.width > 1, visible.height > 1 else { continue }
-                    let normalized = CGRect(x: (visible.minX - displayBounds.minX) / displayBounds.width,
-                                            y: 1 - (visible.maxY - displayBounds.minY) / displayBounds.height,
-                                            width: visible.width / displayBounds.width,
-                                            height: visible.height / displayBounds.height)
-                    lines.append(OCRLine(text: box.text, box: normalized))
-                }
-            }
+        if debug {
+            let ms = (AXDeadline.now() - startNanos) / 1_000_000
+            let reusedCount = reused.compactMap { $0 }.count
+            print("[AX] display=\(displayBounds) windows=\(plan.count) reused=\(reusedCount) apps=\(appOrder.count) chars=\(capture.text.count) boxes=\(capture.lines.count) in \(ms)ms")
         }
-
-        let totalMs = DispatchTime.now().uptimeMilliseconds - tStart
-        if debugMode {
-            print("[AX] Total: \(windowTasks.count) windows, \(totalChars) chars, \(lines.count) boxes in \(totalMs)ms")
-        }
-
-        return Capture(text: out, lines: lines)
+        return capture
     }
 
-    /// Global screen frame (top-left origin) of an element, within the time budget.
-    private func frame(of element: AXUIElement, startTime: Int, limits: Limits) -> CGRect? {
-        guard let positionRef: AnyObject = getAXAttr(element, kAXPositionAttribute as CFString, startTime: startTime, limits: limits),
-              let sizeRef: AnyObject = getAXAttr(element, kAXSizeAttribute as CFString, startTime: startTime, limits: limits),
-              CFGetTypeID(positionRef) == AXValueGetTypeID(), CFGetTypeID(sizeRef) == AXValueGetTypeID() else { return nil }
-        let position = positionRef as! AXValue
-        let size = sizeRef as! AXValue
-        var point = CGPoint.zero
-        var extent = CGSize.zero
-        guard AXValueGetValue(position, .cgPoint, &point), AXValueGetValue(size, .cgSize, &extent),
-              extent.width > 0, extent.height > 0 else { return nil }
-        return CGRect(origin: point, size: extent)
-    }
+    /// Reads one app's windows in turn, the focused element first within its window.
+    private func readApp(pid: pid_t, windows: [AXPlannedWindow], cache: AXWindowTextCache,
+                         limits: AXTextLimits, now: TimeInterval, debug: Bool) -> [AXWindowTextCache.Result] {
+        let app = AXUIElementCreateApplication(pid)
+        leases.acquire(pid, app: app, now: now, debug: debug)
+        let source = AXLiveNodeSource()
+        let lookupDeadline = AXDeadline(limits: limits)
+        let axWindows = directory.axWindows(for: windows.map(\.window), app: app, source: source,
+                                            deadline: lookupDeadline, now: now)
+        let focused = focusedElement(of: app, deadline: lookupDeadline)
+        let focusedWindow = focused.flatMap { focusedWindowIndex(of: $0, in: windows, source: source, deadline: lookupDeadline) }
 
-    private func traverse(_ element: AXUIElement,
-                          depth: Int,
-                          limits: Limits,
-                          startTime: Int,
-                          onText: (String, AXUIElement) -> Void) {
-        if depth > limits.maxDepth { return }
-
-        // Early exit if approaching time budget
-        let elapsed = DispatchTime.now().uptimeMilliseconds - startTime
-        if elapsed > limits.hardTimeBudgetMs { return }
-        if elapsed > limits.softTimeBudgetMs { return }
-
-        // Get role
-        var roleRef: CFTypeRef?
-        guard setMessagingTimeout(for: element, startTime: startTime, limits: limits) else { return }
-        _ = AXUIElementCopyAttributeValue(element, kAXRoleAttribute as CFString, &roleRef)
-        let role = roleRef as? String ?? ""
-
-        // Skip roles known to have no useful text
-        if Self.skipRoles.contains(role) { return }
-
-        // Skip secure text fields by subrole
-        if role == kAXTextFieldRole as String || role == kAXTextAreaRole as String {
-            var subroleRef: CFTypeRef?
-            if setMessagingTimeout(for: element, startTime: startTime, limits: limits) {
-                _ = AXUIElementCopyAttributeValue(element, kAXSubroleAttribute as CFString, &subroleRef)
+        return windows.enumerated().map { index, planned in
+            guard let axWindow = axWindows[index] else {
+                if debug { print("[AX] pid=\(pid) window=\(planned.window.id) has no Accessibility window") }
+                return AXWindowTextCache.Result(text: .empty, documents: [], isFresh: true, isCacheable: false)
             }
-            if let sr = subroleRef as? String, sr == "AXSecureTextField" {
-                return
+            let start = AXDeadline.now()
+            let walker = AXTreeWalker(source: source, limits: limits, deadline: AXDeadline(startNanos: start, limits: limits),
+                                      visibleRects: planned.visibleRects,
+                                      knownDocuments: cache.knownDocuments(for: planned.window.id))
+            if index == focusedWindow, let focused {
+                walker.walk(focused)
+                walker.walk(axWindow, excluding: focused)
+            } else {
+                walker.walk(axWindow)
             }
-        }
-
-        // --- Inclusive text extraction ---
-        // Try to extract text from multiple attributes in priority order
-        var foundText = false
-
-        let debugMode = UserDefaults.standard.bool(forKey: "settings.debugMode")
-        let shouldLog = debugMode && depth <= Self.debugLogDepth
-        if shouldLog {
-            print("[AX] depth=\(depth) role=\(role)")
-        }
-
-        // 1. AXValue - primary text content (text fields, static text, web content, etc.)
-        if let v: String = getAXAttr(element,
-                                     kAXValueAttribute as CFString,
-                                     startTime: startTime,
-                                     limits: limits) {
-            if !v.isEmpty && !isLikelyMask(v) && v.count > 1 {
-                if shouldLog {
-                    print("[AX]   -> value: \(v.prefix(100))")
-                }
-                onText(v, element)
-                foundText = true
+            let text = walker.finish()
+            if debug {
+                let ms = (AXDeadline.now() - start) / 1_000_000
+                print("[AX] pid=\(pid) window=\(planned.window.id) elements=\(walker.visitedCount) culled=\(walker.culledCount) chars=\(text.count) in \(ms)ms")
             }
-        }
-
-        // 2. AXTitle - titles and labels (buttons, windows, links, headings)
-        if !foundText {
-            if let t: String = getAXAttr(element,
-                                         kAXTitleAttribute as CFString,
-                                         startTime: startTime,
-                                         limits: limits) {
-                if !t.isEmpty && t.count > 1 {
-                    if shouldLog {
-                        print("[AX]   -> title: \(t.prefix(100))")
-                    }
-                    onText(t, element)
-                    foundText = true
-                }
-            }
-        }
-
-        // 3. AXDescription - accessible descriptions (for icons, images with alt text)
-        if !foundText {
-            if let d: String = getAXAttr(element,
-                                         kAXDescriptionAttribute as CFString,
-                                         startTime: startTime,
-                                         limits: limits) {
-                if !d.isEmpty && !isLikelyMask(d) && d.count > 2 {
-                    if shouldLog {
-                        print("[AX]   -> desc: \(d.prefix(100))")
-                    }
-                    onText(d, element)
-                }
-            }
-        }
-
-        // Recurse children with limit to prevent runaway in deeply nested web content
-        var childrenRef: CFTypeRef?
-        if setMessagingTimeout(for: element, startTime: startTime, limits: limits),
-           AXUIElementCopyAttributeValue(element, kAXChildrenAttribute as CFString, &childrenRef) == .success,
-           let children = childrenRef as? [AXUIElement] {
-            if shouldLog {
-                print("[AX] depth=\(depth) role=\(role) has \(children.count) children")
-            }
-            let maxChildren = 64
-            for (idx, child) in children.enumerated() {
-                if idx >= maxChildren { break }
-                traverse(child, depth: depth + 1, limits: limits, startTime: startTime, onText: onText)
-            }
-        } else if shouldLog {
-            print("[AX] depth=\(depth) role=\(role) has NO children or failed to get")
+            return AXWindowTextCache.Result(text: text, documents: walker.documents, isFresh: true)
         }
     }
 
-    private func getAXAttr<T>(_ element: AXUIElement,
-                              _ attr: CFString,
-                              startTime: Int,
-                              limits: Limits) -> T? {
-        guard setMessagingTimeout(for: element, startTime: startTime, limits: limits) else { return nil }
-        var v: AnyObject?
-        if AXUIElementCopyAttributeValue(element, attr, &v) == .success {
-            return v as? T
-        }
-        return nil
+    private func focusedElement(of app: AXUIElement, deadline: AXDeadline) -> AXElementRef? {
+        guard let remaining = deadline.remainingSeconds() else { return nil }
+        AXUIElementSetMessagingTimeout(app, max(remaining, 0.001))
+        var focused: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(app, kAXFocusedUIElementAttribute as CFString, &focused) == .success,
+              let focused, CFGetTypeID(focused) == AXUIElementGetTypeID() else { return nil }
+        return AXElementRef(element: focused as! AXUIElement)
     }
 
-    private func setMessagingTimeout(for element: AXUIElement,
-                                     startTime: Int,
-                                     limits: Limits) -> Bool {
-        let elapsed = DispatchTime.now().uptimeMilliseconds - startTime
-        let remaining = limits.hardTimeBudgetMs - elapsed
-        guard remaining > 0 else { return false }
-        _ = AXUIElementSetMessagingTimeout(element, Float(remaining) / 1_000)
-        return true
-    }
-
-    private func isLikelyMask(_ s: String) -> Bool {
-        // Very basic detector for •••• or all bullets/asterisks
-        if s.isEmpty { return false }
-        let set = CharacterSet(charactersIn: "•*•●◦◉▪︎")
-        return s.unicodeScalars.allSatisfy { set.contains($0) }
-    }
-}
-
-private extension DispatchTime {
-    var uptimeMilliseconds: Int {
-        let nanos = DispatchTime.now().uptimeNanoseconds
-        return Int(nanos / 1_000_000)
-    }
-}
-
-extension AXTextExtractor.Limits {
-    static let `default` = AXTextExtractor.Limits(
-        maxWindows: 16,
-        maxCharsPerWindow: 50_000,
-        maxTotalChars: 200_000,
-        maxDepth: 48,  // Increased for deeply nested web/Electron content
-        softTimeBudgetMs: 200,
-        hardTimeBudgetMs: 400
-    )
-}
-
-extension CGRect {
-    var area: CGFloat { width * height }
-}
-
-private extension AXTextExtractor {
-    func appElement(for pid: pid_t, debugMode: Bool) -> AXUIElement {
-        cacheLock.lock()
-        if let cached = appCache[pid] {
-            cacheLock.unlock()
-            return cached
-        }
-        cacheLock.unlock()
-
-        let appAX = AXUIElementCreateApplication(pid)
-        // Avoid toggling AXEnhancedUserInterface: it can change other apps' rendering/behavior
-        // (for example reduced transparency or altered window-management behavior).
-        // AXManualAccessibility is the safer third-party opt-in for Chromium/Electron accessibility trees.
-        let manualResult = AXUIElementSetAttributeValue(appAX, "AXManualAccessibility" as CFString, kCFBooleanTrue)
-        if debugMode {
-            print("[AX] pid=\(pid) AXManualAccessibility=\(manualResult == .success)")
-        }
-
-        cacheLock.lock()
-        appCache[pid] = appAX
-        cacheLock.unlock()
-        return appAX
-    }
-
-    func windows(for pid: pid_t, appAX: AXUIElement) -> [AXUIElement] {
-        let now = Date().timeIntervalSince1970
-
-        cacheLock.lock()
-        if let cached = windowCache[pid], now - cached.fetchedAt <= 10 {
-            cacheLock.unlock()
-            return cached.windows
-        }
-        cacheLock.unlock()
-
-        var axWindows: CFTypeRef?
-        let windows: [AXUIElement]
-        if AXUIElementCopyAttributeValue(appAX, kAXWindowsAttribute as CFString, &axWindows) == .success,
-           let arr = axWindows as? [AXUIElement] {
-            windows = arr
-        } else {
-            windows = []
-        }
-
-        cacheLock.lock()
-        windowCache[pid] = WindowCacheEntry(windows: windows, fetchedAt: now)
-        cacheLock.unlock()
-        return windows
-    }
-
-    func purgeCaches(activePIDs: Set<pid_t>) {
-        cacheLock.lock()
-        appCache = appCache.filter { activePIDs.contains($0.key) }
-        windowCache = windowCache.filter { activePIDs.contains($0.key) }
-        cacheLock.unlock()
+    /// The window holding the focused element: the only one, or the one its frame is visible in.
+    private func focusedWindowIndex(of focused: AXElementRef, in windows: [AXPlannedWindow],
+                                    source: AXLiveNodeSource, deadline: AXDeadline) -> Int? {
+        if windows.count == 1 { return 0 }
+        guard let frame = source.frame(focused, deadline: deadline) else { return 0 }
+        return windows.firstIndex { $0.visibleRects.contains { $0.intersects(frame) } }
     }
 }

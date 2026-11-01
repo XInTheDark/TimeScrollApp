@@ -111,7 +111,7 @@ struct StoragePane: View {
 
                 DisclosureGroup("Details", isExpanded: $showReductionDetails) {
                     VStack(alignment: .leading, spacing: 12) {
-                        LabeledContent("Dedup sensitivity") {
+                        LabeledContent("Duplicate tolerance") {
                             SettingsSlider(
                                 value: Binding(get: { Double(settings.dedupHammingThreshold) }, set: { settings.dedupHammingThreshold = Int($0) }),
                                 in: 0...16,

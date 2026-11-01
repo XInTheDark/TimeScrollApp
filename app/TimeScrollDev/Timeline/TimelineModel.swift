@@ -45,7 +45,9 @@ final class TimelineModel: ObservableObject {
     private var isLoadingOlder = false
     private var activeQuery: TimelineQuery?
     /// True while showing a fixed window around an opened search result.
-    private var isAnchoredWindow = false
+    private(set) var isAnchoredWindow = false
+    /// Newest time the anchored window covers; captures made later cannot appear in it.
+    private var anchoredWindowEndMs: Int64 = 0
 
     var minTimeMs: Int64 { metas.last?.startedAtMs ?? 0 }
     var maxTimeMs: Int64 { metas.first?.startedAtMs ?? 0 }
@@ -263,13 +265,16 @@ final class TimelineModel: ObservableObject {
         let token = requestToken
         isLoading = true
         isLoadingOlder = false
+        // Claimed up front so a live refresh arriving while this loads cannot replace the window.
+        let wasAnchored = isAnchoredWindow
+        isAnchoredWindow = true
         let browseQuery = currentQuery(text: "")
 
         let appIds = selectedAppBundleIds.isEmpty ? nil : Array(selectedAppBundleIds)
         let captureKinds = selectedCaptureKinds.isEmpty ? nil : Array(selectedCaptureKinds)
         let audioSourceKinds = selectedAudioSourceKinds.isEmpty ? nil : Array(selectedAudioSourceKinds)
 
-        DispatchQueue.global(qos: .userInitiated).async { [weak self, spanMs, appIds, captureKinds, audioSourceKinds] in
+        DispatchQueue.global(qos: .userInitiated).async { [weak self, spanMs, appIds, captureKinds, audioSourceKinds, wasAnchored] in
             let anchorTime: Int64?
             if let anchorStartedAtMs {
                 anchorTime = anchorStartedAtMs
@@ -280,6 +285,7 @@ final class TimelineModel: ObservableObject {
             guard let anchorTime else {
                 DispatchQueue.main.async { [weak self] in
                     guard let self, token == self.requestToken else { return }
+                    self.isAnchoredWindow = wasAnchored
                     self.isLoading = false
                 }
                 return
@@ -302,6 +308,7 @@ final class TimelineModel: ObservableObject {
                 guard token == self.requestToken else { return }
                 self.activeQuery = browseQuery
                 self.isAnchoredWindow = true
+                self.anchoredWindowEndMs = end
                 self.hasMoreOlder = true
                 self.metas = sorted
                 self.selectedIndex = self.metas.firstIndex(where: { $0.id == id }) ?? (self.metas.isEmpty ? -1 : 0)
@@ -339,6 +346,14 @@ final class TimelineModel: ObservableObject {
 
     /// Adds rows newer than the newest loaded row without discarding older pages.
     /// Returns false when an incremental refresh does not apply and a full `load()` is needed.
+    /// Live refresh while an anchored window (opened from a search result or the calendar) is shown:
+    /// keep the window where it is, and re-fetch it only if new captures can still fall inside it.
+    func refreshAnchoredWindow() {
+        guard isAnchoredWindow, !isLoading, let selected,
+              Int64(Date().timeIntervalSince1970 * 1000) <= anchoredWindowEndMs else { return }
+        openSnapshot(id: selected.id, anchorStartedAtMs: selected.startedAtMs)
+    }
+
     func refreshNewest() -> Bool {
         guard let q = activeQuery, q.text.isEmpty, !isAnchoredWindow, !isLoading, !metas.isEmpty, q == currentQuery() else {
             return false

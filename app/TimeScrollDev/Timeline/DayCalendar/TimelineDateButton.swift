@@ -11,17 +11,16 @@ struct TimelineDateButton: View {
     Button {
       calendar.toggle(showing: selectedMs.map { Date(timeIntervalSince1970: TimeInterval($0) / 1000) })
     } label: {
-      HStack(spacing: 6) {
-        Text(text)
-          .font(.system(size: 16, weight: .medium, design: .monospaced))
-        Image(systemName: "calendar")
-          .font(.system(size: 13, weight: .medium))
-          .opacity(0.8)
-      }
-      .foregroundColor(.white)
-      .padding(.horizontal, 8)
-      .padding(.vertical, 3)
-      .background(Color.white.opacity(calendar.isPresented ? 0.22 : (isHovering ? 0.12 : 0)), in: Capsule())
+      Text(text)
+        .font(.system(size: 16, weight: .medium, design: .monospaced))
+        .foregroundColor(.white)
+        // Highlight outside the text's own bounds so the pill's layout stays exactly as before.
+        .background {
+          Capsule()
+            .fill(Color.white.opacity(calendar.isPresented ? 0.22 : (isHovering ? 0.12 : 0)))
+            .padding(.horizontal, -8)
+            .padding(.vertical, -3)
+        }
     }
     .buttonStyle(.plain)
     .onHover { isHovering = $0 }

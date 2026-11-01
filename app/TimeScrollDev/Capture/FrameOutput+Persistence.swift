@@ -5,7 +5,8 @@ extension FrameOutput {
     func extractTextForSnapshot(pixelBuffer: CVPixelBuffer,
                                 startedAtMs: Int64,
                                 processing: SettingsStore.TextProcessingMode,
-                                blacklistBundleIds: [String]) -> (text: String, boxes: [OCRLine]) {
+                                blacklistBundleIds: [String],
+                                grid: LumaGridSignature?) -> (text: String, boxes: [OCRLine]) {
         switch processing {
         case .ocr:
             // Existing OCR path
@@ -14,7 +15,10 @@ extension FrameOutput {
             }
             return ("", [])
         case .accessibility:
-            let capture = AXTextExtractor.shared.collect(blacklistBundleIds: Set(blacklistBundleIds), displayBounds: displayBounds)
+            let capture = AXTextExtractor.shared.collect(displayBounds: displayBounds,
+                                                         blacklistBundleIds: Set(blacklistBundleIds),
+                                                         grid: grid,
+                                                         cache: axTextCache)
             return (capture.text, capture.lines)
         case .none:
             return ("", [])
@@ -30,6 +34,7 @@ extension FrameOutput {
         vaultOn: Bool,
         allowWhileLocked: Bool,
         hash64: UInt64,
+        grid: LumaGridSignature?,
         appBundleId: String?,
         appName: String?
     ) throws -> PersistOutcome {
@@ -43,6 +48,7 @@ extension FrameOutput {
             let height = CVPixelBufferGetHeight(pixelBuffer)
             if vaultOn && !unlocked {
                 hevcStore.append(pixelBuffer: pixelBuffer, timestampMs: tsMs, encrypt: true)
+                needsHEVCFlushFrame = true
                 let targetURL = hevcStore.urlFor(timestampMs: tsMs, encrypt: true)
                 let bytes = (try? targetURL.resourceValues(forKeys: [.fileSizeKey]).fileSize).map { Int64($0) } ?? 0
                 let procRaw = UserDefaults.standard.string(forKey: "settings.textProcessingMode") ?? SettingsStore.defaultTextProcessingMode.rawValue
@@ -51,7 +57,8 @@ extension FrameOutput {
                 let extracted = extractTextForSnapshot(pixelBuffer: pixelBuffer,
                                                        startedAtMs: tsMs,
                                                        processing: proc,
-                                                       blacklistBundleIds: blacklist)
+                                                       blacklistBundleIds: blacklist,
+                                                       grid: grid)
                 let thumb = makePosterThumbIfPossible(pixelBuffer: pixelBuffer, tsMs: tsMs, maxEdge: maxEdge, quality: quality, encrypt: true)
                 try IngestQueue.shared.enqueue(
                     path: targetURL,
@@ -70,6 +77,7 @@ extension FrameOutput {
                 return .queuedWhileLocked
             } else {
                 hevcStore.append(pixelBuffer: pixelBuffer, timestampMs: tsMs, encrypt: vaultOn)
+                needsHEVCFlushFrame = true
                 let url = hevcStore.urlFor(timestampMs: tsMs, encrypt: vaultOn)
                 let bytes = (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize).map { Int64($0) } ?? 0
                 let thumb = makePosterThumbIfPossible(pixelBuffer: pixelBuffer, tsMs: tsMs, maxEdge: maxEdge, quality: quality, encrypt: vaultOn)
@@ -87,7 +95,8 @@ extension FrameOutput {
                 let extracted = extractTextForSnapshot(pixelBuffer: pixelBuffer,
                                                        startedAtMs: tsMs,
                                                        processing: proc,
-                                                       blacklistBundleIds: blacklist)
+                                                       blacklistBundleIds: blacklist,
+                                                       grid: grid)
                 try IngestQueue.shared.enqueue(
                     path: encURL,
                     startedAtMs: tsMs,

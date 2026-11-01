@@ -2,7 +2,7 @@ import Foundation
 import CoreVideo
 
 extension FrameOutput {
-    func processText(snapshotId: Int64, retainedPixelBuffer: Unmanaged<CVPixelBuffer>) {
+    func processText(snapshotId: Int64, retainedPixelBuffer: Unmanaged<CVPixelBuffer>, grid: LumaGridSignature?) {
         // Keep capture admission occupied until text processing releases this buffer.
         ocrQueue.sync { [weak self] in
             guard let self else {
@@ -13,11 +13,15 @@ extension FrameOutput {
             let pixelBuffer = retainedPixelBuffer.takeUnretainedValue()
             let modeRaw = UserDefaults.standard.string(forKey: "settings.textProcessingMode") ?? SettingsStore.defaultTextProcessingMode.rawValue
             let mode = SettingsStore.TextProcessingMode(rawValue: modeRaw) ?? SettingsStore.defaultTextProcessingMode
+            if mode != .accessibility {
+                // Direct mode was switched off: let apps drop the accessibility trees it asked for.
+                AXManualAccessibilityLeases.shared.releaseAll()
+            }
             switch mode {
             case .ocr:
                 Indexer.shared.completeOCR(snapshotId: snapshotId, pixelBuffer: pixelBuffer)
             case .accessibility:
-                handleAccessibilityText(snapshotId: snapshotId, pixelBuffer: pixelBuffer)
+                handleAccessibilityText(snapshotId: snapshotId, pixelBuffer: pixelBuffer, grid: grid)
             case .none:
                 SnapshotEmbeddingQueue.shared.enqueue(snapshotId: snapshotId, pixelBuffer: pixelBuffer, extractedText: nil)
                 break
@@ -26,9 +30,12 @@ extension FrameOutput {
         }
     }
 
-    func handleAccessibilityText(snapshotId: Int64, pixelBuffer: CVPixelBuffer) {
+    func handleAccessibilityText(snapshotId: Int64, pixelBuffer: CVPixelBuffer, grid: LumaGridSignature?) {
         let blacklist = UserDefaults.standard.array(forKey: "settings.blacklistBundleIds") as? [String] ?? []
-        let capture = AXTextExtractor.shared.collect(blacklistBundleIds: Set(blacklist), displayBounds: displayBounds)
+        let capture = AXTextExtractor.shared.collect(displayBounds: displayBounds,
+                                                     blacklistBundleIds: Set(blacklist),
+                                                     grid: grid,
+                                                     cache: axTextCache)
         let text = capture.text
         let fingerprint = TextFingerprint.make(from: text)
         let lines = Self.normalizedLines(text)

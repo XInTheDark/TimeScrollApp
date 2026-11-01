@@ -1,3 +1,46 @@
+# v2.1.0 - 2026-11-01
+
+## Sessions
+
+TimeScroll now groups your timeline intelligently into sessions: stretches of related work, even across app switches.
+
+- Search results are also grouped by session. You can turn this off in Settings ▸ Search.
+- The timeline shows each session on top of the snapshots. Click one to zoom in, or hover to see what you were doing.
+- Live, Compressed Timeline and Invert Timeline Scroll were moved to a new View menu.
+
+## Timeline
+
+- Jump to any day with the new calendar. Click the date to open it.
+- Scrolling is much smoother with a large history.
+- New gestures - drag to scrub, and pinch or Option-scroll to zoom.
+
+## Direct mode
+
+Text capture in Direct mode was rewritten. It's faster, more accurate, and now reads only the visible text on each display.
+
+## Capture
+
+- Recording recovers on its own after a display change or a screen recording crash.
+- Added an "Active display" option.
+- Lower CPU and power use when your screen is idle.
+
+## Search
+
+- Ollama models that understand images can now search your screenshots, not just their text.
+
+## Privacy and data
+
+- Reset All Data no longer touches files that aren't from TimeScroll, even if you chose a shared folder for storage.
+- Deleting a single snapshot no longer removes the rest of that minute's recording.
+- Leftover recordings from older versions are cleaned up automatically.
+- The MCP log no longer records your searches or screen text.
+
+## Other fixes
+
+- Fixed a hang when quitting.
+- Fixed several crashes in search and the timeline.
+- "Dedup sensitivity" is now called "Duplicate tolerance".
+
 # v2.0.0 - 2026-10-08
 
 v1 had a lot of issues, especially on macOS 27. This release fixes most of them and reworks storage, search and the encrypted vault.

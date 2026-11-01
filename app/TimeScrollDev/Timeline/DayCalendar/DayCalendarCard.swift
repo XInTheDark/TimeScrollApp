@@ -26,7 +26,6 @@ struct DayCalendarCard: View {
         ForEach(0..<leadingBlankCount, id: \.self) { _ in Color.clear.frame(height: 34) }
         ForEach(days, id: \.self) { day in dayCell(day) }
       }
-      legend
     }
     .padding(14)
     .frame(width: 310)
@@ -131,21 +130,6 @@ struct DayCalendarCard: View {
     let minutes = Int(ms / 60_000)
     if minutes < 1 { return "<1m" }
     return minutes < 60 ? "\(minutes)m" : "\(minutes / 60)h \(minutes % 60)m"
-  }
-
-  // MARK: - Legend
-
-  private var legend: some View {
-    HStack(spacing: 6) {
-      Text("Less").font(.caption2).foregroundStyle(.secondary)
-      ForEach([0.0, 0.25, 0.5, 0.75, 1.0], id: \.self) { share in
-        RoundedRectangle(cornerRadius: 3, style: .continuous)
-          .fill(Color.accentColor.opacity(0.15 + 0.6 * share.squareRoot()))
-          .frame(width: 14, height: 10)
-      }
-      Text("More recorded time").font(.caption2).foregroundStyle(.secondary)
-      Spacer()
-    }
   }
 }
 

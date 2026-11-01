@@ -57,7 +57,14 @@ struct LumaGridSignature: Equatable {
         return changed
     }
 
-    /// Maps the 0–16 "Dedup sensitivity" setting to how many changed cells still count as a duplicate.
+    /// Per cell, row by row: whether its mean luma moved by at least `cellDeltaThreshold`.
+    /// Nil when the grids differ in size.
+    func changedCellMask(comparedTo other: LumaGridSignature) -> [Bool]? {
+        guard cells.count == other.cells.count else { return nil }
+        return zip(cells, other.cells).map { abs(Int($0) - Int($1)) >= Self.cellDeltaThreshold }
+    }
+
+    /// Maps the 0–16 "Duplicate tolerance" setting to how many changed cells still count as a duplicate.
     /// The default (6) tolerates one cell, which absorbs a blinking text caret.
     static func toleratedChangedCells(forSensitivity sensitivity: Int) -> Int {
         max(0, sensitivity) / 4

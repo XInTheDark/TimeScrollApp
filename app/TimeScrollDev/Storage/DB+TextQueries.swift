@@ -76,6 +76,7 @@ extension DB {
         let stored = TextStorageCodec.encode(content)
         let storeId = try upsertTextStore(payload: stored, db: db)
         try updateSnapshotTextStoreId(rowId: rowId, textStoreId: storeId, db: db)
+        Self.storeSessionSketchIfMissing(textStoreId: storeId, content: content, db: db)
         // Full text lives once in ts_text_store; the contentless index only holds postings.
         deleteLegacyPreviewText(rowId: rowId, db: db)
         try Self.indexText(rowId: rowId, content: indexedContent ?? content, db: db)

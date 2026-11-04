@@ -127,6 +127,18 @@ final class SettingsStore: ObservableObject {
     @Published var startRecordingOnStart: Bool = true { didSet { if !isLoading { save() } } }
     @Published var onboardingCompleted: Bool = false { didSet { if !isLoading { save() } } }
 
+    // Summaries
+    // Does nothing until a default model is chosen.
+    @Published var backgroundSummariesEnabled: Bool = true { didSet { if !isLoading { save() } } }
+    @Published var defaultSummaryModel: String = "" {
+        didSet {
+            guard !isLoading else { return }
+            // The summary panel goes back to the new default.
+            UserDefaults.standard.removeObject(forKey: "summaries.model")
+            save()
+        }
+    }
+
     // Search behavior
     // When enabled, search tolerates common OCR character confusions (e.g., i↔l↔1, o↔0, rn↔m).
     @Published var intelligentAccuracy: Bool = true { didSet { if !isLoading { save() } } }
@@ -153,7 +165,6 @@ final class SettingsStore: ObservableObject {
     // Updates
     @Published var updateChannelBeta: Bool = false { didSet { if !isLoading { save() } } }
     @Published var enableAutoCheckUpdates: Bool = true { didSet { if !isLoading { save() } } }
-    @Published var autoCheckIntervalHours: Int = 24 { didSet { if !isLoading { save() } } }
     @Published var autoDownloadInstallUpdates: Bool = true { didSet { if !isLoading { save() } } }
 
     // Security
@@ -270,6 +281,8 @@ final class SettingsStore: ObservableObject {
         if defaults.object(forKey: "settings.showDockIcon") != nil { showDockIcon = defaults.bool(forKey: "settings.showDockIcon") }
         if defaults.object(forKey: "settings.startRecordingOnStart") != nil { startRecordingOnStart = defaults.bool(forKey: "settings.startRecordingOnStart") }
         if defaults.object(forKey: "settings.onboardingCompleted") != nil { onboardingCompleted = defaults.bool(forKey: "settings.onboardingCompleted") }
+        if defaults.object(forKey: "settings.backgroundSummariesEnabled") != nil { backgroundSummariesEnabled = defaults.bool(forKey: "settings.backgroundSummariesEnabled") }
+        defaultSummaryModel = defaults.string(forKey: "settings.defaultSummaryModel") ?? ""
 
         // Privacy
         if let arr = defaults.array(forKey: "settings.blacklistBundleIds") as? [String] {
@@ -333,8 +346,6 @@ final class SettingsStore: ObservableObject {
         if defaults.object(forKey: "settings.enableAutoCheckUpdates") != nil {
             enableAutoCheckUpdates = defaults.bool(forKey: "settings.enableAutoCheckUpdates")
         }
-        let hrs = defaults.integer(forKey: "settings.autoCheckIntervalHours")
-        if hrs > 0 { autoCheckIntervalHours = hrs }
         if defaults.object(forKey: "settings.autoDownloadInstallUpdates") != nil {
             autoDownloadInstallUpdates = defaults.bool(forKey: "settings.autoDownloadInstallUpdates")
         }
@@ -408,6 +419,8 @@ final class SettingsStore: ObservableObject {
         defaults.set(showDockIcon, forKey: "settings.showDockIcon")
         defaults.set(startRecordingOnStart, forKey: "settings.startRecordingOnStart")
         defaults.set(onboardingCompleted, forKey: "settings.onboardingCompleted")
+        defaults.set(backgroundSummariesEnabled, forKey: "settings.backgroundSummariesEnabled")
+        defaults.set(defaultSummaryModel, forKey: "settings.defaultSummaryModel")
 
         // Privacy
         defaults.set(blacklistBundleIds, forKey: "settings.blacklistBundleIds")
@@ -415,7 +428,6 @@ final class SettingsStore: ObservableObject {
         // Updates
         defaults.set(updateChannelBeta, forKey: "settings.updateChannelBeta")
         defaults.set(enableAutoCheckUpdates, forKey: "settings.enableAutoCheckUpdates")
-        defaults.set(autoCheckIntervalHours, forKey: "settings.autoCheckIntervalHours")
         defaults.set(autoDownloadInstallUpdates, forKey: "settings.autoDownloadInstallUpdates")
         // Search behavior
         defaults.set(intelligentAccuracy, forKey: "settings.intelligentAccuracy")

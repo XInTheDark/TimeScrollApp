@@ -8,7 +8,7 @@ import Foundation
 /// the live day at most every `liveRecheckMs`. All work runs on one serial queue, off the main thread.
 final class ActivitySessionProvider: @unchecked Sendable {
   static let shared = ActivitySessionProvider()
-  static let algorithmVersion = 2
+  static let algorithmVersion = 3
 
   /// How often a day that can still change is re-checked against its captures.
   static let liveRecheckMs: Int64 = 30_000
@@ -121,11 +121,13 @@ final class ActivitySessionProvider: @unchecked Sendable {
     let textIds = Set(drafts.flatMap { $0.representativeSketches.map { input.sketchTextStoreIds[Int($0)] } })
     let texts = try db.sessionTexts(textStoreIds: Array(textIds))
     let sessions = drafts.map { draft in
-      let representativeTexts = draft.representativeSketches.compactMap { texts[input.sketchTextStoreIds[Int($0)]] }
+      let representativeIds = draft.representativeSketches.map { input.sketchTextStoreIds[Int($0)] }
+      let representativeTexts = representativeIds.compactMap { texts[$0] }
       let session = draft.session
       return ActivitySession(id: session.id, startMs: session.startMs, endMs: session.endMs,
                              snapshotCount: session.snapshotCount, apps: session.apps,
-                             keywords: SessionLabeler.keywords(for: draft.keywordHashes, texts: representativeTexts))
+                             keywords: SessionLabeler.keywords(for: draft.keywordHashes, texts: representativeTexts),
+                             representativeTextIds: representativeIds)
     }
 
     let record = SessionDayRecord(dayStartMs: day.startMs, windowStartMs: day.windowStartMs, windowEndMs: day.windowEndMs,

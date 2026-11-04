@@ -50,17 +50,35 @@ extension DB {
         end_ms INTEGER NOT NULL,
         snapshot_count INTEGER NOT NULL,
         apps TEXT NOT NULL,
-        keywords TEXT NOT NULL
+        keywords TEXT NOT NULL,
+        representative_text_ids TEXT NOT NULL DEFAULT '[]'
     );
     CREATE INDEX IF NOT EXISTS idx_ts_activity_session_day ON ts_activity_session(day_start_ms);
     """
     _ = sqlite3_exec(db, sql, nil, nil, nil)
+    if !activitySessionTableHasTextIds(db: db) {
+      _ = sqlite3_exec(db, "ALTER TABLE ts_activity_session ADD COLUMN representative_text_ids TEXT NOT NULL DEFAULT '[]';", nil, nil, nil)
+    }
+  }
+
+  private static func activitySessionTableHasTextIds(db: OpaquePointer) -> Bool {
+    var stmt: OpaquePointer?
+    defer { sqlite3_finalize(stmt) }
+    guard sqlite3_prepare_v2(db, "PRAGMA table_info(ts_activity_session);", -1, &stmt, nil) == SQLITE_OK else { return false }
+    while sqlite3_step(stmt) == SQLITE_ROW {
+      if sqlite3_column_text(stmt, 1).map({ String(cString: $0) }) == "representative_text_ids" { return true }
+    }
+    return false
   }
 
   /// SQL dropping stored days whose window includes `timeMsSQL` (an expression), so they are
   /// recomputed; appended to the statements that delete captures.
   static func sessionDayInvalidationSQL(windowContaining timeMsSQL: String) -> String {
     "DELETE FROM ts_session_day WHERE window_start_ms <= \(timeMsSQL) AND window_end_ms > \(timeMsSQL);"
+  }
+
+  static func sessionDayInvalidationSQL(windowsFromMs fromMs: Int64, throughMs: Int64) -> String {
+    "DELETE FROM ts_session_day WHERE window_start_ms <= \(throughMs) AND window_end_ms > \(fromMs);"
   }
 
   static let allSessionDaysDeletionSQL = "DELETE FROM ts_session_day; DELETE FROM ts_activity_session;"
@@ -121,7 +139,7 @@ extension DB {
   }
 
   static func activitySessions(dayStartMs: Int64, db: OpaquePointer) -> [ActivitySession] {
-    let sql = "SELECT id, start_ms, end_ms, snapshot_count, apps, keywords FROM ts_activity_session WHERE day_start_ms = ? ORDER BY start_ms ASC;"
+    let sql = "SELECT id, start_ms, end_ms, snapshot_count, apps, keywords, representative_text_ids FROM ts_activity_session WHERE day_start_ms = ? ORDER BY start_ms ASC;"
     var stmt: OpaquePointer?
     defer { sqlite3_finalize(stmt) }
     guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return [] }
@@ -130,12 +148,14 @@ extension DB {
     while sqlite3_step(stmt) == SQLITE_ROW {
       let apps = sqlite3_column_text(stmt, 4).map { String(cString: $0) } ?? "[]"
       let keywords = sqlite3_column_text(stmt, 5).map { String(cString: $0) } ?? "[]"
+      let textIds = sqlite3_column_text(stmt, 6).map { String(cString: $0) } ?? "[]"
       sessions.append(ActivitySession(id: sqlite3_column_int64(stmt, 0),
                                       startMs: sqlite3_column_int64(stmt, 1),
                                       endMs: sqlite3_column_int64(stmt, 2),
                                       snapshotCount: Int(sqlite3_column_int64(stmt, 3)),
                                       apps: ActivitySessionColumns.decodeApps(apps),
-                                      keywords: ActivitySessionColumns.decodeKeywords(keywords)))
+                                      keywords: ActivitySessionColumns.decodeKeywords(keywords),
+                                      representativeTextIds: ActivitySessionColumns.decodeTextIds(textIds)))
     }
     return sessions
   }
@@ -160,7 +180,7 @@ extension DB {
 
     var insert: OpaquePointer?
     defer { sqlite3_finalize(insert) }
-    let insertSQL = "INSERT INTO ts_activity_session(id, day_start_ms, start_ms, end_ms, snapshot_count, apps, keywords) VALUES(?, ?, ?, ?, ?, ?, ?);"
+    let insertSQL = "INSERT INTO ts_activity_session(id, day_start_ms, start_ms, end_ms, snapshot_count, apps, keywords, representative_text_ids) VALUES(?, ?, ?, ?, ?, ?, ?, ?);"
     guard sqlite3_prepare_v2(db, insertSQL, -1, &insert, nil) == SQLITE_OK else { throw NSError(domain: "TS.DB", code: 922) }
     for session in sessions {
       sqlite3_reset(insert)
@@ -171,6 +191,7 @@ extension DB {
       sqlite3_bind_int64(insert, 5, Int64(session.snapshotCount))
       sqlite3_bind_text(insert, 6, ActivitySessionColumns.encodeApps(session.apps), -1, SQLITE_TRANSIENT)
       sqlite3_bind_text(insert, 7, ActivitySessionColumns.encodeKeywords(session.keywords), -1, SQLITE_TRANSIENT)
+      sqlite3_bind_text(insert, 8, ActivitySessionColumns.encodeTextIds(session.representativeTextIds), -1, SQLITE_TRANSIENT)
       guard sqlite3_step(insert) == SQLITE_DONE else { throw NSError(domain: "TS.DB", code: 923) }
     }
 

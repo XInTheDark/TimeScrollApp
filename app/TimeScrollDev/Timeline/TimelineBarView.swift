@@ -1,3 +1,4 @@
+import Combine
 import SwiftUI
 import AppKit
 
@@ -38,6 +39,7 @@ struct TimelineBarContainer: NSViewRepresentable {
     var showsSessions: Bool = false
     var sessions: [ActivitySession] = []
     var sessionsRevision: UInt64 = 0
+    var rangeSelection: TimelineRangeSelection? = nil
     let onJump: (Int64, CaptureKind?) -> Void
     let onHover: (Int64) -> Void
     let onHoverExit: () -> Void
@@ -55,6 +57,7 @@ struct TimelineBarContainer: NSViewRepresentable {
         doc.isCompressed = isCompressed
         doc.visibleCaptureKinds = visibleCaptureKinds
         doc.setSessions(sessions, revision: sessionsRevision, shown: showsSessions)
+        doc.rangeSelection = rangeSelection
         doc.refreshLayout()
         doc.onJump = onJump
         doc.onHover = onHover
@@ -74,6 +77,7 @@ struct TimelineBarContainer: NSViewRepresentable {
         doc.isCompressed = isCompressed
         doc.visibleCaptureKinds = visibleCaptureKinds
         doc.setSessions(sessions, revision: sessionsRevision, shown: showsSessions)
+        doc.rangeSelection = rangeSelection
         doc.refreshLayout()
         let contentWidth = max(scroll.bounds.width, doc.requiredContentWidth())
         doc.setFrameSize(NSSize(width: contentWidth, height: timelineContentHeight(for: scroll.bounds.height)))
@@ -559,6 +563,19 @@ final class TimelineBarNSView: NSView {
     var zoomAnchor: (timeMs: Int64, viewportX: CGFloat)?
     private var scrubCaptureKind: CaptureKind?
     private var scrubTimeMs: Int64?
+    /// Observed directly, so a drag redraws only this view.
+    var rangeSelection: TimelineRangeSelection? {
+        didSet {
+            guard rangeSelection !== oldValue else { return }
+            rangeSelectionObserver = rangeSelection?.objectWillChange.sink { [weak self] _ in
+                guard let self else { return }
+                self.needsDisplay = true
+                self.window?.invalidateCursorRects(for: self)
+            }
+        }
+    }
+    private var rangeSelectionObserver: AnyCancellable?
+    private var rangeDrag: TimelineRangeDrag?
 
     override var isFlipped: Bool { true }
     override var acceptsFirstResponder: Bool { true }
@@ -615,6 +632,26 @@ final class TimelineBarNSView: NSView {
         drawSegments(model: m, in: bounds)
         drawSelection(model: m, in: bounds)
         drawPlaybackCursor(model: m, in: bounds)
+        if let edges = rangeEdges {
+            TimelineRangeRenderer.draw(lowerX: edges.lower, upperX: edges.upper, in: bounds)
+        }
+    }
+
+    /// Where the selected range's edges are, if any of it falls within the loaded rows.
+    private var rangeEdges: (lower: CGFloat, upper: CGFloat)? {
+        guard let model, !model.metas.isEmpty, let range = rangeSelection?.range,
+              range.toMs > model.minTimeMs, range.fromMs <= model.maxTimeMs else { return nil }
+        return (timelineX(for: range.fromMs), timelineX(for: range.toMs))
+    }
+
+    override func resetCursorRects() {
+        guard rangeSelection?.isActive == true else { return }
+        addCursorRect(bounds, cursor: .crosshair)
+        guard let edges = rangeEdges else { return }
+        for x in [edges.lower, edges.upper] {
+            let tolerance = TimelineRangeDrag.edgeTolerance
+            addCursorRect(NSRect(x: x - tolerance, y: bounds.minY, width: tolerance * 2, height: bounds.height), cursor: .resizeLeftRight)
+        }
     }
 
     private func drawSegments(model m: TimelineModel, in rect: NSRect) {
@@ -1100,6 +1137,12 @@ final class TimelineBarNSView: NSView {
         cancelTimelineHoverPreview()
         let point = convert(event.locationInWindow, from: nil)
         isPressingSessionBand = false
+        if let selection = rangeSelection, selection.isActive {
+            let edges = rangeEdges
+            rangeDrag = TimelineRangeDrag(x: point.x, timeMs: timeAt(x: point.x), current: selection.range,
+                                          lowerX: edges?.lower, upperX: edges?.upper)
+            return
+        }
         if showsSessions, let session = session(at: point) {
             isPressingSessionBand = true
             fit(session)
@@ -1111,9 +1154,30 @@ final class TimelineBarNSView: NSView {
     }
 
     override func mouseDragged(with event: NSEvent) {
+        if rangeDrag != nil {
+            _ = autoscroll(with: event)
+            let x = min(max(visibleRect.minX, convert(event.locationInWindow, from: nil).x), visibleRect.maxX)
+            if let range = rangeDrag?.update(x: x, timeMs: timeAt(x: x)) { rangeSelection?.select(range) }
+            return
+        }
         guard model != nil, !isPressingSessionBand else { return }
         _ = autoscroll(with: event)
         scrub(toX: convert(event.locationInWindow, from: nil).x)
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        guard let drag = rangeDrag else { return }
+        rangeDrag = nil
+        guard !drag.moved else { return }
+        // While selecting, a click on a session selects it; anywhere else it still moves the viewer.
+        let point = convert(event.locationInWindow, from: nil)
+        if showsSessions, let session = session(at: point) {
+            rangeSelection?.select(TimelineRange.covering(session.startMs, session.endMs))
+            return
+        }
+        scrubCaptureKind = trackLayout.preferredCaptureKind(at: point)
+        scrubTimeMs = nil
+        scrub(toX: point.x)
     }
 
     private func scrub(toX x: CGFloat) {

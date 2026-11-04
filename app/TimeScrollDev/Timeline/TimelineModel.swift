@@ -443,6 +443,45 @@ final class TimelineModel: ObservableObject {
         }
     }
 
+    /// False while a text search is applied: which rows it matches can't be expressed as a filter.
+    var hasDeletableRows: Bool { activeQuery?.text.isEmpty == true }
+
+    /// Whether apps or media narrow what the timeline shows.
+    var hasShownFilters: Bool {
+        guard let query = activeQuery else { return false }
+        return query.appBundleIds?.isEmpty == false || query.captureKinds?.isEmpty == false || query.audioSourceKinds?.isEmpty == false
+    }
+
+    /// The rows of `range` that the timeline shows, given its filters; nil if that can't be known.
+    func shownRows(in range: TimelineRange) -> SnapshotRangeFilter? {
+        activeQuery.flatMap { SnapshotRangeFilter(range: range, query: $0) }
+    }
+
+    /// Drops deleted rows from the window, keeping the selection on the nearest remaining snapshot.
+    func removeRows(matching filter: SnapshotRangeFilter) {
+        requestToken &+= 1
+        isLoading = false
+        isLoadingOlder = false
+        let selectedId = selected?.id
+        let selectedTimeMs = selected?.startedAtMs
+        let matches: (SnapshotMeta) -> Bool = { $0.startedAtMs >= filter.fromMs && $0.startedAtMs < filter.toMs }
+        metas.removeAll(where: matches)
+        guard !metas.isEmpty else {
+            selectedIndex = -1
+            refreshSegments()
+            load()
+            return
+        }
+        if let selectedId, let index = metas.firstIndex(where: { $0.id == selectedId }) {
+            selectedIndex = index
+        } else if let selectedTimeMs {
+            selectedIndex = indexNearest(to: selectedTimeMs) ?? 0
+        } else {
+            selectedIndex = 0
+        }
+        refreshSegments()
+    }
+
     private func applyDeletedSnapshotToCurrentState(id: Int64) {
         guard let idx = metas.firstIndex(where: { $0.id == id }) else {
             load()

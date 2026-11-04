@@ -20,6 +20,8 @@ struct ActivitySession: Identifiable, Hashable {
   let apps: [AppShare]
   /// The session's most distinctive words, most distinctive first; may be empty.
   let keywords: [String]
+  /// `ts_text_store` ids of up to three screens that together cover most of the keywords.
+  var representativeTextIds: [Int64] = []
 
   var durationMs: Int64 { max(0, endMs - startMs) }
 

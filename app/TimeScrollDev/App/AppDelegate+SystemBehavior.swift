@@ -75,6 +75,10 @@ extension AppDelegate {
             }
         }
         powerNotiTokens.append(token)
+        let displayWakeToken = nc.addObserver(forName: NSWorkspace.screensDidWakeNotification, object: nil, queue: .main) { _ in
+            Task { @MainActor in AppState.shared.displaysDidChange() }
+        }
+        powerNotiTokens.append(displayWakeToken)
         let screensToken = NotificationCenter.default.addObserver(forName: NSApplication.didChangeScreenParametersNotification, object: nil, queue: .main) { _ in
             Task { @MainActor in AppState.shared.displaysDidChange() }
         }

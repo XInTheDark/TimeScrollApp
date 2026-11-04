@@ -46,6 +46,13 @@ struct SearchPane: View {
 
             SearchSessionsSection(settings: settings)
 
+            SettingsSectionCard(
+                title: "Summaries",
+                subtitle: "Summarizing each finished day makes week and month summaries more detailed."
+            ) {
+                SummarySetupControls(settings: settings)
+            }
+
             SettingsSectionCard(title: "AI Search", subtitle: aiSectionSubtitle) {
                 VStack(alignment: .leading, spacing: 14) {
                     Toggle("Enable AI search", isOn: $settings.aiEmbeddingsEnabled)

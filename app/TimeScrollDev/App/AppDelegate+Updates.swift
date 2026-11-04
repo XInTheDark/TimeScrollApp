@@ -64,13 +64,15 @@ extension AppDelegate {
 #if canImport(Sparkle)
 // MARK: - Sparkle integration
 extension AppDelegate {
+    private static let updateCheckInterval: TimeInterval = 12 * 3600
+
     func applySparklePrefsFromSettings() {
         let s = SettingsStore.shared
         let up = updaterController.updater
         up.automaticallyChecksForUpdates = s.enableAutoCheckUpdates
-        up.updateCheckInterval = TimeInterval(max(1, s.autoCheckIntervalHours)) * 3600
+        up.updateCheckInterval = Self.updateCheckInterval
         up.automaticallyDownloadsUpdates = s.autoDownloadInstallUpdates
-        print("[Sparkle] applySparklePrefsFromSettings auto=\(s.enableAutoCheckUpdates) intervalH=\(s.autoCheckIntervalHours) autoDL=\(s.autoDownloadInstallUpdates)")
+        print("[Sparkle] applySparklePrefsFromSettings auto=\(s.enableAutoCheckUpdates) autoDL=\(s.autoDownloadInstallUpdates)")
     }
 }
 

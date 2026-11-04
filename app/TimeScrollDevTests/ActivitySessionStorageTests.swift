@@ -132,6 +132,27 @@ final class ActivitySessionStorageTests {
     #expect(DB.sessionDayRecord(dayStartMs: 0, db: db) == nil)
   }
 
+  @Test func representativeTextIdsRoundTrip() throws {
+    let record = SessionDayRecord(dayStartMs: 1, windowStartMs: 0, windowEndMs: 2, params: "v3|balanced",
+                                  fingerprint: SessionDayFingerprint(snapshotCount: 0, maxSnapshotId: 0, textCount: 0, sketchedCount: 0),
+                                  computedAtMs: 0)
+    let session = ActivitySession(id: 1, startMs: 1, endMs: 2, snapshotCount: 1, apps: [], keywords: [], representativeTextIds: [7, 9])
+    try DB.replaceActivitySessions([session], record: record, db: db)
+    #expect(DB.activitySessions(dayStartMs: 1, db: db) == [session])
+  }
+
+  @Test func anOlderSessionTableGainsTheTextIdsColumn() throws {
+    exec("""
+    DROP TABLE ts_activity_session;
+    CREATE TABLE ts_activity_session (id INTEGER NOT NULL, day_start_ms INTEGER NOT NULL, start_ms INTEGER NOT NULL, end_ms INTEGER NOT NULL,
+                                      snapshot_count INTEGER NOT NULL, apps TEXT NOT NULL, keywords TEXT NOT NULL);
+    INSERT INTO ts_activity_session VALUES(5, 1, 1, 2, 1, '[]', '[]');
+    """)
+    DB.createActivitySessionTablesIfNeeded(db: db)
+    DB.createActivitySessionTablesIfNeeded(db: db)
+    #expect(DB.activitySessions(dayStartMs: 1, db: db).first?.representativeTextIds == [])
+  }
+
   @Test func deletingACaptureInvalidatesOnlyDaysWhoseWindowHoldsIt() throws {
     func record(_ day: Int64) -> SessionDayRecord {
       SessionDayRecord(dayStartMs: day, windowStartMs: day - 10, windowEndMs: day + 110, params: "v1|balanced",

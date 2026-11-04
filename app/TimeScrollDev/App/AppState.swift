@@ -33,6 +33,8 @@ final class AppState: ObservableObject {
     private var captureLifecycleGeneration = 0
     private var captureTransitionInProgress = false
     private var captureStopInProgress = false
+    // Failed sources can stop running while the user still wants capture to resume.
+    private var captureRequested = false
     private var streamRecoveryTask: Task<Void, Never>?
     private var displayChangeTask: Task<Void, Never>?
 
@@ -51,6 +53,7 @@ final class AppState: ObservableObject {
 
         let selection = CaptureModeSelection(defaults: .standard)
         guard selection.hasAnyCaptureEnabled else { return }
+        captureRequested = true
 
         let screenPermissionGranted: Bool
         if !selection.requiresScreenRecordingPermission || Permissions.isScreenRecordingGranted() {
@@ -82,6 +85,7 @@ final class AppState: ObservableObject {
                     startedScreen = true
                     screenCaptureStatus = .running
                 } catch {
+                    guard captureLifecycleGeneration == generation else { return }
                     fputs("[Capture] Failed to start screen capture: \(error.localizedDescription)\n", stderr)
                     screenCaptureStatus = .failed(error.localizedDescription)
                 }
@@ -134,6 +138,13 @@ final class AppState: ObservableObject {
     }
 
     func stopCaptureIfNeeded() async {
+        captureRequested = false
+        streamRecoveryTask?.cancel()
+        displayChangeTask?.cancel()
+        await stopCapture()
+    }
+
+    private func stopCapture() async {
         guard !captureStopInProgress else { return }
         captureStopInProgress = true
         defer { captureStopInProgress = false }
@@ -152,48 +163,59 @@ final class AppState: ObservableObject {
         captureTransitionInProgress = false
     }
 
-    /// ScreenCaptureKit ended a stream on its own: either the user chose Stop in the
-    /// system's screen-recording menu, or replayd (the capture daemon) crashed and
-    /// took every stream with it, system audio included.
+    /// ScreenCaptureKit ended a stream, for example on display sleep, a replayd crash,
+    /// or Stop in the system's screen-recording menu.
     func screenStreamDidStop(userStopped: Bool) {
-        guard isCapturing, streamRecoveryTask == nil else { return }
+        guard isCapturing, !captureStopInProgress else { return }
         if userStopped {
+            captureRequested = false
+            streamRecoveryTask?.cancel()
             Task { await stopCaptureIfNeeded() }
             return
         }
+        guard streamRecoveryTask == nil else { return }
         streamRecoveryTask = Task {
             defer { streamRecoveryTask = nil }
             // launchd relaunches replayd, but that takes a few seconds.
             for delay: UInt64 in [3, 10, 30, 60, 120] {
                 let generation = captureLifecycleGeneration
-                try? await Task.sleep(nanoseconds: delay * 1_000_000_000)
+                do {
+                    try await Task.sleep(nanoseconds: delay * 1_000_000_000)
+                } catch { return }
                 // Capture was stopped or restarted elsewhere in the meantime.
-                guard captureLifecycleGeneration == generation else { return }
-                await stopCaptureIfNeeded()
-                await startCaptureIfNeeded()
+                guard !Task.isCancelled, captureRequested, captureLifecycleGeneration == generation else { return }
+                await restartCaptureIfRunning()
                 if screenCaptureStatus.isRunning { return }
             }
         }
     }
 
-    /// Monitors were plugged in or removed. Capture enumerates displays only when it starts
-    /// (e.g. on wake, before external monitors are back), so restart it when the set changed.
+    /// Displays changed or woke. Restart for a changed display set, or retry a source
+    /// that could not start while displays were asleep or still reconnecting.
     func displaysDidChange() {
         displayChangeTask?.cancel()
+        guard captureRequested, CaptureModeSelection(defaults: .standard).capturesScreen else { return }
         displayChangeTask = Task {
             // Displays, and ScreenCaptureKit's view of them, take a few seconds to settle.
             for delay: UInt64 in [3, 10, 30] {
-                try? await Task.sleep(nanoseconds: delay * 1_000_000_000)
-                guard !Task.isCancelled, isCapturing, screenCaptureStatus.isRunning else { return }
-                guard await captureManager.displaysChangedSinceStart() else { return }
+                let generation = captureLifecycleGeneration
+                do {
+                    try await Task.sleep(nanoseconds: delay * 1_000_000_000)
+                } catch { return }
+                guard !Task.isCancelled, captureRequested, captureLifecycleGeneration == generation else { return }
+                if screenCaptureStatus.isRunning {
+                    guard await captureManager.displaysChangedSinceStart() else { return }
+                }
+                guard !Task.isCancelled, captureRequested, captureLifecycleGeneration == generation else { return }
                 await restartCaptureIfRunning()
             }
         }
     }
 
     func restartCaptureIfRunning() async {
-        if !isCapturing { return }
-        await stopCaptureIfNeeded()
+        guard captureRequested, !captureTransitionInProgress else { return }
+        await stopCapture()
+        guard captureRequested else { return }
         await startCaptureIfNeeded()
     }
 
@@ -252,6 +274,9 @@ final class AppState: ObservableObject {
     }
 
     func shutdown() async {
+        captureRequested = false
+        streamRecoveryTask?.cancel()
+        displayChangeTask?.cancel()
         captureLifecycleGeneration &+= 1
         captureTransitionInProgress = true
         isCaptureStarting = false

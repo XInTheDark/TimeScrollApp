@@ -342,6 +342,32 @@ struct OnboardingView: View {
                 RoundedRectangle(cornerRadius: 12, style: .continuous)
                     .stroke(Color.primary.opacity(0.08), lineWidth: 1)
             )
+
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(spacing: 12) {
+                    Image(systemName: "text.alignleft")
+                        .font(.system(size: 24))
+                        .foregroundStyle(.blue)
+                        .frame(width: 32)
+
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Summaries")
+                            .font(.headline)
+                        Text("Summarize your day with a local Ollama model. You can choose a model later.")
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                SummarySetupControls(settings: settings)
+                    .toggleStyle(.switch)
+            }
+            .padding(16)
+            .background(.regularMaterial)
+            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .stroke(Color.primary.opacity(0.08), lineWidth: 1)
+            )
         }
     }
 
@@ -577,6 +603,7 @@ struct OnboardingView: View {
             settings.captureSystemAudioEnabled = captureSystemAudio
             settings.aiModeOn = aiModeEnabled
             settings.onboardingCompleted = true
+            UserDefaults.standard.set(true, forKey: AppDelegate.summarySetupShownKey)
         }
 
         Task { @MainActor in

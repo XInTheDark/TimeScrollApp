@@ -285,6 +285,7 @@ final class DB {
         Self.createTextIndexIfNeeded(db: db)
         Self.createSessionSketchTableIfNeeded(db: db)
         Self.createActivitySessionTablesIfNeeded(db: db)
+        Self.createSummaryTablesIfNeeded(db: db)
         // Indices for faster joins and scans
         _ = sqlite3_exec(db, "CREATE INDEX IF NOT EXISTS idx_ts_snapshot_started_at_ms ON ts_snapshot(started_at_ms DESC);", nil, nil, nil)
         _ = sqlite3_exec(db, "CREATE INDEX IF NOT EXISTS idx_ts_snapshot_app_bundle_started_at_ms ON ts_snapshot(app_bundle_id, started_at_ms DESC);", nil, nil, nil)

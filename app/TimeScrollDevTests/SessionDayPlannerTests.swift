@@ -65,4 +65,11 @@ struct SessionDayPlannerTests {
     #expect(combined[1].endMs == 280)
     #expect(SessionDayPlanner.combine([]).isEmpty)
   }
+
+  @Test func combineKeepsRepresentativeTextsOfTrimmedSessions() {
+    let first = ActivitySession(id: 1, startMs: 100, endMs: 250, snapshotCount: 1, apps: [], keywords: [], representativeTextIds: [7])
+    let combined = SessionDayPlanner.combine([first, session(2, 200, 280)])
+    #expect(combined[0].endMs == 199)
+    #expect(combined[0].representativeTextIds == [7])
+  }
 }

@@ -20,16 +20,6 @@ struct UpdatesPane: View {
                 Toggle("Automatically check for updates", isOn: $settings.enableAutoCheckUpdates)
                     .onChange(of: settings.enableAutoCheckUpdates) { _, _ in applySparkle() }
 
-                LabeledContent("Check interval") {
-                    SettingsSlider(
-                        value: Binding(get: { Double(settings.autoCheckIntervalHours) }, set: { settings.autoCheckIntervalHours = Int($0) }),
-                        in: 12...168,
-                        step: 12,
-                        valueText: "\(settings.autoCheckIntervalHours) h"
-                    )
-                }
-                .onChange(of: settings.autoCheckIntervalHours) { _, _ in applySparkle() }
-
                 Toggle("Automatically download and install updates", isOn: $settings.autoDownloadInstallUpdates)
                     .onChange(of: settings.autoDownloadInstallUpdates) { _, _ in applySparkle() }
 

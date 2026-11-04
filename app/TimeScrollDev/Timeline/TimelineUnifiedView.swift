@@ -24,6 +24,9 @@ struct TimelineUnifiedView: View {
     @State private var showingResults: Bool = false
     @State private var showCaptureModePopover: Bool = false
     @State private var timelineResizeStartHeight: Double?
+    /// Not observed here: the views that show it observe it, so a drag doesn't redo this body.
+    @State private var rangeSelection = TimelineRangeSelection()
+    @FocusState private var searchFieldFocused: Bool
 
     private let minMsPerPt = TimelineModel.minMsPerPoint
     private let maxMsPerPt = TimelineModel.maxMsPerPoint
@@ -72,7 +75,11 @@ struct TimelineUnifiedView: View {
         VStack(spacing: 0) {
             topBar
             Divider()
-            centerStage
+            HStack(spacing: 0) {
+                centerStage
+                RangeSummaryPanelSlot(selection: rangeSelection, isTimelineFiltered: { model.hasShownFilters })
+            }
+            RangeSelectionBarSlot(selection: rangeSelection, timeline: model, onSearch: searchInRange)
             Divider()
             bottomTimeline
         }
@@ -87,9 +94,19 @@ struct TimelineUnifiedView: View {
         }
         .onDisappear { removeKeyMonitor() }
         .background(HostingWindowReader(reference: hostWindow).frame(width: 0, height: 0))
+        #if DEBUG
+        .background {
+            if DemoMode.isActive {
+                DemoSceneAnchor(timeline: model, selection: rangeSelection) { text in
+                    query = text
+                    DispatchQueue.main.async { showResults() }
+                }
+            }
+        }
+        #endif
         .onChange(of: vault.isUnlocked) { _, unlocked in
             // When the vault gets unlocked, reload timeline and show a loading state
-            if unlocked { model.load() }
+            if unlocked { model.load() } else { rangeSelection.end() }
         }
         .onChange(of: appState.lastSnapshotTick) { _, _ in
             liveRefresh.notify()
@@ -196,6 +213,7 @@ struct TimelineUnifiedView: View {
 
                 TextField("Search snapshots", text: $query)
                     .textFieldStyle(.plain)
+                    .focused($searchFieldFocused)
                     .frame(maxWidth: .infinity)
                     .submitLabel(.search)
                     .onSubmit { showResults() }
@@ -508,6 +526,7 @@ struct TimelineUnifiedView: View {
                                      showsSessions: showTimelineSessions,
                                      sessions: sessionLoader.sessions,
                                      sessionsRevision: sessionLoader.revision,
+                                     rangeSelection: rangeSelection,
                                      onJump: { time, preferredCaptureKind in
                                          model.jump(to: time,
                                                     preferredCaptureKind: preferredCaptureKind,
@@ -517,12 +536,18 @@ struct TimelineUnifiedView: View {
                                      onHoverExit: { model.hoverTimeMs = nil })
                     .frame(height: timelineCanvasHeight)
 
-                Button(action: { jumpToEnd() }) {
-                    Image(systemName: "chevron.right.to.line")
+                HStack(spacing: 10) {
+                    TimelineSelectButton(selection: rangeSelection)
+                        .controlSize(.small)
+                        .disabled(settings.vaultEnabled && !vault.isUnlocked)
+
+                    Button(action: { jumpToEnd() }) {
+                        Image(systemName: "chevron.right.to.line")
+                    }
+                    .buttonStyle(.plain)
+                    .help("Jump to latest")
+                    .accessibilityLabel("Jump to latest")
                 }
-                .buttonStyle(.plain)
-                .help("Jump to latest")
-                .accessibilityLabel("Jump to latest")
                 .padding(8)
             }
         }
@@ -597,6 +622,19 @@ struct TimelineUnifiedView: View {
         showFilters = false
     }
 
+    /// Applies the range as the search's dates and leaves the rest of the search to the user.
+    private func searchInRange(_ range: TimelineRange) {
+        startDate = Date(timeIntervalSince1970: TimeInterval(range.fromMs) / 1000)
+        endDate = Date(timeIntervalSince1970: TimeInterval(range.toMs - 1) / 1000)
+        rangeSelection.end()
+        if query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            applyFilters()
+            searchFieldFocused = true
+        } else {
+            showResults()
+        }
+    }
+
     private func installKeyMonitor() {
         keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
             // The monitor is app-wide: leave keys alone in Settings, sheets and popovers so arrow
@@ -615,9 +653,23 @@ struct TimelineUnifiedView: View {
                 let isArrow = event.keyCode == 123 || event.keyCode == 124
                 guard isArrow, first.string.isEmpty else { return event }
             }
+            // The range's date fields use arrow keys and Delete themselves.
+            if window.firstResponder is NSDatePicker { return event }
             // Ignore other modified keypresses
             if event.modifierFlags.contains(.command) || event.modifierFlags.contains(.option) || event.modifierFlags.contains(.control) {
                 return event
+            }
+            if rangeSelection.isActive {
+                switch event.keyCode {
+                case 53: // escape
+                    rangeSelection.end()
+                    return nil
+                case 51, 117: // delete, forward delete
+                    rangeSelection.requestDelete()
+                    return nil
+                default:
+                    break
+                }
             }
             switch event.keyCode {
             case 123: // left

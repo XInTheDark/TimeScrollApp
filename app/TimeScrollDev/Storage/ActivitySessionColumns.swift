@@ -26,4 +26,12 @@ enum ActivitySessionColumns {
   static func decodeKeywords(_ json: String) -> [String] {
     (try? JSONDecoder().decode([String].self, from: Data(json.utf8))) ?? []
   }
+
+  static func encodeTextIds(_ ids: [Int64]) -> String {
+    String(decoding: (try? JSONEncoder().encode(ids)) ?? Data("[]".utf8), as: UTF8.self)
+  }
+
+  static func decodeTextIds(_ json: String) -> [Int64] {
+    (try? JSONDecoder().decode([Int64].self, from: Data(json.utf8))) ?? []
+  }
 }

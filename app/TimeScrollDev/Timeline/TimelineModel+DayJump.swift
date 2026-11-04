@@ -15,4 +15,15 @@ extension TimelineModel {
       }
     }
   }
+
+  /// Opens the timeline at `range` if none of its time is loaded, so a typed range can be seen.
+  func reveal(_ range: TimelineRange) {
+    guard metas.isEmpty || range.toMs <= minTimeMs || range.fromMs > maxTimeMs else { return }
+    DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+      guard let first = (try? DB.shared.firstSnapshot(fromMs: range.fromMs, toMs: range.toMs)) ?? nil else { return }
+      DispatchQueue.main.async {
+        self?.openSnapshot(id: first.id, anchorStartedAtMs: first.startedAtMs)
+      }
+    }
+  }
 }

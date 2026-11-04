@@ -2,13 +2,15 @@ import Foundation
 
 /// Blocking HTTP calls to the local Ollama server. Callers run on background queues.
 enum OllamaSyncRequest {
-    static func perform(_ request: URLRequest, timeout: TimeInterval, label: String) -> Data? {
+    /// `onTaskStart` receives each attempt's task, so a caller on another thread can cancel it.
+    static func perform(_ request: URLRequest, timeout: TimeInterval, label: String,
+                        onTaskStart: ((URLSessionTask) -> Void)? = nil) -> Data? {
         // A kept-alive connection dies when Ollama restarts or the Mac sleeps; the first request
         // on it fails with "connection lost" although the server is up again.
         var attempt = 0
         while true {
             attempt += 1
-            switch performOnce(request, timeout: timeout, label: label) {
+            switch performOnce(request, timeout: timeout, label: label, onTaskStart: onTaskStart) {
             case .success(let data):
                 return data
             case .connectionLost where attempt < 2:
@@ -25,7 +27,8 @@ enum OllamaSyncRequest {
         case failure
     }
 
-    private static func performOnce(_ request: URLRequest, timeout: TimeInterval, label: String) -> Outcome {
+    private static func performOnce(_ request: URLRequest, timeout: TimeInterval, label: String,
+                                    onTaskStart: ((URLSessionTask) -> Void)?) -> Outcome {
         var data: Data?
         var requestError: Error?
         var statusCode: Int?
@@ -36,6 +39,7 @@ enum OllamaSyncRequest {
             statusCode = (response as? HTTPURLResponse)?.statusCode
             semaphore.signal()
         }
+        onTaskStart?(task)
         task.resume()
 
         if semaphore.wait(timeout: .now() + timeout) == .timedOut {
@@ -67,7 +71,8 @@ enum OllamaSyncRequest {
         return perform(request, timeout: timeout, label: label)
     }
 
-    static func postJSON(_ url: URL, payload: [String: Any], timeout: TimeInterval, label: String) -> Data? {
+    static func postJSON(_ url: URL, payload: [String: Any], timeout: TimeInterval, label: String,
+                         onTaskStart: ((URLSessionTask) -> Void)? = nil) -> Data? {
         guard let body = try? JSONSerialization.data(withJSONObject: payload) else {
             print("[Ollama] Failed to serialize \(label) request")
             return nil
@@ -77,6 +82,6 @@ enum OllamaSyncRequest {
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.timeoutInterval = timeout
         request.httpBody = body
-        return perform(request, timeout: timeout, label: label)
+        return perform(request, timeout: timeout, label: label, onTaskStart: onTaskStart)
     }
 }

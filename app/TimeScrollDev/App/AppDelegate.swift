@@ -28,6 +28,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     var prefsWC: NSWindowController?
     var mainWC: NSWindowController?
     var onboardingWC: NSWindowController?
+    var summarySetupWC: NSWindowController?
     var updateNotiTokens: [NSObjectProtocol] = []
     var powerNotiTokens: [NSObjectProtocol] = []
     var captureStateCancellables: Set<AnyCancellable> = []
@@ -70,6 +71,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         // Apply start-minimized and dock visibility policy
         DispatchQueue.main.async { [weak self] in
+            #if DEBUG
+            if DemoMode.isActive {
+                DemoDirector.shared.start(showMainWindow: { self?.showMainWindow() })
+                return
+            }
+            #endif
             // Load vault prefs
             VaultManager.shared.loadPrefs()
             self?.applyStartMinimizedIfNeeded()
@@ -80,6 +87,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self?.installSleepWakeObservers()
             StorageMaintenanceManager.shared.start()
             MCPBridgeServer.shared.start()
+            BackgroundSummaryRunner.shared.start()
             // Show onboarding when the currently configured capture/text modes still need permissions.
             let captureSelection = CaptureModeSelection(settings: SettingsStore.shared)
             let hasRequiredPermissions = Permissions.hasRequiredCapturePermissions(
@@ -90,6 +98,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 self?.showOnboardingWindow()
             } else {
                 self?.applyAutoStartCaptureIfNeeded()
+                self?.showSummarySetupIfNeeded()
             }
             // Prompt unlock if vault is enabled
             if SettingsStore.shared.vaultEnabled {

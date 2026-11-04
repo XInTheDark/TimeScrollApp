@@ -85,7 +85,7 @@ final class SnapshotEmbeddingWriter {
         }
     }
 
-    private static let stagingModelSuffix = "#rebuild"
+    static let stagingModelSuffix = "#rebuild"
 
     func rebuildCurrentEmbeddings(progress: @escaping (RebuildStatus) -> Void) throws {
         let defaults = UserDefaults.standard

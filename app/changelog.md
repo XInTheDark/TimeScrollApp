@@ -1,3 +1,38 @@
+# v2.2.0 - 2026-11-04
+
+This update adds the **summaries** feature, which I'm very excited about, and I'll keep improving it in future versions.
+
+## Summaries
+
+Select any range in your timeline to see where the time went and what you did. Summaries are written by a local Ollama model, so your screen text stays on your Mac.
+
+- Click Select on the timeline, then drag across it, enter dates, or choose Today, Yesterday, This Week or Last Week.
+- Summarize opens a panel with your time in each app and a written summary.
+- Long ranges work too, including weeks, months and years.
+- Finished days can be summarized in the background, which makes week and month summaries more detailed. Choose a default model in Settings ▸ Search to turn this on.
+- Setup now includes summaries. If you've already finished setup, you'll see this once when you update.
+
+Every part in the summary process is designed with efficiency in mind.
+
+## Time ranges
+
+- Search within a selected range.
+- Delete everything in a selected range.
+- Export a selected range as a timelapse.
+
+## New: Timelapse export
+
+- Export any period of your history as a video, with a choice of resolution and where the date and time appear.
+- Speed it up as much as 600x (60x by default), or alternatively show 30 snapshots per second regardless of the time between them.
+- Time when recording was stopped is skipped.
+
+## Other changes
+
+- Single snapshots can now be saved as PNG or JPEG.
+- Recording now resumes after display sleep, even if earlier attempts to restart it failed.
+
+---
+
 # v2.1.0 - 2026-11-01
 
 ## Sessions

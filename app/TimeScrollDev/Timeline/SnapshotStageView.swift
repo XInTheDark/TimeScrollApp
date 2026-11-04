@@ -492,7 +492,8 @@ struct SnapshotStageView: View {
         if let id = model.selected?.id { SnapshotActions.copyText(snapshotId: id) }
     }
     private func saveCurrent() {
-        if let p = model.selected?.path { SnapshotActions.saveImageAs(from: URL(fileURLWithPath: p), fallbackImage: nsImage) }
+        guard !isLoading, let image = nsImage, let selected = model.selected else { NSSound.beep(); return }
+        SnapshotImageSavePanel.save(image: image, sourceURL: URL(fileURLWithPath: selected.path))
     }
     private func revealCurrent() { if let p = model.selected?.path { SnapshotActions.revealInFinder(URL(fileURLWithPath: p)) } }
     private func confirmAndDeleteCurrent() {
@@ -926,61 +927,6 @@ enum SnapshotActions {
         let pb = NSPasteboard.general
         pb.clearContents()
         pb.setString(text, forType: .string)
-    }
-
-    static func saveImageAs(from url: URL, fallbackImage: NSImage? = nil) {
-        let panel = NSSavePanel()
-        panel.canCreateDirectories = true
-        panel.title = "Save Image As"
-        if url.pathExtension.lowercased() == "tse" && fallbackImage == nil {
-            // Suggest original extension (unknown here); default to .png
-            panel.nameFieldStringValue = url.deletingPathExtension().lastPathComponent + ".png"
-            if #available(macOS 11.0, *) {
-                panel.allowedContentTypes = [UTType.png, UTType.jpeg, UTType.heic]
-            } else {
-                panel.allowedFileTypes = ["png","jpg","jpeg","heic"]
-            }
-        } else {
-            panel.nameFieldStringValue = url.lastPathComponent
-            let ext = url.pathExtension.lowercased()
-            if !ext.isEmpty {
-                if #available(macOS 11.0, *) {
-                    if let t = UTType(filenameExtension: ext) { panel.allowedContentTypes = [t] }
-                } else {
-                    panel.allowedFileTypes = [ext]
-                }
-            }
-        }
-        if panel.runModal() == .OK, let dest = panel.url {
-            do {
-                if let fb = fallbackImage {
-                    // Save the displayed image
-                    if let t = dest.pathExtension.lowercased().isEmpty ? UTType.png : UTType(filenameExtension: dest.pathExtension), #available(macOS 11.0, *) {
-                        guard let cg = fb.cgImage(forProposedRect: nil, context: nil, hints: nil) else { throw NSError(domain: "TS.Save", code: -2) }
-                        let uti = t.identifier as CFString
-                        guard let dst = CGImageDestinationCreateWithURL(dest as CFURL, uti, 1, nil) else { throw NSError(domain: "TS.Save", code: -3) }
-                        CGImageDestinationAddImage(dst, cg, nil)
-                        if !CGImageDestinationFinalize(dst) { throw NSError(domain: "TS.Save", code: -4) }
-                    } else {
-                        // Fallback: PNG via NSBitmapImageRep
-                        guard let tiff = fb.tiffRepresentation, let rep = NSBitmapImageRep(data: tiff), let data = rep.representation(using: .png, properties: [:]) else { throw NSError(domain: "TS.Save", code: -5) }
-                        try data.write(to: dest, options: .atomic)
-                    }
-                } else if url.pathExtension.lowercased() == "tse" {
-                    let unlocked = UserDefaults.standard.bool(forKey: "vault.isUnlocked")
-                    guard unlocked, let data = try? FileCrypter.shared.decryptImage(at: url) else {
-                        throw NSError(domain: "TS.Save", code: -1)
-                    }
-                    try data.write(to: dest, options: Data.WritingOptions.atomic)
-                } else {
-                    let tmp = dest.deletingLastPathComponent().appendingPathComponent(".timescrolldev-tmp-\(UUID().uuidString)")
-                    try FileManager.default.copyItem(at: url, to: tmp)
-                    let _ = try FileManager.default.replaceItemAt(dest, withItemAt: tmp)
-                }
-            } catch {
-                NSSound.beep()
-            }
-        }
     }
 
     static func revealInFinder(_ url: URL) {

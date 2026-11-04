@@ -8,7 +8,11 @@ struct MCPPane: View {
 
     init(mcpEnabled: Binding<Bool>) {
         self._mcpEnabled = mcpEnabled
-        let helper = Self.helperExecutable(for: Bundle.main.bundleURL)
+        var bundleURL = Bundle.main.bundleURL
+        #if DEBUG
+        if DemoMode.isActive { bundleURL = DemoMode.installedAppURL }
+        #endif
+        let helper = Self.helperExecutable(for: bundleURL)
         self._jsonText = State(initialValue: Self.makeConfigJSON(helperPath: helper))
     }
 

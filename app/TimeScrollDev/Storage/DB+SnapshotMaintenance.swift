@@ -16,6 +16,7 @@ extension DB {
             _ = sqlite3_exec(db, "DELETE FROM ts_text_store;", nil, nil, nil)
             _ = sqlite3_exec(db, "UPDATE ts_snapshot SET text_ref_id=NULL, text_store_id=NULL;", nil, nil, nil)
             _ = sqlite3_exec(db, "DELETE FROM ts_session_sketch; \(Self.allSessionDaysDeletionSQL)", nil, nil, nil)
+            _ = sqlite3_exec(db, Self.allRangeSummariesDeletionSQL, nil, nil, nil)
         }
     }
 
@@ -51,6 +52,7 @@ extension DB {
             \(Self.orphanedSessionSketchDeletionSQL)
             DELETE FROM ts_session_day WHERE window_start_ms < \(cutoff);
             DELETE FROM ts_activity_session WHERE day_start_ms NOT IN (SELECT day_start_ms FROM ts_session_day);
+            \(Self.summaryRetentionSQL(cutoffMs: cutoff))
             COMMIT;
             """
             let before = sqlite3_total_changes(db)
@@ -118,6 +120,7 @@ extension DB {
             DELETE FROM ts_text_store WHERE id NOT IN (SELECT DISTINCT text_store_id FROM ts_snapshot WHERE text_store_id IS NOT NULL);
             \(Self.orphanedSessionSketchDeletionSQL)
             \(Self.sessionDayInvalidationSQL(windowContaining: "\(startedAtMs)"))
+            \(Self.summaryInvalidationSQL(captureAt: "\(startedAtMs)"))
             COMMIT;
             """
             guard sqlite3_exec(db, sql, nil, nil, nil) == SQLITE_OK else {

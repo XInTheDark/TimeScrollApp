@@ -51,8 +51,7 @@ enum SessionSummarizer {
     var totals: [Int32: Int64] = [:]
     for index in range {
       let next = index + 1 < samples.count ? samples[index + 1].timeMs - samples[index].timeMs : 0
-      let dwell = next > parameters.hardBreakMs || next <= 0 ? min(5_000, parameters.dwellCapMs) : min(next, parameters.dwellCapMs)
-      totals[samples[index].app, default: 0] += max(1, dwell)
+      totals[samples[index].app, default: 0] += CaptureDwell.ms(gapToNextMs: next, hardBreakMs: parameters.hardBreakMs, capMs: parameters.dwellCapMs)
     }
     return totals
       .sorted { $0.value != $1.value ? $0.value > $1.value : $0.key < $1.key }

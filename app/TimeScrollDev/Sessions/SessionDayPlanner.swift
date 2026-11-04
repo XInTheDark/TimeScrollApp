@@ -63,7 +63,8 @@ enum SessionDayPlanner {
           combined[combined.count - 1] = ActivitySession(id: last.id, startMs: last.startMs,
                                                          endMs: max(last.startMs, session.startMs - 1),
                                                          snapshotCount: last.snapshotCount, apps: last.apps,
-                                                         keywords: last.keywords)
+                                                         keywords: last.keywords,
+                                                         representativeTextIds: last.representativeTextIds)
         }
       }
       combined.append(session)

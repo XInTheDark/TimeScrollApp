@@ -236,6 +236,7 @@ final class VaultManager: ObservableObject {
         EmbeddingANNIndexStore.shared.clearMemory()
         EmbeddingMatrixStore.shared.clearMemory()
         ActivitySessionProvider.shared.clearMemory()
+        RangeSummaryProvider.shared.cancelRunning()
         inactivityTimer?.invalidate()
         inactivityTimer = nil
     }

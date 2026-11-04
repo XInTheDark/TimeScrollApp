@@ -104,6 +104,8 @@ final class IngestQueue {
                     thumbPath: rec.thumbPath
                 )
                 if rowId > 0 {
+                    // The capture may belong to a day whose stats or summary already exist.
+                    try? DB.shared.invalidateSummaries(captureAtMs: rec.startedAtMs)
                     // Notify UI that a snapshot row was inserted while previously locked
                     Task { @MainActor in AppState.shared.lastSnapshotTick &+= 1 }
                     try? StoragePaths.withSecurityScope { try fm.removeItem(at: u) }

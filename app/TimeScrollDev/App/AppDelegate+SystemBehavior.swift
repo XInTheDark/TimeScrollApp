@@ -53,6 +53,7 @@ extension AppDelegate {
     func installSleepWakeObservers() {
         let nc = NSWorkspace.shared.notificationCenter
         let sleepToken = nc.addObserver(forName: NSWorkspace.willSleepNotification, object: nil, queue: .main) { _ in
+            UsageTracker.shared.systemWillSleep()
             Task { @MainActor in
                 if SettingsStore.shared.autoLockOnSleep {
                     await VaultManager.shared.lock()
@@ -61,6 +62,7 @@ extension AppDelegate {
         }
         powerNotiTokens.append(sleepToken)
         let token = nc.addObserver(forName: NSWorkspace.didWakeNotification, object: nil, queue: .main) { [weak self] _ in
+            UsageTracker.shared.systemDidWake()
             Task { @MainActor in
                 guard let self else { return }
                 let now = Date().timeIntervalSince1970

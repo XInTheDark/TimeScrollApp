@@ -32,133 +32,73 @@ extension DB {
         }
     }
 
-    func totalUsageSeconds(now: TimeInterval) throws -> TimeInterval {
-        try onQueueSync {
-            try openIfNeeded(); guard let db = db else { return 0 }
-            var stmt: OpaquePointer?; defer { sqlite3_finalize(stmt) }
-            // Fetch all sessions up to now and compute the union of intervals to avoid double counting
-            let sql = "SELECT start_s, COALESCE(end_s, ?) AS end_s FROM ts_usage_session WHERE start_s <= ? ORDER BY start_s ASC;"
-            if sqlite3_prepare_v2(db, sql, -1, &stmt, nil) != SQLITE_OK { return 0 }
-            sqlite3_bind_double(stmt, 1, now)
-            sqlite3_bind_double(stmt, 2, now)
-
-            var mergedStart: Double? = nil
-            var mergedEnd: Double = 0
-            var total: Double = 0
-
-            while sqlite3_step(stmt) == SQLITE_ROW {
-                let s = sqlite3_column_double(stmt, 0)
-                let eRaw = sqlite3_column_double(stmt, 1)
-                // Clamp any inverted rows defensively
-                let e = max(eRaw, s)
-                if mergedStart == nil {
-                    mergedStart = s; mergedEnd = e
-                    continue
-                }
-                if s > mergedEnd { // disjoint
-                    total += max(0, mergedEnd - (mergedStart ?? mergedEnd))
-                    mergedStart = s; mergedEnd = e
-                } else { // overlap or touch
-                    if e > mergedEnd { mergedEnd = e }
-                }
-            }
-            if let ms = mergedStart {
-                total += max(0, mergedEnd - ms)
-            }
-            return total
+    /// Time covered by usage sessions between `from` (or the beginning of time when nil) and `to`.
+    func usageSeconds(from: TimeInterval?, to: TimeInterval) throws -> TimeInterval {
+        try onReadQueueSync { db in
+            try Self.usageSeconds(from: from, to: to, db: db)
         }
     }
 
-    func usageSecondsSince(cutoff: TimeInterval, now: TimeInterval) throws -> TimeInterval {
-        try onQueueSync {
-            try openIfNeeded(); guard let db = db else { return 0 }
-            let lo = min(cutoff, now)
-            let hi = max(cutoff, now)
-            var stmt: OpaquePointer?; defer { sqlite3_finalize(stmt) }
-            // Fetch sessions overlapping [cutoff, now] and compute the union of clamped intervals
-            let sql = "SELECT start_s, end_s FROM ts_usage_session WHERE start_s <= ? AND COALESCE(end_s, ?) >= ? ORDER BY start_s ASC;"
-            if sqlite3_prepare_v2(db, sql, -1, &stmt, nil) != SQLITE_OK { return 0 }
-            sqlite3_bind_double(stmt, 1, hi)
-            sqlite3_bind_double(stmt, 2, hi)
-            sqlite3_bind_double(stmt, 3, lo)
+    /// Overlapping sessions are merged so that no moment counts twice. An open session runs until `to`.
+    static func usageSeconds(from: TimeInterval?, to: TimeInterval, db: OpaquePointer) throws -> TimeInterval {
+        let lo = from ?? -Double.greatestFiniteMagnitude
+        guard lo <= to else { return 0 }
+        var stmt: OpaquePointer?
+        defer { sqlite3_finalize(stmt) }
+        let sql = "SELECT start_s, COALESCE(end_s, ?1) FROM ts_usage_session WHERE start_s <= ?1 AND COALESCE(end_s, ?1) >= ?2 ORDER BY start_s ASC;"
+        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { throw NSError(domain: "TS.DB", code: 803) }
+        sqlite3_bind_double(stmt, 1, to)
+        sqlite3_bind_double(stmt, 2, lo)
 
-            var mergedStart: Double? = nil
-            var mergedEnd: Double = 0
-            var total: Double = 0
-
-            while sqlite3_step(stmt) == SQLITE_ROW {
-                let rawS = sqlite3_column_double(stmt, 0)
-                let rawE = (sqlite3_column_type(stmt, 1) != SQLITE_NULL) ? sqlite3_column_double(stmt, 1) : hi
-                // Clamp to [lo, hi] and ensure non-negative interval
-                let s = max(lo, min(rawS, hi))
-                let e = max(s, min(rawE, hi))
-
-                if mergedStart == nil {
-                    mergedStart = s; mergedEnd = e
-                    continue
-                }
-                if s > mergedEnd { // disjoint
-                    total += max(0, mergedEnd - (mergedStart ?? mergedEnd))
-                    mergedStart = s; mergedEnd = e
-                } else { // overlap or touch
-                    if e > mergedEnd { mergedEnd = e }
-                }
+        var total: Double = 0
+        var coveredThrough = lo
+        var result = sqlite3_step(stmt)
+        while result == SQLITE_ROW {
+            let start = max(coveredThrough, sqlite3_column_double(stmt, 0))
+            let end = min(to, sqlite3_column_double(stmt, 1))
+            if end > start {
+                total += end - start
+                coveredThrough = end
             }
-            if let ms = mergedStart { total += max(0, mergedEnd - ms) }
-            return total
+            result = sqlite3_step(stmt)
         }
+        guard result == SQLITE_DONE else { throw NSError(domain: "TS.DB", code: 804) }
+        return total
     }
 
-    func finalizeStaleOpenUsageSessions(maxOpenSeconds: TimeInterval, now: TimeInterval) {
-        _ = try? onQueueSync {
-            try openIfNeeded(); guard let db = db else { return }
-            var stmt: OpaquePointer?; defer { sqlite3_finalize(stmt) }
-            if sqlite3_prepare_v2(db, "SELECT id, start_s FROM ts_usage_session WHERE end_s IS NULL;", -1, &stmt, nil) != SQLITE_OK { return }
-            var stale: [(Int64, Double)] = []
-            while sqlite3_step(stmt) == SQLITE_ROW {
-                let id = sqlite3_column_int64(stmt, 0)
-                let start = sqlite3_column_double(stmt, 1)
-                if now - start > maxOpenSeconds {
-                    stale.append((id, start))
-                }
-            }
-            sqlite3_finalize(stmt); stmt = nil
-            if stale.isEmpty { return }
-            for (id, start) in stale {
-                var upd: OpaquePointer?; defer { sqlite3_finalize(upd) }
-                if sqlite3_prepare_v2(db, "UPDATE ts_usage_session SET end_s=? WHERE id=? AND end_s IS NULL;", -1, &upd, nil) == SQLITE_OK {
-                    let clampEnd = start + maxOpenSeconds
-                    sqlite3_bind_double(upd, 1, clampEnd)
-                    sqlite3_bind_int64(upd, 2, id)
-                    _ = sqlite3_step(upd)
-                }
-            }
+    /// Closes sessions a previous run left open. Returns false if the database is unavailable
+    /// (for example a locked vault), in which case they are still open.
+    @discardableResult
+    func closeOrphanedUsageSessions(startedBefore launchTime: TimeInterval) -> Bool {
+        let closed: Bool? = try? onQueueSync {
+            try openIfNeeded()
+            guard let db = db else { return false }
+            return Self.closeOrphanedUsageSessions(startedBefore: launchTime, db: db)
         }
+        return closed ?? false
     }
 
-    /// Close all open usage sessions using the last snapshot timestamp as the end time.
-    /// This provides accurate bounds: the session ran at least until the last captured snapshot.
-    /// If no snapshots exist for a session, end_s = start_s (0 duration, conservative).
-    func closeAllOpenUsageSessions() {
-        _ = try? onQueueSync {
-            try openIfNeeded(); guard let db = db else { return }
-            // Use a single UPDATE with a correlated subquery for efficiency:
-            // Set end_s to the latest snapshot time (in seconds) that occurred after session start,
-            // or fall back to start_s if no snapshots exist.
-            let sql = """
-            UPDATE ts_usage_session
-            SET end_s = COALESCE(
-                (SELECT MAX(started_at_ms) / 1000.0
-                 FROM ts_snapshot
-                 WHERE started_at_ms >= ts_usage_session.start_s * 1000),
-                start_s
-            )
-            WHERE end_s IS NULL;
-            """
-            var stmt: OpaquePointer?; defer { sqlite3_finalize(stmt) }
-            if sqlite3_prepare_v2(db, sql, -1, &stmt, nil) != SQLITE_OK { return }
-            _ = sqlite3_step(stmt)
-        }
+    /// An orphan ran at least until its last snapshot, which is all that can be known about it. Snapshots
+    /// from the next session or from this run, which may already exist, say nothing about when it ended.
+    static func closeOrphanedUsageSessions(startedBefore launchTime: TimeInterval, db: OpaquePointer) -> Bool {
+        let sql = """
+        UPDATE ts_usage_session
+        SET end_s = COALESCE(
+            (SELECT MAX(started_at_ms) / 1000.0
+             FROM ts_snapshot
+             WHERE started_at_ms >= ts_usage_session.start_s * 1000
+               AND started_at_ms < COALESCE(
+                 (SELECT MIN(next.start_s) FROM ts_usage_session AS next
+                  WHERE next.start_s > ts_usage_session.start_s AND next.start_s < ?1),
+                 ?1) * 1000),
+            start_s
+        )
+        WHERE end_s IS NULL AND start_s < ?1;
+        """
+        var stmt: OpaquePointer?
+        defer { sqlite3_finalize(stmt) }
+        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return false }
+        sqlite3_bind_double(stmt, 1, launchTime)
+        return sqlite3_step(stmt) == SQLITE_DONE
     }
-
 }

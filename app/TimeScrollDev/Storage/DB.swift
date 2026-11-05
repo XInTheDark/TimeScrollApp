@@ -342,6 +342,7 @@ final class DB {
 
     private func migrateIfNeeded() throws {
         guard let db = db else { return }
+        defer { Self.repairUsageSessionsIfNeeded(db: db) }
         if tableExists("ts_snapshot") {
             if !columnExists("ts_snapshot", column: "ended_at_ms") {
                 _ = sqlite3_exec(db, "ALTER TABLE ts_snapshot ADD COLUMN ended_at_ms INTEGER;", nil, nil, nil)

@@ -1,3 +1,9 @@
+# v2.2.1 - 2026-11-05
+
+Fixed usage stats and the Stats pane time range slider
+
+---
+
 # v2.2.0 - 2026-11-04
 
 This update adds the **summaries** feature, which I'm very excited about, and I'll keep improving it in future versions.
@@ -75,6 +81,8 @@ Text capture in Direct mode was rewritten. It's faster, more accurate, and now r
 - Fixed a hang when quitting.
 - Fixed several crashes in search and the timeline.
 - "Dedup sensitivity" is now called "Duplicate tolerance".
+
+---
 
 # v2.0.0 - 2026-10-08
 

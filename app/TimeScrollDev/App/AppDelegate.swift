@@ -41,6 +41,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         print("[App] applicationDidFinishLaunching")
+        _ = UsageTracker.shared // Records the launch time before capture can write a snapshot.
         let bundleId = Bundle.main.bundleIdentifier ?? "(nil)"
         let lib = FileManager.default.urls(for: .libraryDirectory, in: .userDomainMask).first?.path ?? "(unknown)"
         print("[Prefs] Launch bundle=\(bundleId) libraryDir=\(lib)")

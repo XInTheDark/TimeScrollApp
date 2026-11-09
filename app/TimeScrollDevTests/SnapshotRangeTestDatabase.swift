@@ -29,6 +29,8 @@ final class SnapshotRangeTestDatabase: @unchecked Sendable {
     CREATE TABLE ts_text_store (id INTEGER PRIMARY KEY AUTOINCREMENT, content TEXT);
     CREATE TABLE ts_session_sketch (text_store_id INTEGER PRIMARY KEY, sketch BLOB NOT NULL);
     CREATE TABLE ts_session_day (day_start_ms INTEGER PRIMARY KEY, window_start_ms INTEGER NOT NULL, window_end_ms INTEGER NOT NULL);
+    CREATE TABLE ts_activity_session (id INTEGER NOT NULL, day_start_ms INTEGER NOT NULL, keywords TEXT NOT NULL DEFAULT '[]');
+    CREATE INDEX idx_activity_session_day ON ts_activity_session(day_start_ms);
     CREATE VIRTUAL TABLE ts_text_index USING fts5(content, content='', contentless_delete=1);
     """)
     DB.createMetaTableIfNeeded(db: db)

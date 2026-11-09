@@ -51,7 +51,7 @@ extension DB {
             DELETE FROM ts_text_store WHERE id NOT IN (SELECT DISTINCT text_store_id FROM ts_snapshot WHERE text_store_id IS NOT NULL);
             \(Self.orphanedSessionSketchDeletionSQL)
             DELETE FROM ts_session_day WHERE window_start_ms < \(cutoff);
-            DELETE FROM ts_activity_session WHERE day_start_ms NOT IN (SELECT day_start_ms FROM ts_session_day);
+            \(Self.orphanedActivitySessionDeletionSQL)
             \(Self.summaryRetentionSQL(cutoffMs: cutoff))
             COMMIT;
             """

@@ -26,6 +26,8 @@ struct TimelineUnifiedView: View {
     @State private var timelineResizeStartHeight: Double?
     /// Not observed here: the views that show it observe it, so a drag doesn't redo this body.
     @State private var rangeSelection = TimelineRangeSelection()
+    /// Not observed here either: only the menu bar shows its state.
+    @State private var menuActions = TimelineMenuActions()
     @FocusState private var searchFieldFocused: Bool
 
     private let minMsPerPt = TimelineModel.minMsPerPoint
@@ -49,6 +51,12 @@ struct TimelineUnifiedView: View {
             visible.insert(.audio)
         }
         return visible.isEmpty ? [.screen] : visible
+    }
+
+    private var menuAvailability: TimelineMenuAvailability {
+        TimelineMenuAvailability(selectedKind: model.selected?.captureKind,
+                                 isShowingResults: showingResults,
+                                 isLocked: settings.vaultEnabled && !vault.isUnlocked)
     }
 
     private var bottomTimelineHeight: CGFloat {
@@ -93,6 +101,16 @@ struct TimelineUnifiedView: View {
             model.msPerPoint = min(max(model.msPerPoint, minMsPerPt), maxMsPerPt)
         }
         .onDisappear { removeKeyMonitor() }
+        .focusedSceneObject(menuActions)
+        .onChange(of: menuAvailability, initial: true) { _, availability in
+            menuActions.availability = availability
+        }
+        .onReceive(menuActions.commands) { command in
+            if command == .toggleSelection { rangeSelection.toggle() }
+        }
+        .onReceive(rangeSelection.$isActive.removeDuplicates()) { isActive in
+            menuActions.isSelecting = isActive
+        }
         .background(HostingWindowReader(reference: hostWindow).frame(width: 0, height: 0))
         #if DEBUG
         .background {
@@ -477,7 +495,7 @@ struct TimelineUnifiedView: View {
                         .id("\(model.query)|\(((model.selectedAppBundleIds.isEmpty ? ["_"] : Array(model.selectedAppBundleIds)).sorted().joined(separator: ",")))|\(((model.selectedCaptureKinds.isEmpty ? ["all"] : model.selectedCaptureKinds.map(\.rawValue)).sorted().joined(separator: ",")))|\(((model.selectedAudioSourceKinds.isEmpty ? ["all"] : model.selectedAudioSourceKinds.map(\.rawValue)).sorted().joined(separator: ",")))|\(model.startMs ?? -1)|\(model.endMs ?? -1)")
                         .environmentObject(settings)
                 } else {
-                    CaptureStageView(model: model, globalQuery: model.query)
+                    CaptureStageView(model: model, globalQuery: model.query, menuActions: menuActions)
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)

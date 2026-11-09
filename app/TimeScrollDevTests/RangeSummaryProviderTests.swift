@@ -196,6 +196,23 @@ final class RangeSummaryProviderTests {
     #expect(stored(monday + day, monday + 2 * day) != nil)
   }
 
+  @Test func aDeleteJustAfterMidnightRemovesThePreviousDaysSummary() {
+    addSession(id: 9, on: monday)
+    addSession(id: 9, on: monday + 2 * day)
+    _ = generate(monday, monday + day)
+    _ = generate(monday + 2 * day, monday + 3 * day)
+    database.exec(DB.summaryInvalidationSQL(capturesFromMs: monday + day + 3_600_000, throughMs: monday + day + 3_600_000))
+    #expect(stored(monday, monday + day) == nil)
+    #expect(stored(monday + 2 * day, monday + 3 * day) != nil)
+  }
+
+  @Test func aDeleteLaterInTheDayKeepsThePreviousDaysSummary() {
+    addSession(id: 9, on: monday)
+    _ = generate(monday, monday + day)
+    database.exec(DB.summaryInvalidationSQL(capturesFromMs: monday + day + 12 * 3_600_000, throughMs: monday + day + 12 * 3_600_000))
+    #expect(stored(monday, monday + day) != nil)
+  }
+
   @Test func clearingAllTextRemovesAllSummaries() {
     addSession(id: 9, on: monday)
     _ = generate(monday, monday + day)

@@ -18,7 +18,8 @@ extension FrameOutput {
             let capture = AXTextExtractor.shared.collect(displayBounds: displayBounds,
                                                          blacklistBundleIds: Set(blacklistBundleIds),
                                                          grid: grid,
-                                                         cache: axTextCache)
+                                                         cache: axTextCache,
+                                                         sightings: axAppSightings)
             return (capture.text, capture.lines)
         case .none:
             return ("", [])

@@ -14,6 +14,17 @@ final class CaptureManager: NSObject {
     private let outputQueue = DispatchQueue(label: "TimeScroll.Capture.Output")
     private let streamDelegate = StreamDelegate()
     private var appSwitchObserver: AppSwitchObserver?
+    private var excludedAppObserver: ExcludedAppObserver?
+    private lazy var excludedAppGate = ExcludedAppGate { [weak self] in
+        Task { @MainActor [weak self] in
+            await self?.refreshExclusions()
+        }
+    }
+    private var appliedExcludedPIDs: Set<pid_t> = []
+    private var appliedPrivateWindowPlan = PrivateWindowFilterPlan.empty
+    private var privateBrowserObserver: PrivateBrowserObserver?
+    private var isRefreshingExclusions = false
+    private var needsAnotherExclusionRefresh = false
     private let onSnapshot: (URL) -> Void
 
     init(onSnapshot: @escaping (URL) -> Void) {
@@ -50,6 +61,27 @@ final class CaptureManager: NSObject {
         // Compute initial exclusion set once and reuse per display
         let blacklistBundleSet = Set((UserDefaults.standard.array(forKey: "settings.blacklistBundleIds") as? [String]) ?? [])
         let blacklistApps: [SCRunningApplication] = excludedApplications(bundleIds: blacklistBundleSet, content: content)
+        appliedExcludedPIDs = Set(blacklistApps.map(\.processID))
+        excludedAppGate.updateCovered(appliedExcludedPIDs,
+                                      running: ExcludedAppObserver.runningPIDs(bundleIds: blacklistBundleSet),
+                                      at: .zero)
+        excludedAppObserver?.invalidate()
+        excludedAppObserver = ExcludedAppObserver { [excludedAppGate] in
+            excludedAppGate.updateRunning(ExcludedAppObserver.runningPIDs(bundleIds: ExcludedAppObserver.storedBundleIds()))
+        }
+        appliedPrivateWindowPlan = .empty
+        PrivateWindowTracker.shared.reset()
+        PrivateWindowTracker.shared.setFilterStaleHandler { [weak self] in
+            Task { @MainActor [weak self] in
+                await self?.refreshExclusions()
+            }
+        }
+        PrivateWindowTracker.shared.updateBrowsers(PrivateBrowserObserver.runningBrowsers(excluding: blacklistBundleSet))
+        privateBrowserObserver?.invalidate()
+        privateBrowserObserver = PrivateBrowserObserver {
+            PrivateWindowTracker.shared.updateBrowsers(
+                PrivateBrowserObserver.runningBrowsers(excluding: ExcludedAppObserver.storedBundleIds()))
+        }
 
         for display in displays {
             let streamIndex = newStreams.count
@@ -76,6 +108,7 @@ final class CaptureManager: NSObject {
                 hevcStore: HEVCVideoStore(namespace: String(display.displayID)),
                 displayBounds: CGDisplayBounds(display.displayID),
                 isActiveDisplay: activeDisplay.map { tracker in { tracker.isActive(display.displayID) } },
+                excludedAppGate: excludedAppGate,
                 onProbeIntervalChanged: { [weak self] probeInterval in
                     self?.scheduleProbeIntervalUpdate(probeInterval, for: streamIndex)
                 }
@@ -110,9 +143,17 @@ final class CaptureManager: NSObject {
     func stop() async {
         appSwitchObserver?.invalidate()
         appSwitchObserver = nil
+        excludedAppObserver?.invalidate()
+        excludedAppObserver = nil
+        privateBrowserObserver?.invalidate()
+        privateBrowserObserver = nil
         for stream in streams {
             try? await stream.stopCapture()
         }
+        excludedAppGate.reset()
+        PrivateWindowTracker.shared.setFilterStaleHandler(nil)
+        PrivateWindowTracker.shared.reset()
+        appliedPrivateWindowPlan = .empty
         flushWriters()
         streams.removeAll()
         streamConfigurations.removeAll()
@@ -168,8 +209,10 @@ final class CaptureManager: NSObject {
     }
 
     // MARK: - Helpers (DRY)
+    /// Includes off-screen windows: an on-screen-only list omits excluded apps that are hidden or on
+    /// another Space, and they would then be captured once they appear.
     private func shareableContent() async throws -> SCShareableContent {
-        try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
+        try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: false)
     }
 
     private func excludedApplications(bundleIds: Set<String>, content: SCShareableContent) -> [SCRunningApplication] {
@@ -177,34 +220,69 @@ final class CaptureManager: NSObject {
         return content.applications.filter { bundleIds.contains($0.bundleIdentifier) }
     }
 
-    private func filterFor(display: SCDisplay, apps: [SCRunningApplication]) -> SCContentFilter {
-        SCContentFilter(display: display, excludingApplications: apps, exceptingWindows: [])
+    private func filterFor(display: SCDisplay, apps: [SCRunningApplication], exceptingWindows: [SCWindow] = []) -> SCContentFilter {
+        SCContentFilter(display: display, excludingApplications: apps, exceptingWindows: exceptingWindows)
+    }
+
+    /// Rebuilds the stream filters from the stored list. Concurrent calls coalesce, and the last
+    /// pass always sees the latest list.
+    @MainActor
+    func refreshExclusions() async {
+        guard !streams.isEmpty else { return }
+        if isRefreshingExclusions {
+            needsAnotherExclusionRefresh = true
+            return
+        }
+        isRefreshingExclusions = true
+        defer { isRefreshingExclusions = false }
+        repeat {
+            needsAnotherExclusionRefresh = false
+            await refreshExclusionsOnce()
+        } while needsAnotherExclusionRefresh
     }
 
     @MainActor
-    func updateExclusions(with bundleIds: [String]) async {
-        guard !streams.isEmpty else { return }
+    private func refreshExclusionsOnce() async {
+        let bundleIds = ExcludedAppObserver.storedBundleIds()
+        let running = ExcludedAppObserver.runningPIDs(bundleIds: bundleIds)
         do {
             let content = try await shareableContent()
-            let apps = excludedApplications(bundleIds: Set(bundleIds), content: content)
-            await applyExclusions(apps: apps)
+            let apps = excludedApplications(bundleIds: bundleIds, content: content)
+            let pids = Set(apps.map(\.processID))
+            let tracker = PrivateWindowTracker.shared
+            tracker.updateBrowsers(PrivateBrowserObserver.runningBrowsers(excluding: bundleIds))
+            tracker.retain(existing: Set(content.windows.map(\.windowID)))
+            let plan = tracker.filterPlan(listedPIDs: Set(content.applications.map(\.processID)))
+            // The filter stays as it was if a stream refuses the update, so frames keep being checked.
+            if pids != appliedExcludedPIDs || plan != appliedPrivateWindowPlan {
+                let browsers = content.applications.filter { plan.browserPIDs.contains($0.processID) && !pids.contains($0.processID) }
+                let excepted = content.windows.filter { plan.exceptedWindowIDs.contains($0.windowID) }
+                guard await applyExclusions(apps: apps + browsers, exceptingWindows: excepted) else { return }
+                appliedExcludedPIDs = pids
+                appliedPrivateWindowPlan = plan
+            }
+            let appliedAt = CMClockGetTime(CMClockGetHostTimeClock())
+            tracker.filterApplied(plan, at: appliedAt)
+            excludedAppGate.updateCovered(pids, running: running, at: appliedAt)
         } catch {
-            // ignore
+            excludedAppGate.updateRunning(running)
         }
     }
 
     @MainActor
-    private func applyExclusions(apps: [SCRunningApplication]) async {
+    private func applyExclusions(apps: [SCRunningApplication], exceptingWindows: [SCWindow]) async -> Bool {
+        var succeeded = true
         for (index, stream) in streams.enumerated() {
             guard capturedDisplays.indices.contains(index) else { continue }
             let display = capturedDisplays[index]
-            let filter = filterFor(display: display, apps: apps)
+            let filter = filterFor(display: display, apps: apps, exceptingWindows: exceptingWindows)
             do {
                 try await stream.updateContentFilter(filter)
             } catch {
-                // ignore
+                succeeded = false
             }
         }
+        return succeeded
     }
 }
 

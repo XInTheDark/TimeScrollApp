@@ -17,13 +17,7 @@ final class ActivitySessionProvider: @unchecked Sendable {
 
   private let queue = DispatchQueue(label: "TimeScroll.ActivitySessions", qos: .userInitiated)
   private let queueKey = DispatchSpecificKey<Bool>()
-  private struct CachedDay {
-    let params: String
-    let sessions: [ActivitySession]
-    let checkedAtMs: Int64
-    let settled: Bool
-  }
-  private var memory: [Int64: CachedDay] = [:]
+  private var memory = SessionDayMemory()
 
   private init() { queue.setSpecific(key: queueKey, value: true) }
 
@@ -55,15 +49,18 @@ final class ActivitySessionProvider: @unchecked Sendable {
   // MARK: - Per day (on `queue`)
 
   private func sessions(for days: [SessionDayPlanner.Day], sensitivity: SessionSensitivity) -> [ActivitySession]? {
+    // Read before anything else: captures deleted from here on must not be stored or remembered.
+    guard let invalidations = try? DB.shared.summaryInvalidationCount() else { return nil }
+    memory.sync(invalidations: invalidations)
     var all: [ActivitySession] = []
     for day in days {
-      guard let sessions = try? sessions(for: day, sensitivity: sensitivity) else { return nil }
+      guard let sessions = try? sessions(for: day, sensitivity: sensitivity, invalidations: invalidations) else { return nil }
       all += sessions
     }
     return SessionDayPlanner.combine(all)
   }
 
-  private func sessions(for day: SessionDayPlanner.Day, sensitivity: SessionSensitivity) throws -> [ActivitySession] {
+  private func sessions(for day: SessionDayPlanner.Day, sensitivity: SessionSensitivity, invalidations: Int64) throws -> [ActivitySession] {
     let params = Self.params(for: sensitivity)
     let nowMs = Int64(Date().timeIntervalSince1970 * 1000)
     if let cached = memory[day.startMs], cached.params == params,
@@ -83,7 +80,10 @@ final class ActivitySessionProvider: @unchecked Sendable {
     }
 
     let computed = try compute(day: day, sensitivity: sensitivity, nowMs: nowMs)
-    try db.replaceActivitySessions(computed.sessions, record: computed.record)
+    // Captures changed while computing: the next request recomputes, and a summary using this result is discarded.
+    guard try db.replaceActivitySessions(computed.sessions, record: computed.record, expectedInvalidations: invalidations) else {
+      return computed.sessions
+    }
     return remember(computed.sessions, day: day, params: params, nowMs: nowMs, settled: isSettled(computed.record))
   }
 
@@ -93,7 +93,7 @@ final class ActivitySessionProvider: @unchecked Sendable {
 
   private func remember(_ sessions: [ActivitySession], day: SessionDayPlanner.Day, params: String,
                         nowMs: Int64, settled: Bool) -> [ActivitySession] {
-    memory[day.startMs] = CachedDay(params: params, sessions: sessions, checkedAtMs: nowMs, settled: settled)
+    memory[day.startMs] = SessionDayMemory.Entry(params: params, sessions: sessions, checkedAtMs: nowMs, settled: settled)
     return sessions
   }
 

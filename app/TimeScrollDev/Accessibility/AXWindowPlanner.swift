@@ -42,7 +42,7 @@ enum AXWindowPlanner {
     static func plan(windows: [AXScreenWindow],
                      displayBounds: CGRect,
                      maxWindows: Int,
-                     isExcluded: (pid_t) -> Bool) -> [AXPlannedWindow] {
+                     isExcluded: (AXScreenWindow) -> Bool) -> [AXPlannedWindow] {
         guard displayBounds.width > 0, displayBounds.height > 0, maxWindows > 0 else { return [] }
         let minVisibleArea = displayBounds.width * displayBounds.height * minVisibleDisplayFraction
         var planned: [AXPlannedWindow] = []
@@ -54,7 +54,7 @@ enum AXWindowPlanner {
             let onDisplay = window.bounds.intersection(displayBounds)
             guard !onDisplay.isNull, onDisplay.width > 0, onDisplay.height > 0 else { continue }
 
-            if !isExcluded(window.pid) {
+            if !isExcluded(window) {
                 let visible = RectSubtraction.uncovered(onDisplay, by: occluders, minArea: minVisibleArea)
                 if RectSubtraction.area(visible) >= minVisibleArea {
                     planned.append(AXPlannedWindow(window: window, visibleRects: visible))

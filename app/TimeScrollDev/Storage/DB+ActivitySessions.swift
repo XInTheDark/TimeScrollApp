@@ -74,14 +74,26 @@ extension DB {
   /// SQL dropping stored days whose window includes `timeMsSQL` (an expression), so they are
   /// recomputed; appended to the statements that delete captures.
   static func sessionDayInvalidationSQL(windowContaining timeMsSQL: String) -> String {
-    "DELETE FROM ts_session_day WHERE window_start_ms <= \(timeMsSQL) AND window_end_ms > \(timeMsSQL);"
+    sessionDayDeletionSQL(where: "window_start_ms <= \(timeMsSQL) AND window_end_ms > \(timeMsSQL)")
   }
 
   static func sessionDayInvalidationSQL(windowsFromMs fromMs: Int64, throughMs: Int64) -> String {
-    "DELETE FROM ts_session_day WHERE window_start_ms <= \(throughMs) AND window_end_ms > \(fromMs);"
+    sessionDayDeletionSQL(where: "window_start_ms <= \(throughMs) AND window_end_ms > \(fromMs)")
+  }
+
+  /// The sessions go with their day: their keywords are screen text from the deleted captures.
+  private static func sessionDayDeletionSQL(where condition: String) -> String {
+    """
+    DELETE FROM ts_activity_session WHERE day_start_ms IN (SELECT day_start_ms FROM ts_session_day WHERE \(condition));
+    DELETE FROM ts_session_day WHERE \(condition);
+    """
   }
 
   static let allSessionDaysDeletionSQL = "DELETE FROM ts_session_day; DELETE FROM ts_activity_session;"
+
+  /// Sessions with no stored day. Earlier versions left these behind when captures were deleted.
+  static let orphanedActivitySessionDeletionSQL =
+    "DELETE FROM ts_activity_session WHERE day_start_ms NOT IN (SELECT day_start_ms FROM ts_session_day);"
 
   func sessionDayFingerprint(fromMs: Int64, toMs: Int64) throws -> SessionDayFingerprint {
     try onReadQueueSync { db in try Self.sessionDayFingerprint(fromMs: fromMs, toMs: toMs, db: db) }
@@ -160,12 +172,20 @@ extension DB {
     return sessions
   }
 
-  /// Replaces a day's sessions and its record in one transaction.
-  func replaceActivitySessions(_ sessions: [ActivitySession], record: SessionDayRecord) throws {
+  /// Replaces a day's sessions and its record in one transaction. Stores nothing and returns false if
+  /// captures changed since `expectedInvalidations` was read, so deleted text can't be written back.
+  func replaceActivitySessions(_ sessions: [ActivitySession], record: SessionDayRecord, expectedInvalidations: Int64) throws -> Bool {
     try withWriteSavepoint {
-      guard let db else { return }
-      try Self.replaceActivitySessions(sessions, record: record, db: db)
+      guard let db else { return false }
+      return try Self.replaceActivitySessions(sessions, record: record, expectedInvalidations: expectedInvalidations, db: db)
     }
+  }
+
+  /// Callers wrap this in a transaction.
+  static func replaceActivitySessions(_ sessions: [ActivitySession], record: SessionDayRecord, expectedInvalidations: Int64, db: OpaquePointer) throws -> Bool {
+    guard summaryInvalidationCount(db: db) == expectedInvalidations else { return false }
+    try replaceActivitySessions(sessions, record: record, db: db)
+    return true
   }
 
   /// Callers wrap this in a transaction.

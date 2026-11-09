@@ -27,11 +27,13 @@ final class AXTextExtractor {
 
     /// Text of the windows visible on the display at `displayBounds` (global coordinates, as from
     /// `CGDisplayBounds`). `grid` is the luma grid of the frame being indexed; with `cache` (one per
-    /// display) it lets unchanged windows skip their Accessibility reads.
+    /// display) it lets unchanged windows skip their Accessibility reads. `sightings` (one per
+    /// display) decides when an app may be asked for its full accessibility tree.
     func collect(displayBounds: CGRect,
                  blacklistBundleIds: Set<String>,
                  grid: LumaGridSignature?,
                  cache: AXWindowTextCache,
+                 sightings: AXAppSightings,
                  limits: AXTextLimits = .default) -> Capture {
         guard isTrusted() else { return .empty }
         let debug = UserDefaults.standard.bool(forKey: "settings.debugMode")
@@ -45,12 +47,15 @@ final class AXTextExtractor {
         let contentPIDs = Set(windows.filter { $0.layer >= 0 && $0.layer < AXWindowPlanner.maxContentLayer }.map(\.pid))
         directory.retain(only: Set(windows.map(\.id)))
         bundleIDs.retain(only: Set(windows.map(\.pid)))
-        leases.refresh(onScreen: contentPIDs, now: now)
 
-        let plan = AXWindowPlanner.plan(windows: windows, displayBounds: displayBounds, maxWindows: limits.maxWindows) { pid in
-            guard !blacklistBundleIds.isEmpty, let id = self.bundleIDs.bundleID(for: pid) else { return false }
+        let plan = AXWindowPlanner.plan(windows: windows, displayBounds: displayBounds, maxWindows: limits.maxWindows) { window in
+            if PrivateWindowTracker.shared.hidesText(of: window) { return true }
+            guard !blacklistBundleIds.isEmpty, let id = self.bundleIDs.bundleID(for: window.pid) else { return false }
             return blacklistBundleIds.contains(id)
         }
+        let readPIDs = Set(plan.map(\.window.pid))
+        leases.refresh(read: readPIDs, onScreen: contentPIDs, now: now)
+        let settledPIDs = sightings.record(readPIDs, now: now)
         let reused = cache.reusableText(for: plan, grid: grid, displayBounds: displayBounds, now: now)
 
         // Windows to read, grouped by app in front-to-back order of each app's frontmost window.
@@ -72,7 +77,7 @@ final class AXTextExtractor {
             let pid = appOrder[appIndex]
             let indices = appWindows[pid] ?? []
             let results = self.readApp(pid: pid, windows: indices.map { plan[$0] }, cache: cache,
-                                       limits: limits, now: now, debug: debug)
+                                       settled: settledPIDs.contains(pid), limits: limits, now: now, debug: debug)
             for (index, result) in zip(indices, results) { fresh[index] = result }
         }
 
@@ -91,10 +96,10 @@ final class AXTextExtractor {
     }
 
     /// Reads one app's windows in turn, the focused element first within its window.
-    private func readApp(pid: pid_t, windows: [AXPlannedWindow], cache: AXWindowTextCache,
+    private func readApp(pid: pid_t, windows: [AXPlannedWindow], cache: AXWindowTextCache, settled: Bool,
                          limits: AXTextLimits, now: TimeInterval, debug: Bool) -> [AXWindowTextCache.Result] {
         let app = AXUIElementCreateApplication(pid)
-        leases.acquire(pid, app: app, now: now, debug: debug)
+        let isTreeStable = leases.acquire(pid, app: app, settled: settled, now: now, debug: debug)
         let source = AXLiveNodeSource()
         let lookupDeadline = AXDeadline(limits: limits)
         let axWindows = directory.axWindows(for: windows.map(\.window), app: app, source: source,
@@ -122,7 +127,7 @@ final class AXTextExtractor {
                 let ms = (AXDeadline.now() - start) / 1_000_000
                 print("[AX] pid=\(pid) window=\(planned.window.id) elements=\(walker.visitedCount) culled=\(walker.culledCount) chars=\(text.count) in \(ms)ms")
             }
-            return AXWindowTextCache.Result(text: text, documents: walker.documents, isFresh: true)
+            return AXWindowTextCache.Result(text: text, documents: walker.documents, isFresh: true, isCacheable: isTreeStable)
         }
     }
 

@@ -5,6 +5,7 @@ import UniformTypeIdentifiers
 struct SnapshotStageView: View {
     @ObservedObject var model: TimelineModel
     var globalQuery: String = ""
+    let menuActions: TimelineMenuActions
 
     @State private var rects: [CGRect] = []
     @State private var localQuery: String = ""
@@ -100,6 +101,14 @@ struct SnapshotStageView: View {
         }
         .onChange(of: model.selected?.id) { _, _ in
             handleSelectionChange()
+        }
+        .onReceive(menuActions.commands) { command in
+            switch command {
+            case .showSnapshotActions: model.actionPanelExpanded = true
+            case .revealInFinder: revealCurrent()
+            case .saveSnapshot: saveCurrent()
+            case .toggleSelection: break
+            }
         }
         .onReceive(audioPlayback.$currentTime) { currentTime in
             syncAudioPlaybackToTimeline(currentTimeSeconds: currentTime)

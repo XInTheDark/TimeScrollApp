@@ -13,7 +13,7 @@ struct AboutPane: View {
                     Text("TimeScroll will stay free forever. If it has been useful, you can help support future work.")
                         .fixedSize(horizontal: false, vertical: true)
 
-                    Link("Buy me a coffee on Ko-fi", destination: URL(string: "https://ko-fi.com/jmuzhen")!)
+                    Link("Support on Patreon", destination: URL(string: "https://www.patreon.com/JMuzhen")!)
                 }
             }
 

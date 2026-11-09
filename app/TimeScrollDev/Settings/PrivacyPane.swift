@@ -5,6 +5,7 @@ import UniformTypeIdentifiers
 struct PrivacyPane: View {
   @ObservedObject var settings: SettingsStore
   @State private var selection = Set<String>()
+  @State private var visibleIds: [String] = []
 
   var body: some View {
     SettingsPaneScrollView {
@@ -13,7 +14,7 @@ struct PrivacyPane: View {
         subtitle: "Windows from these apps are excluded from capture whenever they are visible."
       ) {
         Group {
-          if settings.blacklistBundleIds.isEmpty {
+          if visibleIds.isEmpty {
             emptyState
           } else {
             appList
@@ -37,17 +38,27 @@ struct PrivacyPane: View {
           .disabled(selection.isEmpty)
         }
       }
+
+      PrivateWindowsSettingsCard(settings: settings)
     }
-    .onChange(of: settings.blacklistBundleIds) { _, newList in
+    .onAppear(perform: refreshVisibleIds)
+    .onChange(of: settings.blacklistBundleIds) { _, _ in
+      refreshVisibleIds()
       Task { @MainActor in
-        await AppState.shared.captureManager.updateExclusions(with: newList)
+        await AppState.shared.captureManager.refreshExclusions()
       }
+    }
+  }
+
+  private func refreshVisibleIds() {
+    visibleIds = DefaultExcludedApps.visible(in: settings.blacklistBundleIds) { bundleId in
+      NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleId) != nil
     }
   }
 
   private var appList: some View {
     List(selection: $selection) {
-      ForEach(settings.blacklistBundleIds, id: \.self) { bid in
+      ForEach(visibleIds, id: \.self) { bid in
         PrivacyAppRow(bundleId: bid)
           .tag(bid)
       }
@@ -85,7 +96,7 @@ struct PrivacyPane: View {
 
   private var selectionSummary: String {
     if selection.isEmpty {
-      let count = settings.blacklistBundleIds.count
+      let count = visibleIds.count
       return count == 1 ? "1 app excluded from capture" : "\(count) apps excluded from capture"
     }
 
@@ -94,21 +105,10 @@ struct PrivacyPane: View {
   }
 
   private func addApps() {
-    let panel = NSOpenPanel()
-    panel.title = "Choose Applications to Blacklist"
-    panel.allowsMultipleSelection = true
-    panel.canChooseFiles = true
-    panel.canChooseDirectories = false
-    panel.allowedContentTypes = [.application]
-    panel.begin { resp in
-      guard resp == .OK else { return }
+    ExcludedAppPicker.pick { bundleIds in
       var newIds = settings.blacklistBundleIds
-      for url in panel.urls {
-        if let bid = Bundle(url: url)?.bundleIdentifier {
-          if !newIds.contains(bid) {
-            newIds.append(bid)
-          }
-        }
+      for bid in bundleIds where !newIds.contains(bid) {
+        newIds.append(bid)
       }
       settings.blacklistBundleIds = newIds
     }
@@ -121,7 +121,7 @@ struct PrivacyPane: View {
   }
 }
 
-private struct PrivacyAppRow: View {
+struct PrivacyAppRow: View {
   let bundleId: String
 
   @State private var displayName: String

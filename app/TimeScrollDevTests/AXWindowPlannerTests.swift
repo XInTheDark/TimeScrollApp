@@ -12,7 +12,7 @@ struct AXWindowPlannerTests {
 
   private func plan(_ windows: [AXScreenWindow], display: CGRect = display, maxWindows: Int = 16,
                     excluded: Set<pid_t> = []) -> [AXPlannedWindow] {
-    AXWindowPlanner.plan(windows: windows, displayBounds: display, maxWindows: maxWindows) { excluded.contains($0) }
+    AXWindowPlanner.plan(windows: windows, displayBounds: display, maxWindows: maxWindows) { excluded.contains($0.pid) }
   }
 
   // MARK: - Parsing

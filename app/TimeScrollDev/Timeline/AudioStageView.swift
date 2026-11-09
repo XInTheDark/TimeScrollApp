@@ -3,6 +3,7 @@ import AppKit
 
 struct AudioStageView: View {
     @ObservedObject var model: TimelineModel
+    let menuActions: TimelineMenuActions
     @StateObject private var playback = AudioPlaybackController()
 
     @State private var asset: AudioAssetRecord?
@@ -27,6 +28,11 @@ struct AudioStageView: View {
         .onDisappear {
             playback.stop()
             model.playbackTimeMs = nil
+        }
+        .onReceive(menuActions.commands) { command in
+            guard command == .revealInFinder,
+                  let path = asset?.path ?? model.selected?.path else { return }
+            SnapshotActions.revealInFinder(URL(fileURLWithPath: path))
         }
         .onReceive(playback.$currentTime) { currentTime in
             syncPlaybackIndicator(currentTimeSeconds: currentTime)

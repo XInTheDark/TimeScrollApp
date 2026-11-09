@@ -37,6 +37,7 @@ final class FrameOutput: NSObject, SCStreamOutput {
     var lastFrontContext: String?
     /// "Active display" mode: frames persist only while this returns true. Nil captures always.
     let isActiveDisplay: (() -> Bool)?
+    let excludedAppGate: ExcludedAppGate?
     var wasActiveDisplay = false
     var stableCount: Int = 0
     /// Set when a snapshot is appended to the HEVC segment; the next skipped frame flushes it.
@@ -47,6 +48,8 @@ final class FrameOutput: NSObject, SCStreamOutput {
     let displayBounds: CGRect
     /// Accessibility text per window on this display, reused while a window is unchanged on screen.
     let axTextCache = AXWindowTextCache()
+    /// Apps read on this display in recent captures, for when Direct mode may ask for their tree.
+    let axAppSightings = AXAppSightings()
 
     // Thermal governance
     var lastThermalState: ProcessInfo.ThermalState = .nominal
@@ -72,11 +75,13 @@ final class FrameOutput: NSObject, SCStreamOutput {
          hevcStore: HEVCVideoStore,
          displayBounds: CGRect,
          isActiveDisplay: (() -> Bool)? = nil,
+         excludedAppGate: ExcludedAppGate? = nil,
          onProbeIntervalChanged: @escaping (CFTimeInterval) -> Void = { _ in }) {
         self.onSnapshot = onSnapshot
         self.hevcStore = hevcStore
         self.displayBounds = displayBounds
         self.isActiveDisplay = isActiveDisplay
+        self.excludedAppGate = excludedAppGate
         self.onProbeIntervalChanged = onProbeIntervalChanged
         super.init()
         currentInterval = baseInterval
@@ -138,7 +143,10 @@ final class FrameOutput: NSObject, SCStreamOutput {
         let processing = UserDefaults.standard.string(forKey: "settings.textProcessingMode") ?? SettingsStore.defaultTextProcessingMode.rawValue
         if processing == SettingsStore.TextProcessingMode.ocr.rawValue, Indexer.shared.isOCRCoolingDown { return }
 
-        // Privacy handled via SCContentFilter exclusions at the stream level.
+        // Privacy handled via SCContentFilter exclusions at the stream level; this covers the gap
+        // until the filter includes an app that opened after it was built.
+        if excludedAppGate?.shouldDrop(framePTS: pts, displayBounds: displayBounds) == true { return }
+        if PrivateWindowTracker.shared.shouldDrop(framePTS: pts, displayBounds: displayBounds) { return }
 
         lastEvaluatedPTS = pts
 

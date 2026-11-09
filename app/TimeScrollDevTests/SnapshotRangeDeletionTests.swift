@@ -170,6 +170,57 @@ final class SnapshotRangeDeletionTests {
     #expect(DB.summaryInvalidationCount(db: database.db) > before)
   }
 
+  @Test func storedSessionKeywordsOfAffectedDaysAreRemoved() throws {
+    database.addSnapshot(at: 3 * day + 100)
+    database.exec("""
+    INSERT INTO ts_session_day VALUES (\(3 * day), \(3 * day - 1_000), \(4 * day + 1_000)), (\(5 * day), \(5 * day - 1_000), \(6 * day + 1_000));
+    INSERT INTO ts_activity_session(id, day_start_ms, keywords) VALUES (1, \(3 * day), '["private"]'), (2, \(3 * day), '["private"]'), (3, \(5 * day), '["other"]');
+    """)
+    _ = try database.deleteAll(matching: filter(3 * day, 4 * day))
+    #expect(database.count("SELECT COUNT(*) FROM ts_activity_session WHERE keywords = '[\"private\"]';") == 0)
+    #expect(database.count("SELECT COUNT(*) FROM ts_activity_session WHERE keywords = '[\"other\"]';") == 1)
+  }
+
+  // A session started before midnight can carry text from up to the context margin after it.
+  @Test func deletingJustAfterMidnightRemovesThePeriodsEndingThere() throws {
+    let margin = SessionDayPlanner.contextMarginMs
+    database.addSnapshot(at: 4 * day + margin - 1)
+    database.exec("""
+    INSERT INTO ts_range_summary(start_ms, end_ms, model, prompt_version, text, created_at_ms) VALUES
+      (\(3 * day), \(4 * day), 'm', 1, 'day before', 1),
+      (\(0), \(4 * day), 'm', 1, 'week before', 1),
+      (\(2 * day), \(3 * day), 'm', 1, 'two days before', 1),
+      (\(5 * day), \(6 * day), 'm', 1, 'day after', 1);
+    INSERT INTO ts_day_ledger(day_start_ms, day_end_ms, version, json, computed_at_ms) VALUES
+      (\(3 * day), \(4 * day), 1, '{}', 1),
+      (\(2 * day), \(3 * day), 1, '{}', 1);
+    """)
+    _ = try database.deleteAll(matching: filter(4 * day, 5 * day))
+    #expect(database.count("SELECT COUNT(*) FROM ts_range_summary WHERE text IN ('day before', 'week before');") == 0)
+    #expect(database.count("SELECT COUNT(*) FROM ts_range_summary WHERE text IN ('two days before', 'day after');") == 2)
+    #expect(database.count("SELECT COUNT(*) FROM ts_day_ledger WHERE day_start_ms = \(3 * day);") == 0)
+    #expect(database.count("SELECT COUNT(*) FROM ts_day_ledger WHERE day_start_ms = \(2 * day);") == 1)
+  }
+
+  @Test func deletingPastTheMarginKeepsThePreviousDay() throws {
+    database.addSnapshot(at: 4 * day + SessionDayPlanner.contextMarginMs)
+    database.exec("""
+    INSERT INTO ts_range_summary(start_ms, end_ms, model, prompt_version, text, created_at_ms) VALUES (\(3 * day), \(4 * day), 'm', 1, 'day before', 1);
+    INSERT INTO ts_day_ledger(day_start_ms, day_end_ms, version, json, computed_at_ms) VALUES (\(3 * day), \(4 * day), 1, '{}', 1);
+    """)
+    _ = try database.deleteAll(matching: filter(4 * day, 5 * day))
+    #expect(database.count("SELECT COUNT(*) FROM ts_range_summary;") == 1)
+    #expect(database.count("SELECT COUNT(*) FROM ts_day_ledger;") == 1)
+  }
+
+  @Test func deletingOneCaptureUsesTheSameMargin() throws {
+    database.exec("INSERT INTO ts_range_summary(start_ms, end_ms, model, prompt_version, text, created_at_ms) VALUES (\(3 * day), \(4 * day), 'm', 1, 'day before', 1);")
+    database.exec(DB.summaryInvalidationSQL(captureAt: "\(4 * day + SessionDayPlanner.contextMarginMs)"))
+    #expect(database.count("SELECT COUNT(*) FROM ts_range_summary;") == 1)
+    database.exec(DB.summaryInvalidationSQL(captureAt: "\(4 * day + SessionDayPlanner.contextMarginMs - 1)"))
+    #expect(database.count("SELECT COUNT(*) FROM ts_range_summary;") == 0)
+  }
+
   @Test func deletingNothingDoesNotInvalidate() throws {
     let before = DB.summaryInvalidationCount(db: database.db)
     _ = try database.deleteAll(matching: filter(0, 1_000))

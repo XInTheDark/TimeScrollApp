@@ -3,9 +3,10 @@ import ApplicationServices
 
 /// Chromium and Electron apps build their accessibility tree only once an assistive app sets
 /// `AXManualAccessibility`, and keep it (and its CPU and memory cost) until the flag is cleared.
-/// TimeScroll turns the flag on only for apps it is about to read, and clears it again when an app
-/// has not been on screen for `idleTimeout`, when Direct mode or capture stops, and when TimeScroll
-/// quits. It never clears a flag that was on before it, or while VoiceOver is running.
+/// TimeScroll turns the flag on only for apps that have settled on screen (`AXAppSightings`) and
+/// that it is about to read, and clears it again when none of an app's windows has been read for
+/// `idleTimeout` (a window that stays covered does not count), when Direct mode or capture stops,
+/// and when TimeScroll quits. It never clears a flag that was on before it, or while VoiceOver is running.
 /// `AXEnhancedUserInterface` is never touched: it changes other apps' rendering and window behavior.
 final class AXManualAccessibilityLeases {
     static let shared = AXManualAccessibilityLeases()
@@ -17,12 +18,16 @@ final class AXManualAccessibilityLeases {
     private let lock = NSLock()
     private var table = AXLeaseTable()
 
-    /// Turns the flag on for `pid` unless it was already decided. Call before reading the app.
-    func acquire(_ pid: pid_t, app: AXUIElement, now: TimeInterval, debug: Bool) {
+    /// Call before reading the app. Turns the flag on for `pid` once it has `settled` on screen,
+    /// unless that was already decided. Returns whether the app's tree is complete enough to cache
+    /// what is read now: not while undecided, nor right after the flag went on, as Chromium builds
+    /// the tree asynchronously.
+    func acquire(_ pid: pid_t, app: AXUIElement, settled: Bool, now: TimeInterval, debug: Bool) -> Bool {
         lock.lock()
         let undecided = table.isUndecided(pid)
         lock.unlock()
-        guard undecided else { return }
+        guard undecided else { return true }
+        guard settled else { return false }
 
         AXUIElementSetMessagingTimeout(app, Self.ipcTimeout)
         var current: CFTypeRef?
@@ -33,14 +38,16 @@ final class AXManualAccessibilityLeases {
         lock.lock()
         if leased { table.lease(pid, now: now) } else { table.leaveAlone(pid) }
         lock.unlock()
+        return !leased
     }
 
-    /// Keeps the leases of apps on screen, and ends those unused for `idleTimeout`.
-    func refresh(onScreen pids: Set<pid_t>, now: TimeInterval) {
+    /// Keeps the leases of apps with a window `read` on a display, and ends those unused for
+    /// `idleTimeout`. Apps with no window `onScreen` are checked again next time they are read.
+    func refresh(read: Set<pid_t>, onScreen: Set<pid_t>, now: TimeInterval) {
         lock.lock()
-        table.touch(pids, now: now)
+        table.touch(read, now: now)
         let expired = table.expire(now: now, idle: Self.idleTimeout)
-        table.forgetLeftAlone(except: pids)
+        table.forgetLeftAlone(except: onScreen)
         lock.unlock()
         restore(expired)
     }

@@ -22,6 +22,7 @@ final class ActivitySessionStorageTests {
     """)
     DB.createSessionSketchTableIfNeeded(db: db)
     DB.createActivitySessionTablesIfNeeded(db: db)
+    DB.createMetaTableIfNeeded(db: db)
   }
 
   deinit {
@@ -165,6 +166,50 @@ final class ActivitySessionStorageTests {
     exec(DB.sessionDayInvalidationSQL(windowContaining: "205"))   // inside day 200, and day 100's trailing context
     #expect(count("SELECT COUNT(*) FROM ts_session_day;") == 1)
     #expect(DB.sessionDayRecord(dayStartMs: 300, db: db) != nil)
+  }
+
+  private func sessionDay(_ day: Int64, keyword: String) throws {
+    let record = SessionDayRecord(dayStartMs: day, windowStartMs: day - 10, windowEndMs: day + 110, params: "v1|balanced",
+                                  fingerprint: SessionDayFingerprint(snapshotCount: 0, maxSnapshotId: 0, textCount: 0, sketchedCount: 0),
+                                  computedAtMs: 0)
+    let session = ActivitySession(id: day, startMs: day, endMs: day + 1, snapshotCount: 1, apps: [], keywords: [keyword])
+    try DB.replaceActivitySessions([session], record: record, db: db)
+  }
+
+  @Test func invalidatingADayRemovesItsStoredSessions() throws {
+    try sessionDay(100, keyword: "private")
+    try sessionDay(300, keyword: "other")
+    exec(DB.sessionDayInvalidationSQL(windowContaining: "105"))
+    #expect(DB.activitySessions(dayStartMs: 100, db: db).isEmpty)
+    #expect(DB.activitySessions(dayStartMs: 300, db: db).map(\.keywords) == [["other"]])
+
+    exec(DB.sessionDayInvalidationSQL(windowsFromMs: 295, throughMs: 305))
+    #expect(count("SELECT COUNT(*) FROM ts_activity_session;") == 0)
+  }
+
+  @Test func sessionsLeftByEarlierVersionsAreRemoved() throws {
+    try sessionDay(100, keyword: "kept")
+    try sessionDay(300, keyword: "private")
+    exec("DELETE FROM ts_session_day WHERE day_start_ms = 300;")
+    exec(DB.orphanedActivitySessionDeletionSQL)
+    #expect(DB.activitySessions(dayStartMs: 300, db: db).isEmpty)
+    #expect(DB.activitySessions(dayStartMs: 100, db: db).map(\.keywords) == [["kept"]])
+  }
+
+  @Test func sessionsComputedBeforeADeleteAreNotStored() throws {
+    let record = SessionDayRecord(dayStartMs: 100, windowStartMs: 90, windowEndMs: 210, params: "v1|balanced",
+                                  fingerprint: SessionDayFingerprint(snapshotCount: 1, maxSnapshotId: 1, textCount: 0, sketchedCount: 0),
+                                  computedAtMs: 0)
+    let session = ActivitySession(id: 1, startMs: 100, endMs: 101, snapshotCount: 1, apps: [], keywords: ["private"])
+    let expected = DB.summaryInvalidationCount(db: db)
+    try DB.setMetaInt(DB.summaryInvalidationKey, expected + 1, db: db)
+
+    #expect(try !DB.replaceActivitySessions([session], record: record, expectedInvalidations: expected, db: db))
+    #expect(DB.sessionDayRecord(dayStartMs: 100, db: db) == nil)
+    #expect(DB.activitySessions(dayStartMs: 100, db: db).isEmpty)
+
+    #expect(try DB.replaceActivitySessions([session], record: record, expectedInvalidations: expected + 1, db: db))
+    #expect(DB.activitySessions(dayStartMs: 100, db: db) == [session])
   }
 
   @Test func sketchesOfDeletedTextsAreRemoved() {

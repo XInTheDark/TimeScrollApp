@@ -20,11 +20,15 @@ struct OnboardingView: View {
     @State private var enableVault = false
     @State private var showVaultPassphrase = false
 
-    // Step 3: AI features
+    // Step 3: Excluded apps
+    @State private var includeDefaultExclusions = true
+    @State private var addedExclusions: [String] = []
+
+    // Step 4: AI features
     @AppStorage("settings.mcpEnabled") private var mcpEnabled: Bool = false
     @State private var aiModeEnabled = true
 
-    // Step 4: Permissions
+    // Step 5: Permissions
     @State private var hasScreenRecording = Permissions.isScreenRecordingGranted()
     @State private var hasAccessibility = Permissions.isAccessibilityGranted()
     @State private var hasMicrophone = Permissions.isMicrophoneGranted()
@@ -33,7 +37,7 @@ struct OnboardingView: View {
     @State private var wentThroughFullFlow = false
     @State private var modelAvailabilityRevision = 0
 
-    private let totalSteps = 5
+    private let totalSteps = 6
 
     private var captureSelection: CaptureModeSelection {
         CaptureModeSelection(
@@ -57,6 +61,8 @@ struct OnboardingView: View {
             case 2:
                 vaultStep
             case 3:
+                OnboardingExclusionsStep(includeDefaults: $includeDefaultExclusions, addedBundleIds: $addedExclusions)
+            case 4:
                 aiStep
             default:
                 permissionsStep
@@ -86,6 +92,7 @@ struct OnboardingView: View {
             captureMicrophone = settings.captureMicrophoneEnabled
             captureSystemAudio = settings.captureSystemAudioEnabled
             enableVault = settings.vaultEnabled
+            includeDefaultExclusions = !settings.defaultExclusionsDeclined
             aiModeEnabled = settings.aiModeOn
             refreshPermissionState()
 
@@ -142,6 +149,8 @@ struct OnboardingView: View {
         case 2:
             return "Keep your data secure with encryption."
         case 3:
+            return "Choose which apps TimeScroll should never capture."
+        case 4:
             return "Enhance your experience with AI features."
         default:
             return "Grant the permissions needed for your selected capture setup."
@@ -601,6 +610,13 @@ struct OnboardingView: View {
             settings.captureAudioEnabled = enableAudioFeature && (captureMicrophone || captureSystemAudio)
             settings.captureMicrophoneEnabled = captureMicrophone
             settings.captureSystemAudioEnabled = captureSystemAudio
+            settings.blacklistBundleIds = DefaultExcludedApps.applyingOnboardingChoice(
+                list: settings.blacklistBundleIds,
+                includeDefaults: includeDefaultExclusions,
+                wasIncludingDefaults: !settings.defaultExclusionsDeclined,
+                added: addedExclusions
+            )
+            settings.defaultExclusionsDeclined = !includeDefaultExclusions
             settings.aiModeOn = aiModeEnabled
             settings.onboardingCompleted = true
             UserDefaults.standard.set(true, forKey: AppDelegate.summarySetupShownKey)
@@ -614,6 +630,8 @@ struct OnboardingView: View {
                     await VaultManager.shared.disableVault()
                 }
             }
+            // Capture may already be running when onboarding is repeated.
+            await AppState.shared.captureManager.refreshExclusions()
             await AppState.shared.startCaptureIfNeeded()
             NSApp.windows.first(where: { $0.identifier?.rawValue == "OnboardingWindow" })?.close()
         }

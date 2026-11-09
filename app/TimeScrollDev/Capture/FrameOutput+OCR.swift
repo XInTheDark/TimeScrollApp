@@ -35,7 +35,8 @@ extension FrameOutput {
         let capture = AXTextExtractor.shared.collect(displayBounds: displayBounds,
                                                      blacklistBundleIds: Set(blacklist),
                                                      grid: grid,
-                                                     cache: axTextCache)
+                                                     cache: axTextCache,
+                                                     sightings: axAppSightings)
         let text = capture.text
         let fingerprint = TextFingerprint.make(from: text)
         let lines = Self.normalizedLines(text)

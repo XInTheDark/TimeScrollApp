@@ -1,3 +1,27 @@
+# v2.3.0 - 2026-11-09
+
+## Privacy
+
+- Common password managers are now excluded from recording by default. Password managers you don't have installed are hidden in Settings.
+- New option to leave incognito and private browser windows out of recordings. Turn it on in Settings ▸ Privacy. It needs Accessibility permission and works in major browsers like Chrome, Brave, Firefox and Safari, but detection isn't 100% reliable. 
+  - (Sound from private windows is still recorded if system audio is on.)
+- Fix: Deleting a time range now also removes it from summaries, including summaries made later. Deleting within the first 3 hours of a day also removes the previous day's summary.
+
+## Shortcuts
+
+- New "Start Capture", "Stop Capture" and "Is TimeScroll Capturing" actions in the Shortcuts app. Use them in your own shortcuts and automations. They can run without opening TimeScroll.
+  - For example, you can now set up an automation to stop capturing on battery!
+
+## Menu bar
+
+- Better organized actions in the menu bar.
+
+## Other changes
+
+- Optimized Direct mode to use less memory and CPU in Chrome and Electron apps. They now only keep the accessibility tree on  when being used for capturing.
+
+---
+
 # v2.2.1 - 2026-11-05
 
 Fixed usage stats and the Stats pane time range slider

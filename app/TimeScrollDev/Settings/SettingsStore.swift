@@ -160,7 +160,9 @@ final class SettingsStore: ObservableObject {
     // Privacy
     // List of bundle identifiers whose windows should be excluded from capture when visible
     @Published var blacklistBundleIds: [String] = [] { didSet { if !isLoading { save() } } }
-    nonisolated static let defaultBlacklistBundleIds: [String] = ["com.apple.loginwindow"]
+    @Published var defaultExclusionsDeclined: Bool = false { didSet { if !isLoading { save() } } }
+    nonisolated static let excludePrivateWindowsKey = "settings.excludePrivateWindows"
+    @Published var excludePrivateWindows: Bool = false { didSet { if !isLoading { save() } } }
 
     // Updates
     @Published var updateChannelBeta: Bool = false { didSet { if !isLoading { save() } } }
@@ -285,17 +287,22 @@ final class SettingsStore: ObservableObject {
         defaultSummaryModel = defaults.string(forKey: "settings.defaultSummaryModel") ?? ""
 
         // Privacy
+        excludePrivateWindows = defaults.bool(forKey: Self.excludePrivateWindowsKey)
         if let arr = defaults.array(forKey: "settings.blacklistBundleIds") as? [String] {
             blacklistBundleIds = arr
         }
-        // The lock screen and login prompts belong to loginwindow; exclude it once for every install
-        // (users may remove it afterwards). Written to defaults directly because capture reads the key
-        // off the main actor.
-        if !defaults.bool(forKey: "settings.migratedDefaultBlacklist") {
-            for bundleId in Self.defaultBlacklistBundleIds where !blacklistBundleIds.contains(bundleId) {
-                blacklistBundleIds.append(bundleId)
-            }
-            defaults.set(blacklistBundleIds, forKey: "settings.blacklistBundleIds")
+        // Exclude each default once for every install (users may remove them afterwards). Written to
+        // defaults directly because capture reads the key off the main actor. Installs that ran the
+        // earlier one-time migration have already been offered loginwindow.
+        let alreadySeeded = defaults.stringArray(forKey: "settings.seededBlacklistBundleIds")
+            ?? (defaults.bool(forKey: "settings.migratedDefaultBlacklist") ? DefaultExcludedApps.system : [])
+        defaultExclusionsDeclined = defaults.bool(forKey: "settings.defaultExclusionsDeclined")
+        let seeding = DefaultExcludedApps.seed(list: blacklistBundleIds, alreadySeeded: alreadySeeded,
+                                               declined: defaultExclusionsDeclined)
+        if seeding.seeded != alreadySeeded {
+            blacklistBundleIds = seeding.list
+            defaults.set(seeding.list, forKey: "settings.blacklistBundleIds")
+            defaults.set(seeding.seeded, forKey: "settings.seededBlacklistBundleIds")
             defaults.set(true, forKey: "settings.migratedDefaultBlacklist")
         }
 
@@ -424,6 +431,8 @@ final class SettingsStore: ObservableObject {
 
         // Privacy
         defaults.set(blacklistBundleIds, forKey: "settings.blacklistBundleIds")
+        defaults.set(defaultExclusionsDeclined, forKey: "settings.defaultExclusionsDeclined")
+        defaults.set(excludePrivateWindows, forKey: Self.excludePrivateWindowsKey)
 
         // Updates
         defaults.set(updateChannelBeta, forKey: "settings.updateChannelBeta")

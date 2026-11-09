@@ -58,9 +58,7 @@ struct TimeScrollApp: App {
                 .environmentObject(SettingsStore.shared)
         }
         .commands {
-            CommandGroup(after: .appSettings) {
-                Button("Export…") { TimelapseExportWindowController.shared.present() }
-            }
+            TimelineCommands()
         }
         Settings {
             PreferencesView()

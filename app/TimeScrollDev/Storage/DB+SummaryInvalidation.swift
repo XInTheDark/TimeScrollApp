@@ -16,29 +16,33 @@ extension DB {
     metaInt(summaryInvalidationKey, db: db) ?? 0
   }
 
+  func summaryInvalidationCount() throws -> Int64 {
+    try onReadQueueSync { db in Self.summaryInvalidationCount(db: db) }
+  }
+
   private static var countInvalidationSQL: String {
     "INSERT INTO ts_meta(key, value) VALUES('\(summaryInvalidationKey)', 1) ON CONFLICT(key) DO UPDATE SET value = value + 1;"
   }
 
-  /// A capture changes its own day, and the previous day if the last capture before midnight
-  /// measured its dwell against it (which reaches as far as the idle-gap limit).
+  /// A capture changes app time of its own day, and of the previous day if the last capture before
+  /// midnight measured its dwell against it (which reaches as far as the idle-gap limit). Ledgers and
+  /// summaries reach further: a session belongs to the day it started in, so an earlier period can
+  /// hold text from as far past its end as sessions are computed.
   static func summaryInvalidationSQL(captureAt timeMsSQL: String) -> String {
-    let days = "day_start_ms <= \(timeMsSQL) AND day_end_ms + \(CaptureDwell.hardBreakMs) > \(timeMsSQL)"
-    return """
-    \(appTimeDayDeletionSQL(where: days))
-    DELETE FROM ts_day_ledger WHERE \(days);
-    DELETE FROM ts_range_summary WHERE start_ms <= \(timeMsSQL) AND end_ms > \(timeMsSQL);
-    \(countInvalidationSQL)
-    """
+    summaryInvalidationSQL(capturesFromSQL: timeMsSQL, throughSQL: timeMsSQL)
   }
 
   /// Captures deleted together: every day they could affect, even if a sparse batch skips some.
   static func summaryInvalidationSQL(capturesFromMs fromMs: Int64, throughMs: Int64) -> String {
-    let days = "day_start_ms <= \(throughMs) AND day_end_ms + \(CaptureDwell.hardBreakMs) > \(fromMs)"
+    summaryInvalidationSQL(capturesFromSQL: "\(fromMs)", throughSQL: "\(throughMs)")
+  }
+
+  private static func summaryInvalidationSQL(capturesFromSQL from: String, throughSQL through: String) -> String {
+    let margin = SessionDayPlanner.contextMarginMs
     return """
-    \(appTimeDayDeletionSQL(where: days))
-    DELETE FROM ts_day_ledger WHERE \(days);
-    DELETE FROM ts_range_summary WHERE start_ms <= \(throughMs) AND end_ms > \(fromMs);
+    \(appTimeDayDeletionSQL(where: "day_start_ms <= \(through) AND day_end_ms + \(CaptureDwell.hardBreakMs) > \(from)"))
+    DELETE FROM ts_day_ledger WHERE day_start_ms <= \(through) AND day_end_ms + \(margin) > \(from);
+    DELETE FROM ts_range_summary WHERE start_ms <= \(through) AND end_ms + \(margin) > \(from);
     \(countInvalidationSQL)
     """
   }

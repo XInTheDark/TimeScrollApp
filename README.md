@@ -1,10 +1,10 @@
-## Full source code for the TimeScroll app.
-
-TimeScroll records your screen, makes it searchable, and lets you scroll back through time. Everything stays on your Mac.
+## TimeScroll app
 
 **Website**: https://timescroll.muzhen.org/
 
-**Download**: https://github.com/XInTheDark/TimeScrollApp/releases/latest
+Full source code for the TimeScroll app.
+
+TimeScroll records your screen, makes it searchable, and lets you scroll back through time. Everything stays on your Mac.
 
 ### Building
 

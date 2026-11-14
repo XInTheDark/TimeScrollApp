@@ -8,6 +8,11 @@ struct SnapshotRangeFilter: Equatable, Sendable {
   var captureKinds: [CaptureKind] = []
   var audioSourceKinds: [AudioSourceKind] = []
 
+  /// Time Warp records belong to screen time; a filter for audio alone leaves them.
+  var includesTimeWarpRecords: Bool {
+    audioSourceKinds.isEmpty && (captureKinds.isEmpty || captureKinds.contains(.screen))
+  }
+
   var isFiltered: Bool {
     !appBundleIds.isEmpty || !captureKinds.isEmpty || !audioSourceKinds.isEmpty
   }

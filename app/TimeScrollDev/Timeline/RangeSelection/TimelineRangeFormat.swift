@@ -36,11 +36,14 @@ enum TimelineRangeFormat {
 
   static func counts(_ count: DB.SnapshotRangeCount) -> String {
     var parts: [String] = []
-    if count.screen > 0 || count.audio == 0 {
+    if count.screen > 0 || (count.audio == 0 && count.timeWarp == 0) {
       parts.append("\(count.screen.formatted()) \(count.screen == 1 ? "snapshot" : "snapshots")")
     }
     if count.audio > 0 {
       parts.append("\(count.audio.formatted()) audio \(count.audio == 1 ? "clip" : "clips")")
+    }
+    if count.timeWarp > 0 {
+      parts.append("\(count.timeWarp.formatted()) Time Warp \(count.timeWarp == 1 ? "item" : "items")")
     }
     return parts.joined(separator: " and ")
   }

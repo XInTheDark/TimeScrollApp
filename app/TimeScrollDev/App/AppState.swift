@@ -19,6 +19,7 @@ final class AppState: ObservableObject {
     lazy var captureManager: CaptureManager = {
         let manager = CaptureManager { [weak self] url in
             Task { @MainActor in
+                TimeWarpRecorder.shared.snapshotCaptured()
                 if !VaultManager.shared.isVaultEnabled || VaultManager.shared.isUnlocked {
                     self?.lastSnapshotURL = url
                     self?.lastSnapshotTick &+= 1
@@ -132,6 +133,7 @@ final class AppState: ObservableObject {
         }
 
         isCapturing = startedScreen || startedAudio || audioPausedForVault
+        TimeWarpRecorder.shared.setCaptureRunning(startedScreen)
         if isCapturing {
             UsageTracker.shared.captureStarted()
         }
@@ -151,6 +153,7 @@ final class AppState: ObservableObject {
         captureLifecycleGeneration &+= 1
         captureTransitionInProgress = true
         isCaptureStarting = false
+        TimeWarpRecorder.shared.setCaptureRunning(false)
         await captureManager.stop()
         AXManualAccessibilityLeases.shared.releaseAllInBackground()
         await audioCaptureController.stop(drainProcessing: false)
@@ -280,6 +283,7 @@ final class AppState: ObservableObject {
         captureLifecycleGeneration &+= 1
         captureTransitionInProgress = true
         isCaptureStarting = false
+        TimeWarpRecorder.shared.stopNow()
         await captureManager.stop()
         await audioCaptureController.stop(drainProcessing: false)
         let drained = await AudioSegmentProcessor.shared.drain(timeoutNanoseconds: 10_000_000_000)

@@ -9,6 +9,7 @@ struct SnapshotStageView: View {
 
     @State private var rects: [CGRect] = []
     @State private var localQuery: String = ""
+    @State private var isFinding = false
     @State private var nsImage: NSImage? = nil
     @State private var isLoading: Bool = false
     @State private var lastRequestedId: Int64 = 0
@@ -57,22 +58,14 @@ struct SnapshotStageView: View {
 
             if model.selected != nil {
                 CenterOverlay(model: model,
-                              nsImage: nsImage,
+                              findQuery: $localQuery,
+                              isFinding: $isFinding,
+                              actions: SnapshotToolbarActions(copyImage: copyCurrent, copyText: copyCurrentText,
+                                                              save: saveCurrent, reveal: revealCurrent,
+                                                              delete: confirmAndDeleteCurrent),
                               audioPlayback: activeAudioMeta != nil ? audioPlayback : nil,
                               onShowTranscript: activeAudioMeta != nil ? { showAudioTranscript = true } : nil)
-                    .allowsHitTesting(true)
             }
-
-            // Actions menu (top-right)
-            ActionsPanel(model: model,
-                         localQuery: $localQuery,
-                         onSubmitQuery: { refreshRects() },
-                         onCopyImage: copyCurrent,
-                         onCopyText: copyCurrentText,
-                         onSave: saveCurrent,
-                         onReveal: revealCurrent,
-                         onDelete: confirmAndDeleteCurrent)
-            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
 
             // Debug overlay (top-left), visible only when Debug Mode is ON
             if SettingsStore.shared.debugMode, let s = model.selected {
@@ -104,10 +97,10 @@ struct SnapshotStageView: View {
         }
         .onReceive(menuActions.commands) { command in
             switch command {
-            case .showSnapshotActions: model.actionPanelExpanded = true
+            case .findInSnapshot: isFinding = true
             case .revealInFinder: revealCurrent()
             case .saveSnapshot: saveCurrent()
-            case .toggleSelection: break
+            case .toggleSelection, .timeWarpToMoment: break
             }
         }
         .onReceive(audioPlayback.$currentTime) { currentTime in
@@ -591,322 +584,76 @@ private struct DebugOverlay: View {
 
 private struct CenterOverlay: View {
     @ObservedObject var model: TimelineModel
-    var nsImage: NSImage?
+    @Binding var findQuery: String
+    @Binding var isFinding: Bool
+    let actions: SnapshotToolbarActions
     var audioPlayback: AudioPlaybackController?
     var onShowTranscript: (() -> Void)?
-    @State private var dragStartX: Double = 0
-    @State private var dragStartY: Double = 0
-
-    /// Computes average brightness of the center region of the image (0.0 = dark, 1.0 = bright)
-    private var centerBrightness: CGFloat {
-        guard let image = nsImage,
-              let cgImage = image.cgImage(forProposedRect: nil, context: nil, hints: nil) else {
-            return 0.5 // Default to middle brightness if no image
-        }
-        let w = cgImage.width
-        let h = cgImage.height
-        // Sample a central region (middle 30% of the image)
-        let sampleW = max(1, w / 3)
-        let sampleH = max(1, h / 6) // Just a strip in the vertical center
-        let sampleX = (w - sampleW) / 2
-        let sampleY = (h - sampleH) / 2
-        let sampleRect = CGRect(x: sampleX, y: sampleY, width: sampleW, height: sampleH)
-        guard let cropped = cgImage.cropping(to: sampleRect) else { return 0.5 }
-        // Create a small bitmap to sample
-        let pixelW = min(cropped.width, 100)
-        let pixelH = min(cropped.height, 50)
-        let bytesPerPixel = 4
-        let bytesPerRow = bytesPerPixel * pixelW
-        var pixelData = [UInt8](repeating: 0, count: bytesPerRow * pixelH)
-        guard let context = CGContext(
-            data: &pixelData,
-            width: pixelW,
-            height: pixelH,
-            bitsPerComponent: 8,
-            bytesPerRow: bytesPerRow,
-            space: CGColorSpaceCreateDeviceRGB(),
-            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
-        ) else { return 0.5 }
-        context.draw(cropped, in: CGRect(x: 0, y: 0, width: pixelW, height: pixelH))
-        // Calculate average luminance
-        var totalLuminance: Double = 0
-        let pixelCount = pixelW * pixelH
-        for i in 0..<pixelCount {
-            let offset = i * bytesPerPixel
-            let r = Double(pixelData[offset]) / 255.0
-            let g = Double(pixelData[offset + 1]) / 255.0
-            let b = Double(pixelData[offset + 2]) / 255.0
-            // Relative luminance formula
-            totalLuminance += 0.299 * r + 0.587 * g + 0.114 * b
-        }
-        return CGFloat(totalLuminance / Double(pixelCount))
-    }
-
-    /// True if background is light (needs dark controls)
-    private var isLightBackground: Bool {
-        centerBrightness > 0.6
-    }
+    @State private var dragStart: CGSize?
+    @State private var toolbarSize: CGSize = .zero
 
     var body: some View {
-        let containerBg: Color = isLightBackground ? Color.black.opacity(0.5) : Color.white.opacity(0.15)
+        GeometryReader { geo in
+            let offset = SnapshotToolbarPlacement.clamped(offset: CGSize(width: model.overlayOffsetX, height: model.overlayOffsetY),
+                                                          toolbar: toolbarSize, in: geo.size)
+            HStack(spacing: 10) {
+                SnapshotToolbar(model: model, findQuery: $findQuery, isFinding: $isFinding, actions: actions)
 
-        HStack(spacing: 12) {
-            navigationPill(containerBg: containerBg)
-
-            if let audioPlayback, let onShowTranscript {
-                audioControls(playback: audioPlayback, containerBg: containerBg, onShowTranscript: onShowTranscript)
-            }
-        }
-        .shadow(color: Color.black.opacity(0.3), radius: 4, x: 0, y: 2)
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
-        .offset(x: model.overlayOffsetX, y: model.overlayOffsetY)
-        .gesture(DragGesture(minimumDistance: 0)
-            .onChanged { v in
-                // Update live without committing to storage every tick
-                if dragStartX == 0 && dragStartY == 0 {
-                    dragStartX = model.overlayOffsetX
-                    dragStartY = model.overlayOffsetY
+                if let audioPlayback, let onShowTranscript {
+                    SnapshotAudioControls(playback: audioPlayback, onShowTranscript: onShowTranscript)
                 }
-                model.overlayOffsetX = dragStartX + Double(v.translation.width)
-                model.overlayOffsetY = dragStartY + Double(v.translation.height)
             }
-            .onEnded { _ in
-                dragStartX = 0; dragStartY = 0
-            }
-        )
+            .fixedSize()
+            .background(GeometryReader { Color.clear.preference(key: ToolbarSizeKey.self, value: $0.size) })
+            .onPreferenceChange(ToolbarSizeKey.self) { toolbarSize = $0 }
+            .position(x: geo.size.width / 2 + offset.width, y: geo.size.height / 2 + offset.height)
+            // Dragging the toolbar moves it; a short distance first so clicks stay clicks.
+            .gesture(DragGesture(minimumDistance: 4)
+                .onChanged { value in
+                    let start = dragStart ?? offset
+                    dragStart = start
+                    let moved = SnapshotToolbarPlacement.clamped(
+                        offset: CGSize(width: start.width + value.translation.width, height: start.height + value.translation.height),
+                        toolbar: toolbarSize, in: geo.size)
+                    model.overlayOffsetX = Double(moved.width)
+                    model.overlayOffsetY = Double(moved.height)
+                }
+                .onEnded { _ in dragStart = nil }
+            )
+        }
     }
 
-    private func navigationPill(containerBg: Color) -> some View {
-        HStack(spacing: 12) {
-            Button(action: { model.prev() }) {
-                Image(systemName: "chevron.left.circle.fill")
-                    .font(.system(size: 28))
-                    .foregroundColor(.white.opacity(model.selectedIndex + 1 < model.metas.count ? 0.95 : 0.35))
-            }
-            .buttonStyle(.plain)
-            .disabled(!(model.selectedIndex + 1 < model.metas.count))
-            .help("Previous snapshot")
-            .accessibilityLabel("Previous snapshot")
-
-            TimelineDateButton(text: model.selected.map { Self.df.string(from: Date(timeIntervalSince1970: TimeInterval($0.startedAtMs)/1000)) } ?? "",
-                               selectedMs: model.selected?.startedAtMs,
-                               calendar: model.dayCalendar)
-
-            Button(action: { model.next() }) {
-                Image(systemName: "chevron.right.circle.fill")
-                    .font(.system(size: 28))
-                    .foregroundColor(.white.opacity(model.selectedIndex - 1 >= 0 ? 0.95 : 0.35))
-            }
-            .buttonStyle(.plain)
-            .disabled(!(model.selectedIndex - 1 >= 0))
-            .help("Next snapshot")
-            .accessibilityLabel("Next snapshot")
-        }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 8)
-        .background(containerBg)
-        .clipShape(Capsule(style: .continuous))
-    }
-
-    private func audioControls(playback: AudioPlaybackController,
-                               containerBg: Color,
-                               onShowTranscript: @escaping () -> Void) -> some View {
-        HStack(spacing: 10) {
-            Button {
-                playback.togglePlayback()
-            } label: {
-                Image(systemName: playback.isPlaying ? "pause.fill" : "play.fill")
-                    .font(.system(size: 15, weight: .semibold))
-                    .foregroundStyle(.white)
-                    .frame(width: 34, height: 34)
-                    .background(Color.white.opacity(0.08), in: Circle())
-            }
-            .buttonStyle(.plain)
-            .help(playback.isPlaying ? "Pause audio" : "Play audio")
-            .accessibilityLabel(playback.isPlaying ? "Pause audio" : "Play audio")
-
-            Rectangle()
-                .fill(Color.white.opacity(0.14))
-                .frame(width: 1, height: 20)
-
-            Button(action: onShowTranscript) {
-                Label("Transcript", systemImage: "quote.bubble")
-                    .foregroundStyle(.white)
-            }
-            .buttonStyle(.plain)
-        }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 8)
-        .background(containerBg, in: Capsule(style: .continuous))
-        .fixedSize()
-    }
-
-    private static let df: DateFormatter = {
-        let f = DateFormatter()
-        f.dateStyle = .medium
-        f.timeStyle = .medium
-        return f
-    }()
-}
-
-private struct ActionsPanel: View {
-    @EnvironmentObject private var settings: SettingsStore
-    @ObservedObject var model: TimelineModel
-    @Binding var localQuery: String
-    let onSubmitQuery: () -> Void
-    let onCopyImage: () -> Void
-    let onCopyText: () -> Void
-    let onSave: () -> Void
-    let onReveal: () -> Void
-    let onDelete: () -> Void
-
-    var body: some View {
-        VStack(alignment: .trailing, spacing: 8) {
-            HStack(spacing: 8) {
-                if settings.audioFeatureEnabled {
-                    TimelineStripVisibilityButton()
-                }
-
-                Button {
-                    model.actionPanelExpanded.toggle()
-                } label: {
-                    Image(systemName: "ellipsis.circle")
-                        .font(.system(size: 20))
-                }
-                .buttonStyle(.plain)
-                .help("Snapshot actions")
-                .accessibilityLabel("Snapshot actions")
-            }
-
-            if model.actionPanelExpanded {
-                VStack(alignment: .leading, spacing: 8) {
-                    TextField("Find in snapshot", text: $localQuery, onCommit: onSubmitQuery)
-                        .textFieldStyle(.roundedBorder)
-                        .frame(width: 220)
-                    HStack(spacing: 8) {
-                        Menu("Copy") {
-                            Button("Copy Image") { onCopyImage() }
-                            Button("Copy Text") { onCopyText() }
-                        }
-                        .fixedSize()
-                        Button("Save…") { onSave() }
-                        Button("Show in Finder") { onReveal() }
-                        Button("Delete…") { onDelete() }
-                            .keyboardShortcut(.delete)
-                        if SettingsStore.shared.debugMode, let id = model.selected?.id {
-                            Button("Copy Snapshot ID") {
-                                NSPasteboard.general.clearContents()
-                                NSPasteboard.general.setString(String(id), forType: .string)
-                            }
-                        }
-                    }
-                }
-                .padding(8)
-                .background(.ultraThinMaterial)
-                .cornerRadius(8)
-                .shadow(radius: 2)
-            }
-        }
-        .padding(10)
+    private struct ToolbarSizeKey: PreferenceKey {
+        static let defaultValue: CGSize = .zero
+        static func reduce(value: inout CGSize, nextValue: () -> CGSize) { value = nextValue() }
     }
 }
 
-struct TimelineStripVisibilityButton: View {
-    @EnvironmentObject private var settings: SettingsStore
-    @AppStorage("ui.timeline.showScreenStrips") private var showScreenStrips: Bool = true
-    @AppStorage("ui.timeline.showAudioStrips") private var showAudioStrips: Bool = true
-    @State private var isPresented = false
-
-    private var effectiveAudioVisibility: Bool {
-        settings.audioFeatureEnabled && showAudioStrips
-    }
-
-    var body: some View {
-        Button {
-            isPresented.toggle()
-        } label: {
-            Image(systemName: "slider.horizontal.3")
-                .font(.system(size: 18))
-        }
-        .buttonStyle(.plain)
-        .accessibilityLabel("Timeline strips")
-        .popover(isPresented: $isPresented, arrowEdge: .top) {
-            VStack(alignment: .leading, spacing: 10) {
-                Text("Timeline Strips")
-                    .font(.headline)
-
-                Toggle("Show screen strip", isOn: screenBinding)
-                    .toggleStyle(.checkbox)
-
-                if settings.audioFeatureEnabled {
-                    Toggle("Show audio strip", isOn: audioBinding)
-                        .toggleStyle(.checkbox)
-                }
-            }
-            .padding(12)
-            .frame(width: 220)
-        }
-        .help("Choose which strips are visible in the timeline")
-    }
-
-    private var screenBinding: Binding<Bool> {
-        Binding(
-            get: { showScreenStrips },
-            set: { enabled in
-                guard enabled || effectiveAudioVisibility else {
-                    NSSound.beep()
-                    return
-                }
-                showScreenStrips = enabled
-            }
-        )
-    }
-
-    private var audioBinding: Binding<Bool> {
-        Binding(
-            get: { effectiveAudioVisibility },
-            set: { enabled in
-                guard enabled || showScreenStrips else {
-                    NSSound.beep()
-                    return
-                }
-                showAudioStrips = enabled
-            }
-        )
-    }
-}
-
-private struct SnapshotAudioAccessory: View {
+/// Play and transcript for audio recorded with the snapshot, in the toolbar's style.
+private struct SnapshotAudioControls: View {
     @ObservedObject var playback: AudioPlaybackController
     let onShowTranscript: () -> Void
 
     var body: some View {
-        HStack(spacing: 10) {
+        HStack(spacing: 2) {
             Button {
                 playback.togglePlayback()
             } label: {
                 Image(systemName: playback.isPlaying ? "pause.fill" : "play.fill")
-                    .font(.system(size: 15, weight: .semibold))
-                    .foregroundStyle(.white)
-                    .frame(width: 34, height: 34)
-                    .background(Color.black.opacity(0.48), in: Circle())
             }
-            .buttonStyle(.plain)
             .help(playback.isPlaying ? "Pause audio" : "Play audio")
             .accessibilityLabel(playback.isPlaying ? "Pause audio" : "Play audio")
-
-            Button {
-                onShowTranscript()
-            } label: {
+            SnapshotToolbarDivider()
+            Button(action: onShowTranscript) {
                 Label("Transcript", systemImage: "quote.bubble")
-                    .foregroundStyle(.white)
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 9)
-                    .background(Color.black.opacity(0.48), in: Capsule(style: .continuous))
+                    .labelStyle(.titleAndIcon)
+                    .font(.system(size: 13, weight: .medium))
             }
-            .buttonStyle(.plain)
         }
-        .shadow(color: .black.opacity(0.25), radius: 6, x: 0, y: 2)
+        .buttonStyle(SnapshotToolbarIconStyle())
+        .padding(.horizontal, 8)
+        .padding(.vertical, 5)
+        .snapshotToolbarSurface()
     }
 }
 

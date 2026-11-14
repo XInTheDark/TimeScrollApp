@@ -10,7 +10,10 @@ extension DB {
   struct SnapshotRangeCount: Equatable, Sendable {
     var screen = 0
     var audio = 0
+    /// Time Warp records (pages, files, folders) that a range delete would remove.
+    var timeWarp = 0
     var total: Int { screen + audio }
+    var isEmpty: Bool { total == 0 && timeWarp == 0 }
   }
 
   struct SnapshotRangeBatch: Equatable {
@@ -34,6 +37,9 @@ extension DB {
     var removed = 0
     let fm = FileManager.default
     defer { if removed > 0 { purgeOrphanedAudioAssets() } }
+    if filter.includesTimeWarpRecords {
+      try deleteTimeWarpRecords(fromMs: filter.fromMs, toMs: filter.toMs, appBundleIds: filter.appBundleIds)
+    }
     while true {
       let batch = try onQueueSync { () -> SnapshotRangeBatch in
         try openIfNeeded()
@@ -58,7 +64,9 @@ extension DB {
       guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK, sqlite3_step(stmt) == SQLITE_ROW else { return 0 }
       return Int(sqlite3_column_int64(stmt, 0))
     }
-    return SnapshotRangeCount(screen: count(.screen), audio: count(.audio))
+    let timeWarp = filter.includesTimeWarpRecords
+      ? countTimeWarpSpans(fromMs: filter.fromMs, toMs: filter.toMs, appBundleIds: filter.appBundleIds, db: db) : 0
+    return SnapshotRangeCount(screen: count(.screen), audio: count(.audio), timeWarp: timeWarp)
   }
 
   /// Deletes up to `limit` matching snapshots, oldest first, and returns the media no remaining row uses.

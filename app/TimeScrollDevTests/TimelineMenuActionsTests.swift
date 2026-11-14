@@ -4,7 +4,7 @@ import Testing
 
 @MainActor
 struct TimelineMenuActionsTests {
-  private let stageCommands: [TimelineMenuCommand] = [.showSnapshotActions, .revealInFinder, .saveSnapshot]
+  private let stageCommands: [TimelineMenuCommand] = [.findInSnapshot, .revealInFinder, .saveSnapshot]
 
   // MARK: - Availability
 
@@ -17,7 +17,7 @@ struct TimelineMenuActionsTests {
 
   @Test func audioSelectionOnlyRevealsAndSelects() {
     let availability = TimelineMenuAvailability(selectedKind: .audio)
-    #expect(!availability.allows(.showSnapshotActions))
+    #expect(!availability.allows(.findInSnapshot))
     #expect(!availability.allows(.saveSnapshot))
     #expect(availability.allows(.revealInFinder))
     #expect(availability.allows(.toggleSelection))
@@ -87,7 +87,7 @@ struct TimelineMenuActionsTests {
     actions.availability = TimelineMenuAvailability(selectedKind: .audio)
     let (recorder, subscription) = recording(actions)
     actions.perform(.saveSnapshot)
-    actions.perform(.showSnapshotActions)
+    actions.perform(.findInSnapshot)
     #expect(recorder.commands.isEmpty)
     actions.perform(.revealInFinder)
     #expect(recorder.commands == [.revealInFinder])
@@ -109,5 +109,13 @@ struct TimelineMenuActionsTests {
     let actions = TimelineMenuActions()
     actions.availability = TimelineMenuAvailability(selectedKind: .screen)
     actions.perform(.saveSnapshot)
+  }
+
+  @Test func timeWarpToMomentNeedsASelectedSnapshot() {
+    #expect(TimelineMenuAvailability(selectedKind: .screen).allows(.timeWarpToMoment))
+    #expect(TimelineMenuAvailability(selectedKind: .audio).allows(.timeWarpToMoment))
+    #expect(!TimelineMenuAvailability(selectedKind: nil).allows(.timeWarpToMoment))
+    #expect(!TimelineMenuAvailability(selectedKind: .screen, isShowingResults: true).allows(.timeWarpToMoment))
+    #expect(!TimelineMenuAvailability(selectedKind: .screen, isLocked: true).allows(.timeWarpToMoment))
   }
 }

@@ -72,8 +72,6 @@ struct AudioStageView: View {
                     HStack {
                         Spacer()
 
-                        TimelineStripVisibilityButton()
-
                         Button {
                             SnapshotActions.revealInFinder(URL(fileURLWithPath: path))
                         } label: {
@@ -302,7 +300,6 @@ private struct AudioFloatingOverlay: View {
             navigationPill
             audioControlsPill
         }
-        .shadow(color: .black.opacity(0.22), radius: 6, x: 0, y: 2)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
         .offset(x: model.overlayOffsetX, y: model.overlayOffsetY)
         .fixedSize()
@@ -323,82 +320,57 @@ private struct AudioFloatingOverlay: View {
         )
     }
 
-    private var pillBackground: Color {
-        Color.black.opacity(0.48)
-    }
-
     private var navigationPill: some View {
-        HStack(spacing: 12) {
-            Button(action: { model.prev() }) {
-                Image(systemName: "chevron.left.circle.fill")
-                    .font(.system(size: 28))
-                    .foregroundColor(.white.opacity(model.selectedIndex + 1 < model.metas.count ? 0.95 : 0.35))
-            }
-            .buttonStyle(.plain)
-            .disabled(!(model.selectedIndex + 1 < model.metas.count))
-            .help("Previous snapshot")
-            .accessibilityLabel("Previous snapshot")
+        HStack(spacing: 2) {
+            Button(action: { model.prev() }) { Image(systemName: "chevron.left") }
+                .disabled(!(model.selectedIndex + 1 < model.metas.count))
+                .help("Previous snapshot")
+                .accessibilityLabel("Previous snapshot")
 
             TimelineDateButton(text: model.selected.map { Self.dateFormatter.string(from: Date(timeIntervalSince1970: TimeInterval($0.startedAtMs) / 1000)) } ?? "",
                                selectedMs: model.selected?.startedAtMs,
                                calendar: model.dayCalendar)
+                .padding(.horizontal, 6)
 
-            Button(action: { model.next() }) {
-                Image(systemName: "chevron.right.circle.fill")
-                    .font(.system(size: 28))
-                    .foregroundColor(.white.opacity(model.selectedIndex - 1 >= 0 ? 0.95 : 0.35))
-            }
-            .buttonStyle(.plain)
-            .disabled(!(model.selectedIndex - 1 >= 0))
-            .help("Next snapshot")
-            .accessibilityLabel("Next snapshot")
+            Button(action: { model.next() }) { Image(systemName: "chevron.right") }
+                .disabled(!(model.selectedIndex - 1 >= 0))
+                .help("Next snapshot")
+                .accessibilityLabel("Next snapshot")
         }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 8)
-        .background(pillBackground)
-        .clipShape(Capsule(style: .continuous))
+        .buttonStyle(SnapshotToolbarIconStyle())
+        .padding(.horizontal, 8)
+        .padding(.vertical, 5)
+        .snapshotToolbarSurface()
     }
 
     private var audioControlsPill: some View {
-        HStack(spacing: 10) {
+        HStack(spacing: 2) {
             Button {
                 playback.togglePlayback()
             } label: {
                 Image(systemName: playback.isPlaying ? "pause.fill" : "play.fill")
-                    .font(.system(size: 15, weight: .semibold))
-                    .foregroundStyle(.white)
-                    .frame(width: 34, height: 34)
-                    .background(Color.white.opacity(0.08), in: Circle())
             }
-            .buttonStyle(.plain)
             .disabled(!canPlay)
             .help(playback.isPlaying ? "Pause audio" : "Play audio")
             .accessibilityLabel(playback.isPlaying ? "Pause audio" : "Play audio")
 
-            Rectangle()
-                .fill(Color.white.opacity(0.14))
-                .frame(width: 1, height: 20)
+            SnapshotToolbarDivider()
 
             Button(action: onShowTranscript) {
                 HStack(spacing: 8) {
                     Image(systemName: "quote.bubble")
                     Text("Transcript")
-                    Text(Self.timecode(playback.currentTime))
+                    Text("\(Self.timecode(playback.currentTime)) / \(Self.timecode(max(playback.duration, assetDurationSeconds)))")
                         .monospacedDigit()
-                        .foregroundStyle(.white.opacity(0.8))
-                    Text("/")
-                        .foregroundStyle(.white.opacity(0.5))
-                    Text(Self.timecode(max(playback.duration, assetDurationSeconds)))
-                        .monospacedDigit()
-                        .foregroundStyle(.white.opacity(0.8))
+                        .foregroundStyle(.secondary)
                 }
-                .foregroundStyle(.white)
+                .font(.system(size: 13, weight: .medium))
             }
-            .buttonStyle(.plain)
         }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 8)
-        .background(pillBackground, in: Capsule(style: .continuous))
+        .buttonStyle(SnapshotToolbarIconStyle())
+        .padding(.horizontal, 8)
+        .padding(.vertical, 5)
+        .snapshotToolbarSurface()
     }
 
     private static let dateFormatter: DateFormatter = {

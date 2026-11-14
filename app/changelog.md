@@ -1,3 +1,36 @@
+# 2.4.0 - 2026-11-14
+
+This update adds **Time Warp**: travel back in time! TimeScroll can now restore the open files, pages and apps at any point in your timeline. If you're coming back to your work from a week ago, you won't have to manually look for your files anymore.
+
+I've been working on this big feature for some time now, and I'm happy to release the first version!
+
+## Time Warp
+
+Pick a moment or a block of time, and TimeScroll remembers what you were using at that time - including your apps, tabs, files and more. After you click Open, the app restores your work immediately.
+
+- Warp to a single moment: click the Time Warp button on a snapshot, right-click the timeline and choose **Time Warp to This Moment…**, or press ⌘⇧W.
+- Warp to a block of time: select a range on the timeline and click Time Warp, or right-click a session and choose **Time Warp to This Session…**.
+- Also see how long you used each page/document/folder/etc.
+- **Skip what's already open** (on by default) leaves out pages, files and apps you already have open.
+
+**Warp points** are like pins that you can come back to. Press ⌃⌥⌘W or use the menu bar, and add a note if you like. Click on a warp point to instantly travel there.
+
+The feature works with: Safari, Chrome, Brave, Firefox, Zen, Terminal, iTerm, Finder, and any app that reports its open document (Preview, TextEdit, VS Code, Xcode and more).
+
+**To make it more powerful** by recording all your tabs, go to Settings ▸ Time Warp and turn on "record everything that's open".
+
+**Privacy**: Time Warp never records private browser windows, excluded apps, or anything while capture is paused. It also supports "Encrypted Vault".
+
+## New snapshot toolbar
+
+The "…" Snapshot Actions panel is replaced by a redesigned toolbar that hopefully makes the actions easier to access.
+
+- Copy the image or text, save, find text in the snapshot (⌘F), Time Warp, and open the page or file the snapshot shows.
+- Show in Finder and Delete Snapshot are in the ⋯ menu.
+- Drag the toolbar anywhere on the snapshot.
+
+---
+
 # v2.3.0 - 2026-11-09
 
 ## Privacy

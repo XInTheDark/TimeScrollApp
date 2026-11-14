@@ -24,9 +24,9 @@ struct TimelineMenuAvailability: Equatable {
 
   func allows(_ command: TimelineMenuCommand) -> Bool {
     switch command {
-    case .showSnapshotActions, .saveSnapshot:
+    case .findInSnapshot, .saveSnapshot:
       return stage == .screen
-    case .revealInFinder:
+    case .revealInFinder, .timeWarpToMoment:
       return stage != .none
     case .toggleSelection:
       return canSelect

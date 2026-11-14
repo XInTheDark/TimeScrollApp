@@ -8,9 +8,12 @@ struct TimelineCommands: Commands {
   var body: some Commands {
     CommandGroup(after: .saveItem) {
       Divider()
-      item("Snapshot Actions…", .showSnapshotActions)
+      item("Find in Snapshot", .findInSnapshot)
+        .keyboardShortcut("f", modifiers: [.command])
       item("Show in Finder", .revealInFinder)
       item("Save Snapshot…", .saveSnapshot)
+      item("Time Warp to This Moment…", .timeWarpToMoment)
+        .keyboardShortcut("w", modifiers: [.command, .shift])
       Divider()
       Button("Export…") { TimelapseExportWindowController.shared.present() }
     }

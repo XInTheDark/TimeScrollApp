@@ -23,7 +23,6 @@ final class TimelineModel: ObservableObject {
 
     // Zoom + UI state
     @AppStorage("ui.timeline.msPerPoint") var msPerPoint: Double = 60_000
-    @AppStorage("ui.actionPanelExpanded") var actionPanelExpanded: Bool = false
     @AppStorage("ui.timeline.followLatest") var followLatest: Bool = false
     @AppStorage("ui.overlay.offsetX") var overlayOffsetX: Double = 0
     @AppStorage("ui.overlay.offsetY") var overlayOffsetY: Double = 220

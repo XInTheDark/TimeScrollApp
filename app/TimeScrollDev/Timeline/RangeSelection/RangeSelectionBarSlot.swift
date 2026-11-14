@@ -16,6 +16,7 @@ struct RangeSelectionBarSlot: View {
         RangeSelectionBar(selection: selection, actions: actions, timeline: timeline,
                           fallbackRange: fallbackRange, onSearch: onSearch,
                           onExport: { TimelapseExportWindowController.shared.present(range: $0) },
+                          onTimeWarp: { TimeWarpWindowController.shared.present(range: $0) },
                           onDelete: confirmAndDelete)
       }
     }
@@ -36,7 +37,7 @@ struct RangeSelectionBarSlot: View {
 
   private func confirmAndDelete() {
     guard let range = selection.range, let filter = timeline.shownRows(in: range),
-          let count = actions.count, count.total > 0, !actions.isDeleting else {
+          let count = actions.count, !count.isEmpty, !actions.isDeleting else {
       NSSound.beep()
       return
     }

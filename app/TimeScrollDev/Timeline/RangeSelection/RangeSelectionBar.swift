@@ -11,6 +11,7 @@ struct RangeSelectionBar: View {
   let fallbackRange: TimelineRange
   let onSearch: (TimelineRange) -> Void
   let onExport: (TimelineRange) -> Void
+  let onTimeWarp: (TimelineRange) -> Void
   let onDelete: () -> Void
 
   var body: some View {
@@ -88,7 +89,7 @@ struct RangeSelectionBar: View {
         if let count = actions.count {
           ViewThatFits(in: .horizontal) {
             Text(TimelineRangeFormat.counts(count))
-            Text("\(count.total.formatted()) \(count.total == 1 ? "item" : "items")")
+            Text("\((count.total + count.timeWarp).formatted()) \(count.total + count.timeWarp == 1 ? "item" : "items")")
           }
           .foregroundStyle(.secondary)
           .help(TimelineRangeFormat.counts(count))
@@ -120,6 +121,7 @@ struct RangeSelectionBar: View {
       ViewThatFits(in: .horizontal) {
         actionButtons(showsAllTitles: true)
         actionButtons(showsAllTitles: false)
+        actionButtons(showsAllTitles: false, showsSummarizeTitle: false)
       }
     }
   }
@@ -129,7 +131,7 @@ struct RangeSelectionBar: View {
     return min(1, Double(actions.deletedCount) / Double(total))
   }
 
-  private func actionButtons(showsAllTitles: Bool) -> some View {
+  private func actionButtons(showsAllTitles: Bool, showsSummarizeTitle: Bool = true) -> some View {
     HStack(spacing: 8) {
       actionButton("Search in Range", systemImage: "magnifyingglass", showsTitle: showsAllTitles) {
         if let range = selection.range { onSearch(range) }
@@ -141,10 +143,21 @@ struct RangeSelectionBar: View {
       }
       .disabled(selection.range == nil)
 
+      actionButton("Time Warp…", systemImage: "clock.arrow.circlepath", showsTitle: showsAllTitles) {
+        if let range = selection.range { onTimeWarp(range) }
+      }
+      .disabled(selection.range == nil)
+
       Button { selection.requestSummary() } label: {
-        Label("Summarize", systemImage: "text.alignleft")
+        if showsSummarizeTitle {
+          Label("Summarize", systemImage: "text.alignleft")
+        } else {
+          Image(systemName: "text.alignleft")
+        }
       }
       .buttonStyle(.borderedProminent)
+      .help("Summarize")
+      .accessibilityLabel("Summarize")
       .disabled(selection.range == nil)
 
       Button(role: .destructive, action: onDelete) {
@@ -180,7 +193,7 @@ struct RangeSelectionBar: View {
 
   private var canDelete: Bool {
     guard selection.range != nil, timeline.hasDeletableRows else { return false }
-    return (actions.count?.total ?? 0) > 0
+    return actions.count.map { !$0.isEmpty } ?? false
   }
 
   private var deleteHelp: String {

@@ -16,6 +16,8 @@ struct PreferencesView: View {
                 .tabItem { Label("Search", systemImage: "magnifyingglass") }
             AudioPane(settings: settings)
                 .tabItem { Label("Audio", systemImage: "waveform") }
+            TimeWarpPane(settings: settings)
+                .tabItem { Label("Time Warp", systemImage: "clock.arrow.circlepath") }
             MCPSettingsPane()
                 .tabItem { Label("MCP", systemImage: "bolt.horizontal") }
             StoragePane(settings: settings)

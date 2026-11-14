@@ -9,6 +9,7 @@ enum Permissions {
         case screenRecording
         case accessibility
         case microphone
+        case automation
 
         var url: URL? {
             switch self {
@@ -18,6 +19,8 @@ enum Permissions {
                 return URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")
             case .microphone:
                 return URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone")
+            case .automation:
+                return URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Automation")
             }
         }
     }

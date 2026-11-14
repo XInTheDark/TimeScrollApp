@@ -6,6 +6,9 @@ struct TimelineUnifiedView: View {
     @StateObject var model = TimelineModel()
     @StateObject private var liveRefresh = TimelineLiveRefreshScheduler()
     @StateObject private var sessionLoader = TimelineSessionLoader()
+    @StateObject private var warpPointLoader = TimelineWarpPointLoader()
+    @AppStorage(TimeWarpSettings.showsWarpPointsKey) private var showWarpPoints: Bool = true
+    @AppStorage(TimeWarpSettings.enabledKey) private var timeWarpEnabled: Bool = true
     @EnvironmentObject var settings: SettingsStore
     @ObservedObject var vault = VaultManager.shared
     @AppStorage("ui.timeline.compressed") private var compressedTimeline: Bool = true
@@ -106,7 +109,12 @@ struct TimelineUnifiedView: View {
             menuActions.availability = availability
         }
         .onReceive(menuActions.commands) { command in
-            if command == .toggleSelection { rangeSelection.toggle() }
+            switch command {
+            case .toggleSelection: rangeSelection.toggle()
+            case .timeWarpToMoment:
+                if let timeMs = model.selected?.startedAtMs { TimeWarpWindowController.shared.present(momentMs: timeMs) }
+            default: break
+            }
         }
         .onReceive(rangeSelection.$isActive.removeDuplicates()) { isActive in
             menuActions.isSelecting = isActive
@@ -157,11 +165,26 @@ struct TimelineUnifiedView: View {
         .onChange(of: settings.audioFeatureEnabled) { _, _ in
             ensureSelectionMatchesVisibleTimelineTracks()
         }
-        .onChange(of: model.dataRevision, initial: true) { _, _ in refreshSessions() }
+        .onChange(of: model.dataRevision, initial: true) { _, _ in
+            refreshSessions()
+            refreshWarpPoints()
+        }
+        .onChange(of: showsWarpPoints) { _, _ in refreshWarpPoints() }
+        .onReceive(NotificationCenter.default.publisher(for: TimeWarpSettings.warpPointAddedNotification)) { _ in refreshWarpPoints() }
         .onChange(of: showTimelineSessions) { _, _ in refreshSessions() }
         .onChange(of: settings.sessionSensitivity) { _, _ in refreshSessions() }
-        .onChange(of: vault.isUnlocked) { _, _ in refreshSessions() }
+        .onChange(of: vault.isUnlocked) { _, _ in
+            refreshSessions()
+            refreshWarpPoints()
+        }
         .frame(minWidth: 1000, minHeight: 700)
+    }
+
+    private var showsWarpPoints: Bool { timeWarpEnabled && showWarpPoints }
+
+    /// Warp points for the loaded range, read from a small index.
+    private func refreshWarpPoints() {
+        warpPointLoader.refresh(fromMs: model.minTimeMs, toMs: model.maxTimeMs + 1, enabled: showsWarpPoints)
     }
 
     /// Sessions for the loaded range; the provider serves unchanged days from its cache.
@@ -544,6 +567,9 @@ struct TimelineUnifiedView: View {
                                      showsSessions: showTimelineSessions,
                                      sessions: sessionLoader.sessions,
                                      sessionsRevision: sessionLoader.revision,
+                                     showsWarpPoints: showsWarpPoints,
+                                     warpPoints: warpPointLoader.points,
+                                     warpPointsRevision: warpPointLoader.revision,
                                      rangeSelection: rangeSelection,
                                      onJump: { time, preferredCaptureKind in
                                          model.jump(to: time,

@@ -228,6 +228,7 @@ final class CaptureManager: NSObject {
     /// pass always sees the latest list.
     @MainActor
     func refreshExclusions() async {
+        TimeWarpRecorder.shared.exclusionsChanged()
         guard !streams.isEmpty else { return }
         if isRefreshingExclusions {
             needsAnotherExclusionRefresh = true

@@ -69,6 +69,13 @@ extension AppDelegate {
         toggle.target = self
         menu.addItem(toggle)
 
+        if TimeWarpSettings.isEnabled() {
+            let warpPoint = NSMenuItem(title: "Add Warp Point…", action: #selector(onMenuAddWarpPoint), keyEquivalent: "")
+            warpPoint.target = self
+            warpPoint.isEnabled = TimeWarpRecorder.shared.isRecording
+            menu.addItem(warpPoint)
+        }
+
         menu.addItem(.separator())
 
         // Open App window
@@ -114,6 +121,10 @@ extension AppDelegate {
 
         menu.delegate = self
         return menu
+    }
+
+    @objc func onMenuAddWarpPoint() {
+        TimeWarpPointController.shared.addWarpPoint()
     }
 
     @objc func onMenuUnlock() {

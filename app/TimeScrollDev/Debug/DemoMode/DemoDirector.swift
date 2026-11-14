@@ -9,7 +9,7 @@ final class DemoDirector {
   static let shared = DemoDirector()
 
   enum Scene: String {
-    case seed, timeline, calendar, audio, searchText, searchAI, summary, appTime, export
+    case seed, timeline, calendar, audio, searchText, searchAI, summary, appTime, export, timeWarp
     case privacy, vault, general, mcp
   }
 
@@ -28,7 +28,7 @@ final class DemoDirector {
     case .mcp:
       UserDefaults.standard.set(true, forKey: "settings.mcpEnabled")
       present(pane: MCPSettingsPane())
-    case .timeline, .calendar, .audio, .searchText, .searchAI, .summary, .appTime: showMainWindow()
+    case .timeline, .calendar, .audio, .searchText, .searchAI, .summary, .appTime, .timeWarp: showMainWindow()
     case nil: break
     }
   }
@@ -64,6 +64,9 @@ final class DemoDirector {
       search("that chart with sales by region")
     case .summary: await selectAndSummarize(.yesterday, screen: "preview-sales", timeline: timeline, selection: selection)
     case .appTime: await selectAndSummarize(.lastWeek, screen: "xcode-checkout", timeline: timeline, selection: selection)
+    case .timeWarp:
+      await presentTimeWarp(timeline)
+      return
     case .calendar:
       zoomIn(timeline)
       show(screen: "xcode-checkout", in: nil, timeline: timeline)
@@ -114,6 +117,25 @@ final class DemoDirector {
     try? await Task.sleep(for: .seconds(1))
     show(screen: screen, in: range, timeline: timeline)
   }
+
+  /// Time Warp for the newest Warp point, looking back an hour, with the timeline behind it on
+  /// that moment.
+  private func presentTimeWarp(_ timeline: TimelineModel) async {
+    zoomIn(timeline)
+    let nowMs = Int64(Date().timeIntervalSince1970 * 1000)
+    let points = (try? DB.shared.timeWarpPoints(fromMs: nowMs - 86_400_000, toMs: nowMs)) ?? []
+    guard let momentMs = points.last?.timeMs else { return fail(DemoError.noWarpPoint) }
+    if let index = timeline.metas.firstIndex(where: { $0.startedAtMs <= momentMs }) { timeline.selectedIndex = index }
+    UserDefaults.standard.set(TimeWarpLookback.hour.rawValue, forKey: TimeWarpChoicesStore.lookbackKey)
+    let controller = TimeWarpWindowController.shared
+    controller.present(momentMs: momentMs)
+    guard let window = controller.window else { return }
+    window.setContentSize(NSSize(width: 540, height: 700))
+    window.center()
+    reportReady(window: window)
+  }
+
+  private enum DemoError: Error { case noWarpPoint }
 
   private func runSeed() {
     do {

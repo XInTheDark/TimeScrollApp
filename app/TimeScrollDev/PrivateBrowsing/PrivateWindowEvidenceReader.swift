@@ -33,7 +33,7 @@ struct LivePrivateWindowEvidenceReader: PrivateWindowEvidenceReading {
     guard let getWindow = Self.getWindow else { return [:] }
     let app = AXUIElementCreateApplication(pid)
     AXUIElementSetMessagingTimeout(app, Self.messagingTimeout)
-    guard let windows = attribute(app, kAXWindowsAttribute) as? [AXUIElement] else { return [:] }
+    guard let windows = Self.attribute(app, kAXWindowsAttribute) as? [AXUIElement] else { return [:] }
 
     var result: [CGWindowID: PrivateWindowEvidence] = [:]
     for window in windows.prefix(Self.maxWindows) {
@@ -41,25 +41,26 @@ struct LivePrivateWindowEvidenceReader: PrivateWindowEvidenceReading {
       var id: CGWindowID = 0
       guard getWindow(window, &id) == .success, id != 0 else { continue }
       var evidence = PrivateWindowEvidence(
-        title: attribute(window, kAXTitleAttribute) as? String,
-        subrole: attribute(window, kAXSubroleAttribute) as? String,
-        hasCloseButton: attribute(window, kAXCloseButtonAttribute) != nil)
+        title: Self.attribute(window, kAXTitleAttribute) as? String,
+        subrole: Self.attribute(window, kAXSubroleAttribute) as? String,
+        hasCloseButton: Self.attribute(window, kAXCloseButtonAttribute) != nil)
       if let rule = profile.addressField, addressFieldWindows.contains(id),
          !PrivateWindowClassifier.hasMarker(evidence, profile: profile) {
-        evidence.addressFieldDescription = addressFieldDescription(in: window, rule: rule)
+        evidence.addressFieldDescription = Self.addressFieldDescription(in: window, rule: rule)
       }
       result[id] = evidence
     }
     return result
   }
 
-  private func attribute(_ element: AXUIElement, _ name: String) -> CFTypeRef? {
+  static func attribute(_ element: AXUIElement, _ name: String) -> CFTypeRef? {
     var value: CFTypeRef?
     return AXUIElementCopyAttributeValue(element, name as CFString, &value) == .success ? value : nil
   }
 
-  /// Only browser chrome is searched. Page content can say anything, and is skipped.
-  private func addressFieldDescription(in window: AXUIElement, rule: PrivateBrowsingProfile.AddressFieldRule) -> String? {
+  /// Only browser chrome is searched. Page content can say anything, and is skipped. Also used by
+  /// Time Warp to classify the focused window.
+  static func addressFieldDescription(in window: AXUIElement, rule: PrivateBrowsingProfile.AddressFieldRule) -> String? {
     var visited = 0
     let deadline = ProcessInfo.processInfo.systemUptime + Self.toolbarWalkSeconds
 
@@ -68,9 +69,9 @@ struct LivePrivateWindowEvidenceReader: PrivateWindowEvidenceReading {
       guard visited <= Self.maxToolbarNodes, depth <= Self.maxToolbarDepth,
             ProcessInfo.processInfo.systemUptime < deadline else { return nil }
       AXUIElementSetMessagingTimeout(element, Self.messagingTimeout)
-      if attribute(element, kAXIdentifierAttribute) as? String == rule.identifier { return element }
-      if attribute(element, kAXRoleAttribute) as? String == "AXWebArea" { return nil }
-      for child in attribute(element, kAXChildrenAttribute) as? [AXUIElement] ?? [] {
+      if Self.attribute(element, kAXIdentifierAttribute) as? String == rule.identifier { return element }
+      if Self.attribute(element, kAXRoleAttribute) as? String == "AXWebArea" { return nil }
+      for child in Self.attribute(element, kAXChildrenAttribute) as? [AXUIElement] ?? [] {
         if let found = find(child, depth: depth + 1) { return found }
       }
       return nil

@@ -195,6 +195,8 @@ final class DB {
     }
 
     func close() {
+        // A new connection can reuse the old handle's address; its string ids must not carry over.
+        Self.timeWarpValueCache.removeAll()
         reader.close()
         if let handle = db { sqlite3_close(handle) }
         db = nil
@@ -287,6 +289,7 @@ final class DB {
         Self.createActivitySessionTablesIfNeeded(db: db)
         _ = sqlite3_exec(db, Self.orphanedActivitySessionDeletionSQL, nil, nil, nil)
         Self.createSummaryTablesIfNeeded(db: db)
+        Self.createTimeWarpTablesIfNeeded(db: db)
         // Indices for faster joins and scans
         _ = sqlite3_exec(db, "CREATE INDEX IF NOT EXISTS idx_ts_snapshot_started_at_ms ON ts_snapshot(started_at_ms DESC);", nil, nil, nil)
         _ = sqlite3_exec(db, "CREATE INDEX IF NOT EXISTS idx_ts_snapshot_app_bundle_started_at_ms ON ts_snapshot(app_bundle_id, started_at_ms DESC);", nil, nil, nil)

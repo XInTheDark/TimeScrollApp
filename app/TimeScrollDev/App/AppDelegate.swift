@@ -48,6 +48,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Seed App Group defaults so the MCP helper can see storage bookmarks/paths immediately
         StoragePaths.syncSharedDefaultsFromStandard()
         setupStatusItem()
+        TimeWarpPointController.shared.start()
         installStatusItemObservers()
 
         // Sparkle updater (if available)

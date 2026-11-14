@@ -39,6 +39,9 @@ struct TimelineBarContainer: NSViewRepresentable {
     var showsSessions: Bool = false
     var sessions: [ActivitySession] = []
     var sessionsRevision: UInt64 = 0
+    var showsWarpPoints: Bool = false
+    var warpPoints: [TimeWarpPointNote] = []
+    var warpPointsRevision: UInt64 = 0
     var rangeSelection: TimelineRangeSelection? = nil
     let onJump: (Int64, CaptureKind?) -> Void
     let onHover: (Int64) -> Void
@@ -57,6 +60,7 @@ struct TimelineBarContainer: NSViewRepresentable {
         doc.isCompressed = isCompressed
         doc.visibleCaptureKinds = visibleCaptureKinds
         doc.setSessions(sessions, revision: sessionsRevision, shown: showsSessions)
+        doc.setWarpPoints(warpPoints, revision: warpPointsRevision, shown: showsWarpPoints)
         doc.rangeSelection = rangeSelection
         doc.refreshLayout()
         doc.onJump = onJump
@@ -77,6 +81,7 @@ struct TimelineBarContainer: NSViewRepresentable {
         doc.isCompressed = isCompressed
         doc.visibleCaptureKinds = visibleCaptureKinds
         doc.setSessions(sessions, revision: sessionsRevision, shown: showsSessions)
+        doc.setWarpPoints(warpPoints, revision: warpPointsRevision, shown: showsWarpPoints)
         doc.rangeSelection = rangeSelection
         doc.refreshLayout()
         let contentWidth = max(scroll.bounds.width, doc.requiredContentWidth())
@@ -557,6 +562,16 @@ final class TimelineBarNSView: NSView {
     private var sessionBandCache: (key: SessionBandCacheKey, bands: [TimelineSessionBand])?
     /// Label widths do not change with zoom, so replanning while pinching measures only new text.
     private var sessionLabelWidths: [String: CGFloat] = [:]
+    private var warpPoints: [TimeWarpPointNote] = []
+    private var warpPointsRevision: UInt64 = 0
+    private var showsWarpPoints = false
+    private struct WarpMarksCacheKey: Equatable {
+        let revision: UInt64?
+        let pointsRevision: UInt64
+        let msPerPoint: Double
+        let isCompressed: Bool
+    }
+    private var warpMarksCache: (key: WarpMarksCacheKey, marks: TimelineWarpPointMarks)?
     /// A click on the session band fits the session; the drag that may follow must not scrub.
     private var isPressingSessionBand = false
     /// Set by pinch-zoom so the container keeps the time under the cursor in place.
@@ -589,6 +604,14 @@ final class TimelineBarNSView: NSView {
         self.sessions = sessions
         sessionsRevision = revision
         showsSessions = shown
+        needsDisplay = true
+    }
+
+    func setWarpPoints(_ points: [TimeWarpPointNote], revision: UInt64, shown: Bool) {
+        guard revision != warpPointsRevision || shown != showsWarpPoints else { return }
+        warpPoints = points
+        warpPointsRevision = revision
+        showsWarpPoints = shown
         needsDisplay = true
     }
 
@@ -630,6 +653,7 @@ final class TimelineBarNSView: NSView {
         drawTicks(model: m, in: bounds)
         drawSessionBands(model: m)
         drawSegments(model: m, in: bounds)
+        drawWarpPoints()
         drawSelection(model: m, in: bounds)
         drawPlaybackCursor(model: m, in: bounds)
         if let edges = rangeEdges {
@@ -733,6 +757,27 @@ final class TimelineBarNSView: NSView {
         let blocks = TimelineScreenBlockPlanner.plan(spans: Array(spans), fillsGaps: layout.isCompressed)
         screenBlockCache = (key, blocks)
         return blocks
+    }
+
+    private func drawWarpPoints() {
+        guard showsWarpPoints, !warpPoints.isEmpty else { return }
+        let rows = trackLayout
+        let bottom = (rows.audioRect ?? rows.screenRect).map(\.maxY) ?? bounds.maxY
+        warpMarks().draw(in: visibleRect, linesTo: bottom)
+    }
+
+    /// Positions follow the axis, so they are cached until the layout or the points change. Their
+    /// tooltips are rebuilt with them.
+    private func warpMarks() -> TimelineWarpPointMarks {
+        guard showsWarpPoints else { return .empty }
+        let key = WarpMarksCacheKey(revision: layoutRevision, pointsRevision: warpPointsRevision,
+                                    msPerPoint: layout.msPerPoint, isCompressed: layout.isCompressed)
+        if let cached = warpMarksCache, cached.key == key { return cached.marks }
+        let marks = TimelineWarpPointMarks(points: warpPoints, x: { self.timelineX(for: $0) })
+        warpMarksCache = (key, marks)
+        removeAllToolTips()
+        for index in marks.xs.indices { addToolTip(marks.headRect(at: index), owner: self, userData: nil) }
+        return marks
     }
 
     private func drawSessionBands(model m: TimelineModel) {
@@ -1143,6 +1188,13 @@ final class TimelineBarNSView: NSView {
                                           lowerX: edges?.lower, upperX: edges?.upper)
             return
         }
+        if let mark = warpMarks().hit(point) {
+            // A Warp point is there to warp back to: show that moment and its Time Warp.
+            isPressingSessionBand = true
+            onJump?(mark.timeMs, .screen)
+            TimeWarpWindowController.shared.present(momentMs: mark.timeMs)
+            return
+        }
         if showsSessions, let session = session(at: point) {
             isPressingSessionBand = true
             fit(session)
@@ -1197,7 +1249,29 @@ final class TimelineBarNSView: NSView {
         jump.representedObject = TimelineJumpTarget(timeMs: t, preferredCaptureKind: preferredCaptureKind)
         jump.target = self
         menu.addItem(jump)
+        let moment = NSMenuItem(title: "Time Warp to This Moment…", action: #selector(ctxTimeWarpMoment(_:)), keyEquivalent: "")
+        moment.representedObject = t
+        moment.target = self
+        menu.addItem(moment)
+        if let session = session(at: p) {
+            let warp = NSMenuItem(title: "Time Warp to This Session…", action: #selector(ctxTimeWarp(_:)), keyEquivalent: "")
+            warp.representedObject = TimelineRange.covering(session.startMs, session.endMs)
+            warp.target = self
+            menu.addItem(warp)
+        }
         NSMenu.popUpContextMenu(menu, with: event, for: self)
+    }
+
+    @objc private func ctxTimeWarp(_ sender: NSMenuItem) {
+        if let range = sender.representedObject as? TimelineRange {
+            TimeWarpWindowController.shared.present(range: range)
+        }
+    }
+
+    @objc private func ctxTimeWarpMoment(_ sender: NSMenuItem) {
+        if let timeMs = sender.representedObject as? Int64 {
+            TimeWarpWindowController.shared.present(momentMs: timeMs)
+        }
     }
 
     @objc private func ctxJump(_ sender: NSMenuItem) {
@@ -1470,4 +1544,12 @@ private struct HoverPreviewView: View {
         f.timeStyle = .short
         return f
     }()
+}
+
+extension TimelineBarNSView: NSViewToolTipOwner {
+    /// A Warp point's note, shown when hovering its marker.
+    func view(_ view: NSView, stringForToolTip tag: NSView.ToolTipTag, point: NSPoint, userData data: UnsafeMutableRawPointer?) -> String {
+        guard let mark = warpMarks().hit(point) else { return "" }
+        return mark.note.isEmpty ? "Warp point" : mark.note
+    }
 }

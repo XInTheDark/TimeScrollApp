@@ -27,6 +27,7 @@ struct OnboardingView: View {
     // Step 4: AI features
     @AppStorage("settings.mcpEnabled") private var mcpEnabled: Bool = false
     @State private var aiModeEnabled = true
+    @State private var timeWarpEnabled = true
 
     // Step 5: Permissions
     @State private var hasScreenRecording = Permissions.isScreenRecordingGranted()
@@ -94,6 +95,7 @@ struct OnboardingView: View {
             enableVault = settings.vaultEnabled
             includeDefaultExclusions = !settings.defaultExclusionsDeclined
             aiModeEnabled = settings.aiModeOn
+            timeWarpEnabled = TimeWarpSettings.isEnabled()
             refreshPermissionState()
 
             let existingSelection = CaptureModeSelection(settings: settings)
@@ -151,7 +153,7 @@ struct OnboardingView: View {
         case 3:
             return "Choose which apps TimeScroll should never capture."
         case 4:
-            return "Enhance your experience with AI features."
+            return "Turn on extra features."
         default:
             return "Grant the permissions needed for your selected capture setup."
         }
@@ -296,6 +298,8 @@ struct OnboardingView: View {
 
     private var aiStep: some View {
         VStack(spacing: 12) {
+            TimeWarpOnboardingCard(isEnabled: $timeWarpEnabled)
+
             VStack(alignment: .leading, spacing: 12) {
                 HStack(spacing: 12) {
                     Image(systemName: "bolt.horizontal")
@@ -390,7 +394,7 @@ struct OnboardingView: View {
                 microphoneCard
             }
 
-            if useDirectMode || hasAccessibility {
+            if useDirectMode || timeWarpEnabled || hasAccessibility {
                 accessibilityCard
             }
 
@@ -618,6 +622,7 @@ struct OnboardingView: View {
             )
             settings.defaultExclusionsDeclined = !includeDefaultExclusions
             settings.aiModeOn = aiModeEnabled
+            TimeWarpOnboardingCard.apply(timeWarpEnabled)
             settings.onboardingCompleted = true
             UserDefaults.standard.set(true, forKey: AppDelegate.summarySetupShownKey)
         }

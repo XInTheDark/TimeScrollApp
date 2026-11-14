@@ -53,6 +53,7 @@ enum DemoSeeder {
         }
       }
     }
+    try DemoTimeWarpSeeder.seed(manifest: manifest, captures: captures, now: now)
     try storeRecording(manifest.recording, now: now)
     try storeSummaries(manifest.summaries, now: now, calendar: calendar)
   }

@@ -38,6 +38,8 @@ extension DB {
                     if let c = sqlite3_column_text(stmt, 1) { candidates.insert(String(cString: c)) }
                 }
             }
+            // Time Warp records do not depend on media, so they are purged even when no media expired.
+            try? purgeTimeWarpRecords(olderThan: cutoff)
             guard !candidates.isEmpty else { return (0, []) }
 
             let expiredIds = "SELECT id FROM ts_snapshot WHERE started_at_ms < \(cutoff)"
@@ -100,15 +102,22 @@ extension DB {
             var path: String?
             var thumbPath: String?
             var startedAtMs: Int64 = 0
+            var isScreen = false
             var stmt: OpaquePointer?
             defer { sqlite3_finalize(stmt) }
-            if sqlite3_prepare_v2(db, "SELECT path, thumb_path, started_at_ms FROM ts_snapshot WHERE id=? LIMIT 1;", -1, &stmt, nil) == SQLITE_OK {
+            if sqlite3_prepare_v2(db, "SELECT path, thumb_path, started_at_ms, capture_kind FROM ts_snapshot WHERE id=? LIMIT 1;", -1, &stmt, nil) == SQLITE_OK {
                 sqlite3_bind_int64(stmt, 1, id)
                 if sqlite3_step(stmt) == SQLITE_ROW {
                     if let c = sqlite3_column_text(stmt, 0) { path = String(cString: c) }
                     if let c = sqlite3_column_text(stmt, 1) { thumbPath = String(cString: c) }
                     startedAtMs = sqlite3_column_int64(stmt, 2)
+                    isScreen = sqlite3_column_text(stmt, 3).map { String(cString: $0) } == CaptureKind.screen.rawValue
                 }
+            }
+            // The frame stood for the time until the next one; its Time Warp records go with it.
+            if isScreen {
+                let frameEndMs = Self.timeWarpFrameEndMs(startedAtMs: startedAtMs, db: db)
+                try deleteTimeWarpRecords(fromMs: startedAtMs, toMs: frameEndMs)
             }
 
             let sql = """

@@ -1,5 +1,7 @@
 ## TimeScroll app
 
+[![Follow @muzhen_j on X](https://img.shields.io/twitter/follow/muzhen_j?style=social)](https://x.com/muzhen_j)
+
 **Website**: https://timescroll.muzhen.org/
 
 Full source code for the TimeScroll app.

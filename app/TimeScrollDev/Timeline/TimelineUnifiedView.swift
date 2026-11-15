@@ -132,7 +132,22 @@ struct TimelineUnifiedView: View {
         #endif
         .onChange(of: vault.isUnlocked) { _, unlocked in
             // When the vault gets unlocked, reload timeline and show a loading state
-            if unlocked { model.load() } else { rangeSelection.end() }
+            if unlocked {
+                model.load()
+            } else {
+                rangeSelection.end()
+                // Turning encryption off also ends the unlocked state; that is not a lock and
+                // reloads below, so clear history only while the vault is still on.
+                if vault.isVaultEnabled {
+                    model.clearForVaultLock()
+                    sessionLoader.clear()
+                    warpPointLoader.clear()
+                }
+            }
+        }
+        .onChange(of: vault.isVaultEnabled) { _, enabled in
+            // Encryption turned off: the database is readable as plaintext now.
+            if !enabled { model.load() }
         }
         .onChange(of: appState.lastSnapshotTick) { _, _ in
             liveRefresh.notify()
@@ -560,25 +575,30 @@ struct TimelineUnifiedView: View {
                 )
 
             ZStack(alignment: .bottomTrailing) {
-                TimelineBarContainer(model: model,
-                                     isCompressed: compressedTimeline,
-                                     invertScrollDirection: invertTimelineScrollDirection,
-                                     visibleCaptureKinds: visibleTimelineCaptureKinds,
-                                     showsSessions: showTimelineSessions,
-                                     sessions: sessionLoader.sessions,
-                                     sessionsRevision: sessionLoader.revision,
-                                     showsWarpPoints: showsWarpPoints,
-                                     warpPoints: warpPointLoader.points,
-                                     warpPointsRevision: warpPointLoader.revision,
-                                     rangeSelection: rangeSelection,
-                                     onJump: { time, preferredCaptureKind in
-                                         model.jump(to: time,
-                                                    preferredCaptureKind: preferredCaptureKind,
-                                                    visibleCaptureKinds: visibleTimelineCaptureKinds)
-                                     },
-                                     onHover: { t in model.hoverTimeMs = t },
-                                     onHoverExit: { model.hoverTimeMs = nil })
-                    .frame(height: timelineCanvasHeight)
+                if settings.vaultEnabled && !vault.isUnlocked {
+                    // Locked: no history surface at all (removing the bar also closes its hover preview).
+                    Color.clear.frame(height: timelineCanvasHeight)
+                } else {
+                    TimelineBarContainer(model: model,
+                                         isCompressed: compressedTimeline,
+                                         invertScrollDirection: invertTimelineScrollDirection,
+                                         visibleCaptureKinds: visibleTimelineCaptureKinds,
+                                         showsSessions: showTimelineSessions,
+                                         sessions: sessionLoader.sessions,
+                                         sessionsRevision: sessionLoader.revision,
+                                         showsWarpPoints: showsWarpPoints,
+                                         warpPoints: warpPointLoader.points,
+                                         warpPointsRevision: warpPointLoader.revision,
+                                         rangeSelection: rangeSelection,
+                                         onJump: { time, preferredCaptureKind in
+                                             model.jump(to: time,
+                                                        preferredCaptureKind: preferredCaptureKind,
+                                                        visibleCaptureKinds: visibleTimelineCaptureKinds)
+                                         },
+                                         onHover: { t in model.hoverTimeMs = t },
+                                         onHoverExit: { model.hoverTimeMs = nil })
+                        .frame(height: timelineCanvasHeight)
+                }
 
                 HStack(spacing: 10) {
                     TimelineSelectButton(selection: rangeSelection)

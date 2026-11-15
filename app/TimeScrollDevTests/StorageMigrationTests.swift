@@ -2,7 +2,7 @@ import XCTest
 @testable import TimeScroll
 
 final class StorageMigrationTests: XCTestCase {
-    func test_updateSnapshotPathsAfterRootMove_rewrites_paths_and_thumbs() async throws {
+    func test_rewriteMediaPathsAfterRootMove_rewrites_paths_and_thumbs() async throws {
         // Setup two temporary directories: oldRoot and newRoot
         let fm = FileManager.default
         let tmp = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
@@ -29,7 +29,7 @@ final class StorageMigrationTests: XCTestCase {
         XCTAssertTrue(rows.contains { $0.path == oldPath })
 
         // Call the migration helper to rewrite paths
-        DB.shared.updateSnapshotPathsAfterRootMove(oldRoot: oldRoot.path, newRoot: newRoot.path)
+        try DB.shared.rewriteMediaPathsAfterRootMove(oldRoot: oldRoot.path, newRoot: newRoot.path)
 
         // Confirm the DB rows now reflect newRoot prefix
         rows = try DB.shared.listPlaintextSnapshots(limit: 10)

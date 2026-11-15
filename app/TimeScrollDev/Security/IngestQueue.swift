@@ -47,13 +47,13 @@ final class IngestQueue {
         let rec = Record(snapshotPath: path.path, startedAtMs: startedAtMs, appBundleId: appBundleId, appName: appName, bytes: bytes, width: width, height: height, format: format, hash64: hash64, ocrText: ocrText, ocrBoxes: ocrBoxes, thumbPath: thumbPath)
         let clear = try JSONEncoder().encode(rec)
         let data = try FileCrypter.shared.encryptData(clear, timestampMs: startedAtMs)
-        StoragePaths.withSecurityScope {
+        try StoragePaths.withSecurityScope {
             let nonce = UUID().uuidString.prefix(8)
             let name = Self.tsFormatter.string(from: Date(timeIntervalSince1970: TimeInterval(startedAtMs)/1000)) + "-\(nonce).iq1"
             let url = dir.appendingPathComponent(name)
-            let tmp = url.appendingPathExtension("tmp")
-            try? data.write(to: tmp, options: Data.WritingOptions.atomic)
-            let _ = try? fm.replaceItemAt(url, withItemAt: tmp)
+            // Names are unique, so an atomic write is the whole commit. A failure throws, so the
+            // capture is never reported as queued when nothing was saved.
+            try data.write(to: url, options: Data.WritingOptions.atomic)
             // Update queued count to reflect actual number of records present
             let d = UserDefaults.standard
             if let files = try? fm.contentsOfDirectory(at: dir, includingPropertiesForKeys: [.isRegularFileKey], options: [.skipsHiddenFiles]) {

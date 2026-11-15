@@ -64,6 +64,21 @@ struct VaultManifest: Codable {
         }
     }
 
+    /// True when a recovery file exists, even one that cannot be decoded.
+    static func fileExists() -> Bool {
+        StoragePaths.withSecurityScope { FileManager.default.fileExists(atPath: fileURL.path) }
+    }
+
+    /// Keeps a copy of the current recovery file before a new vault replaces it, so data the
+    /// old vault encrypted stays recoverable with its passphrase.
+    static func archiveExisting(now: Date = Date()) throws {
+        try StoragePaths.withSecurityScope {
+            guard FileManager.default.fileExists(atPath: fileURL.path) else { return }
+            let name = "vault-v2-replaced-\(Int64(now.timeIntervalSince1970 * 1000)).json"
+            try FileManager.default.copyItem(at: fileURL, to: StoragePaths.vaultDir().appendingPathComponent(name))
+        }
+    }
+
     func save() throws {
         let data = try JSONEncoder().encode(self)
         try StoragePaths.withSecurityScope {

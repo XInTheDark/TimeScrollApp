@@ -16,17 +16,18 @@ final class SQLCipherBridge {
             ? StoragePaths.sharedBool(forKey: "settings.vaultEnabled")
             : false
         if vaultOn {
-            if let key = VaultKeys.shared.databaseKey { openWithKey(key) }
+            if let key = VaultKeys.shared.databaseKey {
+                do { try openWithKey(key) } catch { fputs("[SQLCipher] open failed: \(error.localizedDescription)\n", stderr) }
+            }
             return
         }
         _ = try? DB.shared.openIfNeeded()
     }
 
-    func openWithKey(_ key: Data) {
-        _ = try? DB.shared.openWithSqlcipher(key: key)
-        // Log runtime cipher version for verification
+    /// Opens the encrypted database with `key`; throws when it cannot be opened and verified.
+    func openWithKey(_ key: Data) throws {
+        try DB.shared.openWithSqlcipher(key: key)
         DB.shared.logCipherVersion()
-        verifyHeader()
     }
 
     func close() { DB.shared.close() }
@@ -35,38 +36,28 @@ final class SQLCipherBridge {
     func isDatabaseEncrypted() -> Bool {
         let (url, exists) = dbURL()
         guard exists else { return false }
-        return StoragePaths.withSecurityScope { !isLikelyPlaintextSQLite(url: url) }
+        return StoragePaths.withSecurityScope { !SQLCipherFileMigrator.isPlaintextSQLite(url) }
     }
 
-    // MARK: - Migration (plaintext -> encrypted)
-    func migratePlaintextIfNeeded(withKey key: Data) {
-        let (url, exists) = dbURL()
-        guard exists else { return }
-        // Detect if file appears to be plaintext SQLite by header magic
-        if isLikelyPlaintextSQLite(url: url) {
-            do {
-                try migrateFile(at: url, key: key)
-                    fputs("[SQLCipher] Migration complete: db is now encrypted\n", stderr)
-                verifyHeader()
-            } catch {
-                    fputs("[SQLCipher] Migration failed: \(error)\n", stderr)
-            }
-        } else {
-            // Already encrypted (or not a plain SQLite header); nothing to do
+    /// Encrypts a plaintext database in place (no-op when there is none or it is already
+    /// encrypted). Throws, leaving the plaintext file untouched, if any step fails.
+    func migratePlaintextIfNeeded(withKey key: Data) throws {
+        try StoragePaths.withSecurityScope {
+            let (url, exists) = dbURL()
+            guard exists, SQLCipherFileMigrator.isPlaintextSQLite(url) else { return }
+            try SQLCipherFileMigrator.encrypt(plaintextAt: url, key: key)
+            fputs("[SQLCipher] Migration complete: db is now encrypted\n", stderr)
         }
     }
 
-    // MARK: - Migration (encrypted -> plaintext)
-    func migrateEncryptedToPlaintextIfNeeded(withKey key: Data) {
-        let (url, exists) = dbURL()
-        guard exists else { return }
-        // If it looks like plaintext, nothing to do
-        if isLikelyPlaintextSQLite(url: url) { return }
-        do {
-            try migrateEncryptedFileToPlaintext(at: url, key: key)
-              fputs("[SQLCipher] Reverse migration complete: db is now plaintext\n", stderr)
-        } catch {
-              fputs("[SQLCipher] Reverse migration failed: \(error)\n", stderr)
+    /// Decrypts the database in place (no-op when it is already plaintext). Throws, leaving the
+    /// encrypted file untouched, if any step fails.
+    func migrateEncryptedToPlaintextIfNeeded(withKey key: Data) throws {
+        try StoragePaths.withSecurityScope {
+            let (url, exists) = dbURL()
+            guard exists, !SQLCipherFileMigrator.isPlaintextSQLite(url) else { return }
+            try SQLCipherFileMigrator.decrypt(encryptedAt: url, key: key)
+            fputs("[SQLCipher] Reverse migration complete: db is now plaintext\n", stderr)
         }
     }
 
@@ -74,135 +65,5 @@ final class SQLCipherBridge {
         let url = StoragePaths.dbURL()
         let exists = FileManager.default.fileExists(atPath: url.path)
         return (url, exists)
-    }
-
-    private func isLikelyPlaintextSQLite(url: URL) -> Bool {
-        guard let fh = try? FileHandle(forReadingFrom: url) else { return false }
-        defer { try? fh.close() }
-        let head = try? fh.read(upToCount: 16) ?? Data()
-        if let head = head, let s = String(data: head, encoding: .utf8) {
-            return s.hasPrefix("SQLite format 3")
-        }
-        return false
-    }
-
-    private func migrateFile(at url: URL, key: Data) throws {
-        try StoragePaths.withSecurityScope {
-        // Create a new encrypted DB and export from the plaintext DB into it
-        let encURL = url.deletingLastPathComponent().appendingPathComponent("db.sqlite.enc.tmp")
-        _ = try? FileManager.default.removeItem(at: encURL)
-
-        var encDB: OpaquePointer?
-        guard sqlite3_open(encURL.path, &encDB) == SQLITE_OK, let enc = encDB else {
-            throw NSError(domain: "TS.SQLCipher", code: -10, userInfo: [NSLocalizedDescriptionKey: "Open enc DB failed"])
-        }
-        defer { sqlite3_close(enc) }
-
-        let hex = key.map { String(format: "%02x", $0) }.joined()
-        // Apply key and cipher settings on the encrypted DB connection
-        let keySQL = "PRAGMA key = \"x'\(hex)'\";"
-        _ = sqlite3_exec(enc, keySQL, nil, nil, nil)
-        _ = sqlite3_exec(enc, "PRAGMA cipher_compatibility = 4;", nil, nil, nil)
-        _ = sqlite3_exec(enc, "PRAGMA kdf_iter = 256000;", nil, nil, nil)
-        _ = sqlite3_exec(enc, "PRAGMA cipher_page_size = 4096;", nil, nil, nil)
-        _ = sqlite3_exec(enc, "PRAGMA cipher_hmac_algorithm = HMAC_SHA256;", nil, nil, nil)
-        _ = sqlite3_exec(enc, "PRAGMA cipher_kdf_algorithm = PBKDF2_HMAC_SHA256;", nil, nil, nil)
-
-        // Attach the plaintext DB to this connection with empty key
-        let plainPath = url.path.replacingOccurrences(of: "'", with: "''")
-        let attachPlain = "ATTACH DATABASE '\(plainPath)' AS plaintext KEY '';"
-        guard sqlite3_exec(enc, attachPlain, nil, nil, nil) == SQLITE_OK else {
-            throw NSError(domain: "TS.SQLCipher", code: -11, userInfo: [NSLocalizedDescriptionKey: "ATTACH plaintext failed"])
-        }
-
-        // Export from plaintext (attached) into main (encrypted)
-        guard sqlite3_exec(enc, "SELECT sqlcipher_export('main','plaintext');", nil, nil, nil) == SQLITE_OK else {
-            throw NSError(domain: "TS.SQLCipher", code: -12, userInfo: [NSLocalizedDescriptionKey: "sqlcipher_export failed"])
-        }
-
-        // Preserve user_version
-        _ = sqlite3_exec(enc, "PRAGMA main.user_version = plaintext.user_version;", nil, nil, nil)
-        _ = sqlite3_exec(enc, "DETACH DATABASE plaintext;", nil, nil, nil)
-
-        // Replace original with encrypted copy
-        sqlite3_close(enc)
-        let _ = try FileManager.default.replaceItemAt(url, withItemAt: encURL)
-
-        // Best-effort cleanup of any existing WAL/SHM from prior plaintext DB
-        let baseDir = url.deletingLastPathComponent()
-        let baseName = url.lastPathComponent
-        let wal = baseDir.appendingPathComponent(baseName + "-wal")
-        let shm = baseDir.appendingPathComponent(baseName + "-shm")
-        _ = try? FileManager.default.removeItem(at: wal)
-        _ = try? FileManager.default.removeItem(at: shm)
-        }
-    }
-
-    private func migrateEncryptedFileToPlaintext(at url: URL, key: Data) throws {
-        try StoragePaths.withSecurityScope {
-        // Create a new plaintext DB and export from the encrypted DB into it
-        let plainURL = url.deletingLastPathComponent().appendingPathComponent("db.sqlite.plain.tmp")
-        _ = try? FileManager.default.removeItem(at: plainURL)
-
-        var plainDB: OpaquePointer?
-        guard sqlite3_open(plainURL.path, &plainDB) == SQLITE_OK, let plain = plainDB else {
-            throw NSError(domain: "TS.SQLCipher", code: -20, userInfo: [NSLocalizedDescriptionKey: "Open plaintext DB failed"])
-        }
-        defer { sqlite3_close(plain) }
-
-        // Attach the encrypted DB to this connection with provided key
-        let hex = key.map { String(format: "%02x", $0) }.joined()
-        let encPath = url.path.replacingOccurrences(of: "'", with: "''")
-        let attachEnc = "ATTACH DATABASE '\(encPath)' AS cipher KEY \"x'\(hex)'\";"
-        guard sqlite3_exec(plain, attachEnc, nil, nil, nil) == SQLITE_OK else {
-            throw NSError(domain: "TS.SQLCipher", code: -21, userInfo: [NSLocalizedDescriptionKey: "ATTACH cipher failed"])
-        }
-
-        // Apply cipher settings on the attached database to ensure compatibility
-        _ = sqlite3_exec(plain, "PRAGMA cipher.cipher_compatibility = 4;", nil, nil, nil)
-        _ = sqlite3_exec(plain, "PRAGMA cipher.kdf_iter = 256000;", nil, nil, nil)
-        _ = sqlite3_exec(plain, "PRAGMA cipher.cipher_page_size = 4096;", nil, nil, nil)
-        _ = sqlite3_exec(plain, "PRAGMA cipher.cipher_hmac_algorithm = HMAC_SHA256;", nil, nil, nil)
-        _ = sqlite3_exec(plain, "PRAGMA cipher.cipher_kdf_algorithm = PBKDF2_HMAC_SHA256;", nil, nil, nil)
-
-        // Export from attached encrypted (cipher) into main (plaintext)
-        guard sqlite3_exec(plain, "SELECT sqlcipher_export('main','cipher');", nil, nil, nil) == SQLITE_OK else {
-            throw NSError(domain: "TS.SQLCipher", code: -22, userInfo: [NSLocalizedDescriptionKey: "sqlcipher_export reverse failed"])
-        }
-
-        // Preserve user_version
-        _ = sqlite3_exec(plain, "PRAGMA main.user_version = cipher.user_version;", nil, nil, nil)
-        _ = sqlite3_exec(plain, "DETACH DATABASE cipher;", nil, nil, nil)
-
-        // Close before replacing
-        sqlite3_close(plain)
-
-        // Replace original encrypted DB with plaintext copy
-        let _ = try FileManager.default.replaceItemAt(url, withItemAt: plainURL)
-
-        // Best-effort cleanup of any existing WAL/SHM from prior SQLCipher DB
-        let baseDir = url.deletingLastPathComponent()
-        let baseName = url.lastPathComponent
-        let wal = baseDir.appendingPathComponent(baseName + "-wal")
-        let shm = baseDir.appendingPathComponent(baseName + "-shm")
-        _ = try? FileManager.default.removeItem(at: wal)
-        _ = try? FileManager.default.removeItem(at: shm)
-        }
-    }
-
-    // Post-open / post-migration verification helper
-    private func verifyHeader() {
-        let (url, exists) = dbURL()
-        guard exists else { return }
-        if let fh = try? FileHandle(forReadingFrom: url) {
-            defer { try? fh.close() }
-            let head = try? fh.read(upToCount: 16) ?? Data()
-            if let head = head, let s = String(data: head, encoding: .utf8), s.hasPrefix("SQLite format 3") {
-                print("[SQLCipher][WARN] Database header still plaintext magic. This implies SQLCipher isn't active (likely linking system libsqlite3). Ensure 'import SQLCipher' is used and the SQLCipher package product is linked.")
-                    fputs("[SQLCipher][WARN] Database header still plaintext magic. This implies SQLCipher isn't active (likely linking system libsqlite3). Ensure 'import SQLCipher' is used and the SQLCipher package product is linked.\n", stderr)
-            } else {
-                    fputs("[SQLCipher] Header check passed (no plaintext magic).\n", stderr)
-            }
-        }
     }
 }

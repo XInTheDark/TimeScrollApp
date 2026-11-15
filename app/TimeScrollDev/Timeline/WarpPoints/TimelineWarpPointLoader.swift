@@ -26,6 +26,12 @@ final class TimelineWarpPointLoader: ObservableObject {
     }
   }
 
+  /// Drops loaded data and any in-flight load (vault lock).
+  func clear() {
+    token &+= 1
+    publish([])
+  }
+
   private func publish(_ new: [TimeWarpPointNote]) {
     guard new != points else { return }
     points = new

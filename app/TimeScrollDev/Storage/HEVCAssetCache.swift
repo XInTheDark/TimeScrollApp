@@ -86,7 +86,7 @@ final class HEVCAssetCache {
     if path.pathExtension.lowercased() == "tse" {
       if let header = try? FileCrypter.shared.peekTSEHeader(at: path), header.mime.hasPrefix("video/"),
          let (verified, data) = try? FileCrypter.shared.decryptTSE(at: path), verified.mime.hasPrefix("video/") {
-        let memory = HEVCMemoryAsset(data: data, source: path, access: access)
+        let memory = HEVCMemoryAsset(data: data, source: path, access: access, mime: verified.mime)
         built = Entry(asset: memory.asset, memory: memory, cost: data.count)
       } else {
         built = nil

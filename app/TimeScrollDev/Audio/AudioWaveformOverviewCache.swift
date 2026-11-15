@@ -81,11 +81,12 @@ final class AudioWaveformOverviewCache {
         let sourceURL = URL(fileURLWithPath: path)
         guard FileManager.default.fileExists(atPath: sourceURL.path) else { return nil }
 
+        // Encrypted audio is decoded from memory; plaintext never goes to a temporary file.
+        guard let access = VaultMediaAccess.token(for: sourceURL) else { return nil }
         do {
-            let (playableURL, cleanup) = try makePlayableURL(for: sourceURL)
-            defer { cleanup() }
+            let (asset, memory) = try makeAsset(for: sourceURL, access: access)
+            defer { memory?.invalidate() }
 
-            let asset = AVURLAsset(url: playableURL)
             guard let track = asset.tracks(withMediaType: .audio).first else { return nil }
             let reader = try AVAssetReader(asset: asset)
             let outputSettings: [String: Any] = [
@@ -135,6 +136,8 @@ final class AudioWaveformOverviewCache {
             guard !chunkPeaks.isEmpty else { return nil }
 
             let normalized = normalize(chunkPeaks, bucketCount: sampleCount)
+            // Never publish (or cache) a result that crossed a vault lock.
+            guard VaultMediaAccess.isCurrent(access, for: sourceURL) else { return nil }
             return AudioWaveformOverview(bins: normalized)
         } catch {
             fputs("[Audio][Waveform] Failed to build overview for \(sourceURL.lastPathComponent): \(error.localizedDescription)\n", stderr)
@@ -161,18 +164,16 @@ final class AudioWaveformOverviewCache {
         return reduced.map { max(0.08, min(1.0, $0 / maxPeak)) }
     }
 
-    private static func makePlayableURL(for url: URL) throws -> (URL, () -> Void) {
+    private static func makeAsset(for url: URL, access: VaultMediaAccess.Token) throws -> (AVURLAsset, HEVCMemoryAsset?) {
         guard url.pathExtension.lowercased() == "tse" else {
-            return (url, {})
+            return (AVURLAsset(url: url), nil)
         }
-
-        let (_, data) = try FileCrypter.shared.decryptTSE(at: url)
-        let tempURL = FileManager.default.temporaryDirectory
-            .appendingPathComponent("timescroll-waveform-\(UUID().uuidString)")
-            .appendingPathExtension("m4a")
-        try data.write(to: tempURL, options: .atomic)
-        return (tempURL, {
-            try? FileManager.default.removeItem(at: tempURL)
-        })
+        let (header, data) = try FileCrypter.shared.decryptTSE(at: url)
+        // The memory asset stops serving bytes as soon as the vault locks.
+        let memory = HEVCMemoryAsset(data: data, source: url, access: access, mime: header.mime)
+        return (memory.asset, memory)
     }
+
+    /// Waveform files written by earlier versions; removed at launch.
+    static let legacyTempPrefix = "timescroll-waveform-"
 }

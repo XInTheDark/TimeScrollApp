@@ -47,6 +47,16 @@ final class DB {
 
     private(set) var db: OpaquePointer?
     private(set) var dbURL: URL?
+    /// True while `db` was opened with the vault key (see `openWithSqlcipher`).
+    private(set) var isKeyed = false
+    private let plaintextOpenLock = NSLock()
+    private var plaintextOpenBlockedValue = false
+    /// Set while the vault converts the database file: a plaintext connection opened then would
+    /// write into a file that is about to be replaced.
+    var plaintextOpenBlocked: Bool {
+        get { plaintextOpenLock.lock(); defer { plaintextOpenLock.unlock() }; return plaintextOpenBlockedValue }
+        set { plaintextOpenLock.lock(); plaintextOpenBlockedValue = newValue; plaintextOpenLock.unlock() }
+    }
     private let queue = DispatchQueue(label: "com.timescroll.db")
     private let queueKey = DispatchSpecificKey<Bool>()
     private let reader = DBReadConnection()
@@ -110,6 +120,7 @@ final class DB {
         // We defensively refuse plaintext open in that case to avoid accidental downgrade.
         if vaultOn && unlocked { throw NSError(domain: "TS.DB", code: -101, userInfo: [NSLocalizedDescriptionKey: "Encrypted vault active; use SQLCipherBridge.openWithUnwrappedKeySilently() first"]) }
         if vaultOn && !unlocked { throw NSError(domain: "TS.DB", code: -100, userInfo: [NSLocalizedDescriptionKey: "Vault locked"]) }
+        if plaintextOpenBlocked { throw NSError(domain: "TS.DB", code: -102, userInfo: [NSLocalizedDescriptionKey: "Encryption is being turned on"]) }
         // Resolve storage root (user-selected or default) and ensure it exists
         try StoragePaths.ensureRootExists()
         let url = StoragePaths.dbURL()
@@ -121,73 +132,59 @@ final class DB {
         sqlite3_exec(handle, "PRAGMA synchronous=NORMAL;", nil, nil, nil)
         sqlite3_exec(handle, "PRAGMA temp_store=MEMORY;", nil, nil, nil)
         sqlite3_exec(handle, "PRAGMA cache_size=-\(Self.writerCacheSizeKiB);", nil, nil, nil)
-        try createSchema()
-        try migrateIfNeeded()
+        do {
+            try createSchema()
+            try migrateIfNeeded()
+        } catch {
+            // An encrypted file opened without a key must not stay half-open.
+            close()
+            throw error
+        }
         reader.configure(url: url, key: nil)
         if let u = dbURL { fputs("[DB] opened at \(u.path)\n", stderr) }
         }
     }
 
-    // Open using SQLCipher key. If SQLCipher is not linked yet, the PRAGMA statements will be no-ops.
+    /// Opens the encrypted database with `key`. Throws (leaving the database closed) when
+    /// SQLCipher is unavailable or the file cannot be read with this key and the vault settings.
     func openWithSqlcipher(key: Data) throws {
         try StoragePaths.withSecurityScope {
+        // An open connection is reused only if it was keyed; never infer that from cipher_version.
         if db != nil {
-            // If already open, verify it's SQLCipher; if not, close and reopen encrypted
-            var test: OpaquePointer?
-            if let existing = db, sqlite3_prepare_v2(existing, "PRAGMA cipher_version;", -1, &test, nil) == SQLITE_OK {
-                if sqlite3_step(test) == SQLITE_ROW {
-                    sqlite3_finalize(test)
-                    return // already encrypted
-                }
-            }
-            sqlite3_finalize(test)
+            if isKeyed { return }
             close()
         }
         try StoragePaths.ensureRootExists()
         let url = StoragePaths.dbURL()
         dbURL = url
         var handle: OpaquePointer?
-        if sqlite3_open(url.path, &handle) != SQLITE_OK { throw NSError(domain: "TS.DB", code: 1) }
-        self.db = handle
-        // Provide key in hex for PRAGMA key = "x'..'" form
-    let hex = key.map { String(format: "%02x", $0) }.joined()
-    // Use proper hex key literal form: x'..'
-    let keySQL = "PRAGMA key = \"x'\(hex)'\";"
-    _ = sqlite3_exec(handle, keySQL, nil, nil, nil)
-        // Ensure we are really running against a SQLCipher-enabled build. cipher_version should return a row.
-        var verStmt: OpaquePointer?
-        if sqlite3_prepare_v2(handle, "PRAGMA cipher_version;", -1, &verStmt, nil) == SQLITE_OK {
-            if sqlite3_step(verStmt) == SQLITE_ROW, let c = sqlite3_column_text(verStmt, 0) {
-                let v = String(cString: c)
-                fputs("[SQLCipher] Opened with cipher_version=\(v)\n", stderr)
-            } else {
-                fputs("[SQLCipher][WARN] cipher_version unavailable; this likely means the system SQLite (unencrypted) was linked. The database is NOT encrypted.\n", stderr)
-            }
+        guard sqlite3_open(url.path, &handle) == SQLITE_OK, let handle else {
+            sqlite3_close(handle)
+            throw NSError(domain: "TS.DB", code: 1)
         }
-        sqlite3_finalize(verStmt)
-        _ = sqlite3_exec(handle, "PRAGMA cipher_compatibility = 4;", nil, nil, nil)
-        _ = sqlite3_exec(handle, "PRAGMA kdf_iter = 256000;", nil, nil, nil)
-        _ = sqlite3_exec(handle, "PRAGMA cipher_page_size = 4096;", nil, nil, nil)
-        _ = sqlite3_exec(handle, "PRAGMA cipher_hmac_algorithm = HMAC_SHA256;", nil, nil, nil)
-        _ = sqlite3_exec(handle, "PRAGMA cipher_kdf_algorithm = PBKDF2_HMAC_SHA256;", nil, nil, nil)
+        do {
+            try SQLCipherSettings.apply(key: key, to: handle)
+            try SQLCipherSettings.verifyReadable(handle)
+        } catch {
+            sqlite3_close(handle)
+            throw error
+        }
+        self.db = handle
+        isKeyed = true
         _ = sqlite3_exec(handle, "PRAGMA foreign_keys = ON;", nil, nil, nil)
-    _ = sqlite3_exec(handle, "PRAGMA journal_mode=WAL;", nil, nil, nil)
+        _ = sqlite3_exec(handle, "PRAGMA journal_mode=WAL;", nil, nil, nil)
         _ = sqlite3_exec(handle, "PRAGMA synchronous=NORMAL;", nil, nil, nil)
         _ = sqlite3_exec(handle, "PRAGMA temp_store=MEMORY;", nil, nil, nil)
         _ = sqlite3_exec(handle, "PRAGMA cache_size=-\(Self.writerCacheSizeKiB);", nil, nil, nil)
-    // Immediately checkpoint and truncate WAL to avoid stale WAL pages causing HMAC issues
-    _ = sqlite3_exec(handle, "PRAGMA wal_checkpoint(TRUNCATE);", nil, nil, nil)
-        // Verify key by a simple query; if it fails, close and throw
-        var testStmt: OpaquePointer?
-        if sqlite3_prepare_v2(handle, "SELECT count(*) FROM sqlite_master;", -1, &testStmt, nil) != SQLITE_OK {
-            sqlite3_finalize(testStmt)
-            sqlite3_close(handle)
-            self.db = nil
-            throw NSError(domain: "TS.DB", code: -50, userInfo: [NSLocalizedDescriptionKey: "SQLCipher key verification failed"])
+        // Immediately checkpoint and truncate WAL to avoid stale WAL pages causing HMAC issues
+        _ = sqlite3_exec(handle, "PRAGMA wal_checkpoint(TRUNCATE);", nil, nil, nil)
+        do {
+            try createSchema()
+            try migrateIfNeeded()
+        } catch {
+            close()
+            throw error
         }
-        sqlite3_finalize(testStmt)
-        try createSchema()
-        try migrateIfNeeded()
         reader.configure(url: url, key: key)
         // After schema ensures at least one write, verify the on-disk header is no longer the plaintext SQLite magic.
         verifyEncryptedHeader()
@@ -198,8 +195,13 @@ final class DB {
         // A new connection can reuse the old handle's address; its string ids must not carry over.
         Self.timeWarpValueCache.removeAll()
         reader.close()
-        if let handle = db { sqlite3_close(handle) }
+        if let handle = db, sqlite3_close(handle) != SQLITE_OK {
+            // Unfinalized statements keep the file open; close as soon as they are released.
+            fputs("[DB] close deferred: \(String(cString: sqlite3_errmsg(handle)))\n", stderr)
+            sqlite3_close_v2(handle)
+        }
         db = nil
+        isKeyed = false
     }
 
     // Log SQLCipher version if available; useful to verify encryption at runtime

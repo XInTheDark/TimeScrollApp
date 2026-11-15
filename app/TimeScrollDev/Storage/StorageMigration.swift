@@ -22,6 +22,15 @@ final class StorageMigrationManager {
             return
         }
 
+        let d = UserDefaults.standard
+        let vaultOn = (d.object(forKey: "settings.vaultEnabled") != nil) ? d.bool(forKey: "settings.vaultEnabled") : false
+        // Moved rows must be rewritten through the encrypted database, which needs the key.
+        if moveExisting && vaultOn && !d.bool(forKey: "vault.isUnlocked") {
+            VaultManager.shared.lastError = "Unlock the vault before moving your data to a new storage folder."
+            onProgress?("Unlock the vault first")
+            return
+        }
+
         onProgress?("Preparing…")
         let wasCapturing = AppState.shared.isCapturing
         await AppState.shared.stopCaptureIfNeeded()
@@ -48,6 +57,8 @@ final class StorageMigrationManager {
         // Move/copy data
         var transferComplete = true
         if moveExisting {
+            // Recorded first, so rows are repointed even if this move is interrupted.
+            StorageRootRewrite.record(oldRoot: oldRoot.path, newRoot: newRoot.path)
             onProgress?("Moving data…")
             transferComplete = await withCheckedContinuation { (cont: CheckedContinuation<Bool, Never>) in
                 DispatchQueue.global(qos: .userInitiated).async {
@@ -66,20 +77,6 @@ final class StorageMigrationManager {
 
         // Persist new location bookmark + display path
         StoragePaths.setStorageFolder(newRoot)
-
-        // After moving files, ensure DB rows which contain absolute on-disk paths are updated
-        // to reflect the new root. This ensures older snapshots (whose path values were
-        // stored using the old root) continue to resolve after migration.
-        if moveExisting {
-            // Best-effort: open DB at new root and rewrite any path/thumb_path prefixes.
-            do {
-                try DB.shared.openIfNeeded()
-                DB.shared.updateSnapshotPathsAfterRootMove(oldRoot: oldRoot.path, newRoot: newRoot.path)
-            } catch {
-                // Non-fatal; log and continue — best-effort migration
-                fputs("[StorageMigration] warn: failed to update DB paths after move: \(error.localizedDescription)\n", stderr)
-            }
-        }
 
         // Optionally delete old location. Never delete data that failed to move, and in a
         // user-picked folder only remove TimeScroll's own entries, never the folder itself.
@@ -109,19 +106,36 @@ final class StorageMigrationManager {
         if newAccessStarted { newRoot.stopAccessingSecurityScopedResource() }
 
         // Reopen DB and restart services
-        let d = UserDefaults.standard
-        let vaultOn = (d.object(forKey: "settings.vaultEnabled") != nil) ? d.bool(forKey: "settings.vaultEnabled") : false
         let unlocked = d.bool(forKey: "vault.isUnlocked")
         // The vault manifest moved with the storage root; reload the cached public key from it.
         VaultKeys.shared.reloadPublicKey()
-        if vaultOn && unlocked {
-            SQLCipherBridge.shared.openForCurrentVaultState()
-            IngestQueue.shared.startIngestIfNeeded()
-        } else {
-            _ = try? DB.shared.openIfNeeded()
+        var reopened = true
+        if vaultOn && unlocked, let key = VaultKeys.shared.databaseKey {
+            do { try SQLCipherBridge.shared.openWithKey(key) } catch {
+                reopened = false
+                fputs("[StorageMigration] encrypted reopen failed: \(error.localizedDescription)\n", stderr)
+            }
+        } else if !vaultOn {
+            reopened = (try? DB.shared.openIfNeeded()) != nil
         }
+        // Repoint stored paths at the new root before anything reads or ingests them.
+        let rewritten = reopened && StorageRootRewrite.applyPending()
+        if vaultOn && unlocked { IngestQueue.shared.startIngestIfNeeded() }
         if wasCapturing { await AppState.shared.startCaptureIfNeeded() }
+        if moveExisting && (!rewritten || !Self.recentMediaResolves()) {
+            VaultManager.shared.lastError = "Your data was moved, but some recordings could not be found at the new location yet. TimeScroll will retry the next time the vault is unlocked."
+        }
         onProgress?(transferComplete ? "Done" : "Done. Some data could not be moved and was left in the previous folder.")
+    }
+
+    /// Spot-checks the newest stored media paths after a move. A few may legitimately be
+    /// missing (a capture lost to a crash), so most, not all, must exist.
+    private static func recentMediaResolves() -> Bool {
+        guard let paths = try? DB.shared.recentMediaPaths(limit: 20) else { return false }
+        let existing = StoragePaths.withSecurityScope {
+            paths.filter { FileManager.default.fileExists(atPath: $0) }.count
+        }
+        return paths.isEmpty || existing * 2 >= paths.count
     }
 
     // MARK: - Private helpers

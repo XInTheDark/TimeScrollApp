@@ -1296,6 +1296,12 @@ final class TimelineBarNSView: NSView {
         dismissHoverPopover()
     }
 
+    override func viewWillMove(toWindow newWindow: NSWindow?) {
+        // Leaving the window (e.g. hidden on vault lock) must not leave a preview open.
+        if newWindow == nil { dismissHoverPopover() }
+        super.viewWillMove(toWindow: newWindow)
+    }
+
     func dismissHoverPopover() {
         // Called for every scroll tick; do nothing unless a preview is open or pending.
         guard popover.isShown || lastPreviewIndex != nil || pendingPreviewIndex != nil else { return }

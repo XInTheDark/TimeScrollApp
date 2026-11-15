@@ -11,11 +11,34 @@ import CoreGraphics
 final class HEVCVideoStore {
     static let shared = HEVCVideoStore(namespace: "default")
 
-    private let namespace: String
+    /// Encrypts a finished segment's video into a TSE envelope.
+    typealias Sealer = (_ video: Data, _ startMs: Int64, _ width: Int, _ height: Int) throws -> Data
 
-    init(namespace: String) {
+    private let namespace: String
+    private let videosDir: () -> URL
+    private let seal: Sealer
+    private let onSegmentClosed: (_ startMs: Int64, _ endMs: Int64) -> Void
+
+    init(namespace: String,
+         videosDir: @escaping () -> URL = StoragePaths.videosDir,
+         seal: @escaping Sealer = HEVCVideoStore.sealWithVaultKey,
+         onSegmentClosed: @escaping (_ startMs: Int64, _ endMs: Int64) -> Void = PosterManager.cleanupSegment) {
         self.namespace = namespace
+        self.videosDir = videosDir
+        self.seal = seal
+        self.onSegmentClosed = onSegmentClosed
     }
+
+    static func sealWithVaultKey(video: Data, startMs: Int64, width: Int, height: Int) throws -> Data {
+        try FileCrypter.shared.makeTSEBlob(data: video, timestampMs: startMs, width: width, height: height,
+                                           mime: encryptedSegmentMime)
+    }
+
+    /// Encrypted segments hold fragmented MP4 encoded in memory.
+    static let encryptedSegmentMime = "video/mp4"
+    /// Encrypted segments that could not be written yet (sealing or disk failure). Retried on the
+    /// next close; bounded so a persistent failure cannot grow memory without limit.
+    private static let maxUnsavedSegments = 4
 
     // Config
     private let segmentMs: Int64 = 60_000
@@ -39,6 +62,14 @@ final class HEVCVideoStore {
     #endif
     private var draining: Bool = false
     private var awaitingCallback: Bool = false
+    private var unsavedSegments: [UnsavedSegment] = []
+
+    private struct UnsavedSegment {
+        let startMs: Int64
+        let width: Int
+        let height: Int
+        let video: Data
+    }
 
     private struct Active {
         let startMs: Int64
@@ -49,7 +80,13 @@ final class HEVCVideoStore {
         let input: AVAssetWriterInput
         let adaptor: AVAssetWriterInputPixelBufferAdaptor
         var started: Bool
-        let outURL: URL // .mov
+        /// The live .mov when the vault is off; nil when the segment is encoded in memory.
+        let outURL: URL?
+        let memory: HEVCSegmentMemoryOutput?
+        /// In-memory (fragmented MP4) output starts its timeline at the first frame, unlike a
+        /// .mov's edit list. Repeating the first frame at time zero keeps offsets from the
+        /// segment start exact for readers.
+        var needsZeroAnchor: Bool
     }
 
     private struct QueuedFrame { let pb: CVPixelBuffer; let pts: CMTime }
@@ -98,7 +135,7 @@ final class HEVCVideoStore {
 
     func shutdown(timeout: TimeInterval = 2.0) {
         let sema = DispatchSemaphore(value: 0)
-        queue.async { try? self.closeCurrent(); sema.signal() }
+        queue.async { try? self.closeCurrent(); self.saveUnsavedSegments(); sema.signal() }
         _ = sema.wait(timeout: .now() + timeout)
     }
 
@@ -116,6 +153,7 @@ final class HEVCVideoStore {
         let fmt = CVPixelBufferGetPixelFormatType(pixelBuffer)
         let pts = CMTime(value: CMTimeValue(max(0, ts - c.startMs)), timescale: 1000)
         if fmt == want {
+            anchorAtZeroIfNeeded(&c, frame: pixelBuffer, pts: pts)
             enqueueFrame(pixelBuffer, pts: pts)
         } else {
             var out: CVPixelBuffer?
@@ -137,9 +175,17 @@ final class HEVCVideoStore {
                 }
             }
             CVPixelBufferUnlockBaseAddress(pb, [])
+            anchorAtZeroIfNeeded(&c, frame: pb, pts: pts)
             enqueueFrame(pb, pts: pts)
         }
         if ts >= c.startMs + segmentMs - 1 { try closeCurrent() } else { current = c }
+    }
+
+    private func anchorAtZeroIfNeeded(_ c: inout Active, frame: CVPixelBuffer, pts: CMTime) {
+        guard c.needsZeroAnchor else { return }
+        c.needsZeroAnchor = false
+        current = c
+        if pts > .zero { enqueueFrame(frame, pts: .zero) }
     }
 
     private func needsRollover(start: Int64, encrypt: Bool, width: Int, height: Int) -> Bool {
@@ -149,18 +195,28 @@ final class HEVCVideoStore {
 
     private func open(startMs: Int64, width: Int, height: Int, encrypt: Bool) throws -> Active {
         let fm = FileManager.default
-        let outURL: URL
-        let videos = StoragePaths.videosDir()
+        let videos = videosDir()
         if !fm.fileExists(atPath: videos.path) { try? fm.createDirectory(at: videos, withIntermediateDirectories: true) }
-        // Always write the live, open segment with this store's namespace.
-        // When encryption is enabled, we will encrypt-and-replace on close().
-        outURL = plainURL(forStart: startMs)
-        let writer = try AVAssetWriter(outputURL: outURL, fileType: .mov)
-        // Leave network optimization off: it holds the movie header until finishWriting,
-        // which keeps the live segment at 0 bytes and unreadable while recording.
-        writer.shouldOptimizeForNetworkUse = false
-        // Short fragment interval improves live readability at the cost of a few more moofs
-        writer.movieFragmentInterval = CMTime(seconds: 1, preferredTimescale: 600)
+        let outURL: URL?
+        let memory: HEVCSegmentMemoryOutput?
+        let writer: AVAssetWriter
+        if encrypt {
+            // Encode in memory: only the sealed envelope reaches disk (see closeCurrent).
+            let output = HEVCSegmentMemoryOutput()
+            writer = HEVCSegmentMemoryOutput.makeWriter(delivering: output)
+            memory = output
+            outURL = nil
+        } else {
+            let url = plainURL(forStart: startMs)
+            writer = try AVAssetWriter(outputURL: url, fileType: .mov)
+            // Leave network optimization off: it holds the movie header until finishWriting,
+            // which keeps the live segment at 0 bytes and unreadable while recording.
+            writer.shouldOptimizeForNetworkUse = false
+            // Short fragment interval improves live readability at the cost of a few more moofs
+            writer.movieFragmentInterval = CMTime(seconds: 1, preferredTimescale: 600)
+            memory = nil
+            outURL = url
+        }
         let settings = Self.outputSettings(width: width, height: height)
         let input = AVAssetWriterInput(mediaType: .video, outputSettings: settings)
         input.expectsMediaDataInRealTime = true
@@ -181,7 +237,7 @@ final class HEVCVideoStore {
         writer.startSession(atSourceTime: .zero)
         // Do not register a perpetual readiness callback here; we'll request callbacks
         // only when frames are pending and the input is back-pressured.
-        return Active(startMs: startMs, encrypt: encrypt, width: width, height: height, writer: writer, input: input, adaptor: adaptor, started: true, outURL: outURL)
+        return Active(startMs: startMs, encrypt: encrypt, width: width, height: height, writer: writer, input: input, adaptor: adaptor, started: true, outURL: outURL, memory: memory, needsZeroAnchor: memory != nil)
     }
 
     private static func outputSettings(width: Int, height: Int) -> [String: Any] {
@@ -227,21 +283,59 @@ final class HEVCVideoStore {
         guard c.writer.status == .completed else {
             throw c.writer.error ?? NSError(domain: "TimeScroll.HEVC", code: 1, userInfo: [NSLocalizedDescriptionKey: "Video writer did not finish; live file retained."])
         }
-        if c.encrypt {
-            let data = try Data(contentsOf: c.outURL, options: [.mappedIfSafe])
-            let blob = try FileCrypter.shared.makeTSEBlob(data: data, timestampMs: c.startMs, width: c.width, height: c.height, mime: "video/quicktime")
-            let dest = finalEncURL(forStart: c.startMs)
-            try blob.write(to: dest, options: .atomic)
-            guard try Data(contentsOf: dest) == blob else {
-                throw NSError(domain: "TimeScroll.HEVC", code: 2, userInfo: [NSLocalizedDescriptionKey: "Encrypted segment verification failed; live file retained."])
+        if let memory = c.memory {
+            saveUnsavedSegments()
+            let video = memory.takeData()
+            guard !video.isEmpty else { return }
+            let segment = UnsavedSegment(startMs: c.startMs, width: c.width, height: c.height, video: video)
+            do {
+                try save(segment)
+            } catch {
+                // Keep the segment in memory and retry; its encrypted posters stay as the fallback.
+                retainUnsaved(segment)
+                throw error
             }
-            try FileManager.default.removeItem(at: c.outURL)
-        }
-        else {
         }
         // After a segment is sealed/closed, remove posters for rows in this segment window.
-        PosterManager.cleanupSegment(startMs: c.startMs, endMs: c.startMs + segmentMs - 1)
+        onSegmentClosed(c.startMs, c.startMs + segmentMs - 1)
     }
+
+    /// Seals and writes one in-memory segment, then reads it back to confirm what is on disk.
+    private func save(_ segment: UnsavedSegment) throws {
+        let blob = try seal(segment.video, segment.startMs, segment.width, segment.height)
+        let dest = finalEncURL(forStart: segment.startMs)
+        try StoragePaths.withSecurityScope {
+            try blob.write(to: dest, options: .atomic)
+            guard try Data(contentsOf: dest) == blob else {
+                throw NSError(domain: "TimeScroll.HEVC", code: 2, userInfo: [NSLocalizedDescriptionKey: "Encrypted segment verification failed."])
+            }
+        }
+    }
+
+    private func retainUnsaved(_ segment: UnsavedSegment) {
+        unsavedSegments.append(segment)
+        if unsavedSegments.count > Self.maxUnsavedSegments {
+            let dropped = unsavedSegments.removeFirst()
+            fputs("[HEVC] dropped unsaved encrypted segment \(dropped.startMs) after repeated failures\n", stderr)
+        }
+    }
+
+    private func saveUnsavedSegments() {
+        guard !unsavedSegments.isEmpty else { return }
+        let pending = unsavedSegments
+        unsavedSegments = []
+        for segment in pending {
+            do {
+                try save(segment)
+                onSegmentClosed(segment.startMs, segment.startMs + segmentMs - 1)
+            } catch {
+                retainUnsaved(segment)
+            }
+        }
+    }
+
+    /// Test hook: segments waiting for a successful write.
+    var unsavedSegmentCount: Int { queue.sync { unsavedSegments.count } }
 
     // MARK: - Queue/Drain
     private func enqueueFrame(_ pb: CVPixelBuffer, pts: CMTime) {
@@ -283,8 +377,8 @@ final class HEVCVideoStore {
     // Paths
     private func alignedStart(_ t: Int64) -> Int64 { (t / segmentMs) * segmentMs }
     private func segmentName(_ ms: Int64) -> String { HEVCVideoStore.segmentName(ms) }
-    private func plainURL(forStart s: Int64) -> URL { StoragePaths.videosDir().appendingPathComponent("\(segmentStem(s)).mov") }
-    private func finalEncURL(forStart s: Int64) -> URL { StoragePaths.videosDir().appendingPathComponent("\(segmentStem(s)).tse") }
+    private func plainURL(forStart s: Int64) -> URL { videosDir().appendingPathComponent("\(segmentStem(s)).mov") }
+    private func finalEncURL(forStart s: Int64) -> URL { videosDir().appendingPathComponent("\(segmentStem(s)).tse") }
 
     private func segmentStem(_ ms: Int64) -> String {
         let base = "seg-\(segmentName(ms))"

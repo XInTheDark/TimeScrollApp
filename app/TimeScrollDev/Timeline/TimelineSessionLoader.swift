@@ -23,6 +23,12 @@ final class TimelineSessionLoader: ObservableObject {
     }
   }
 
+  /// Drops loaded data and any in-flight load (vault lock).
+  func clear() {
+    token &+= 1
+    publish([])
+  }
+
   private func publish(_ new: [ActivitySession]) {
     guard new != sessions else { return }
     sessions = new

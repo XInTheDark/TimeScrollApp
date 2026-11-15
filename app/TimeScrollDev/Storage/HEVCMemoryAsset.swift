@@ -6,14 +6,23 @@ final class HEVCMemoryAsset: NSObject, AVAssetResourceLoaderDelegate {
   private var data: Data?
   private let source: URL
   private let access: VaultMediaAccess.Token
+  private let contentType: AVFileType
   private let lock = NSLock()
   private static let queue = DispatchQueue(label: "TimeScroll.HEVC.MemoryReader", qos: .userInitiated)
 
-  init(data: Data, source: URL, access: VaultMediaAccess.Token) {
+  init(data: Data, source: URL, access: VaultMediaAccess.Token, mime: String = "video/quicktime") {
     self.data = data
     self.source = source
     self.access = access
-    asset = AVURLAsset(url: URL(string: "timescroll-memory://\(UUID().uuidString)/segment.mov")!)
+    contentType = Self.fileType(forMime: mime)
+    let ext: String
+    switch contentType {
+    case .mp4: ext = "mp4"
+    case .m4a: ext = "m4a"
+    case .caf: ext = "caf"
+    default: ext = "mov"
+    }
+    asset = AVURLAsset(url: URL(string: "timescroll-memory://\(UUID().uuidString)/media.\(ext)")!)
     super.init()
     asset.resourceLoader.setDelegate(self, queue: Self.queue)
   }
@@ -33,7 +42,7 @@ final class HEVCMemoryAsset: NSObject, AVAssetResourceLoaderDelegate {
       return true
     }
     if let info = request.contentInformationRequest {
-      info.contentType = AVFileType.mov.rawValue
+      info.contentType = contentType.rawValue
       info.contentLength = Int64(data.count)
       info.isByteRangeAccessSupported = true
     }
@@ -49,5 +58,15 @@ final class HEVCMemoryAsset: NSObject, AVAssetResourceLoaderDelegate {
     }
     request.finishLoading()
     return true
+  }
+
+  /// Container type for a decrypted TSE payload's mime.
+  static func fileType(forMime mime: String) -> AVFileType {
+    switch mime.lowercased() {
+    case "video/mp4": return .mp4
+    case "audio/mp4", "audio/m4a", "audio/x-m4a": return .m4a
+    case "audio/x-caf": return .caf
+    default: return .mov
+    }
   }
 }

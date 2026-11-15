@@ -85,7 +85,7 @@ enum HEVCFrameExtractor {
         return nil
     }
 
-    private static func startFromSegmentURL(_ url: URL) -> Int64? {
+    static func startFromSegmentURL(_ url: URL) -> Int64? {
         let name = url.deletingPathExtension().lastPathComponent
         guard name.hasPrefix("seg-") else { return nil }
         let raw = String(name.dropFirst(4))

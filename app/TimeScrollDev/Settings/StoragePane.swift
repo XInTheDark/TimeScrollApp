@@ -202,6 +202,7 @@ struct StoragePane: View {
             }
         }
         .formStyle(.grouped)
+        .vaultErrorAlert()
         .sheet(isPresented: $showChangeSheet) {
             StorageLocationChangeSheet(
                 folder: pendingFolder,

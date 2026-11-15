@@ -23,7 +23,7 @@ final class VaultKeys {
         secret = nil
     }
 
-    /// Re-reads the public key on next use (the storage folder, and its manifest, moved).
+    /// Re-reads (and re-checks) the public key on next use (the storage folder, and its manifest, moved).
     func reloadPublicKey() {
         lock.lock(); defer { lock.unlock() }
         publicKey = secret?.mediaPrivateKey.publicKey
@@ -37,12 +37,21 @@ final class VaultKeys {
     func mediaPublicKey() throws -> Curve25519.KeyAgreement.PublicKey {
         lock.lock(); defer { lock.unlock() }
         if let publicKey { return publicKey }
-        guard let manifest = VaultManifest.load() else {
-            throw NSError(domain: "TS.Vault", code: 30, userInfo: [NSLocalizedDescriptionKey: "The vault is not set up."])
-        }
-        let key = try Curve25519.KeyAgreement.PublicKey(rawRepresentation: manifest.mediaPublicKey)
+        let raw = try VaultRecipientCheck.recipient(trusted: try Self.trustedPublicKey(),
+                                                    manifestKey: VaultManifest.load()?.mediaPublicKey)
+        let key = try Curve25519.KeyAgreement.PublicKey(rawRepresentation: raw)
         publicKey = key
         return key
+    }
+
+    /// The keychain-pinned public key. Vaults from before pinning derive it once from the
+    /// keychain secret, which is equally outside the storage folder, and pin it.
+    private static func trustedPublicKey() throws -> Data? {
+        if let pinned = try VaultPublicKeyPin.load() { return pinned }
+        guard let secret = try VaultKeychainStore.load() else { return nil }
+        let raw = secret.mediaPrivateKey.publicKey.rawRepresentation
+        do { try VaultPublicKeyPin.save(raw) } catch { fputs("[Vault] could not pin public key: \(error.localizedDescription)\n", stderr) }
+        return raw
     }
 
     func mediaPrivateKey() throws -> Curve25519.KeyAgreement.PrivateKey {

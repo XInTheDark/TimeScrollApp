@@ -94,6 +94,22 @@ final class TimelineModel: ObservableObject {
         }
     }
 
+    /// Forgets all loaded history when the vault locks, so nothing loaded earlier can still be
+    /// drawn, hovered or selected. In-flight loads are dropped; unlocking calls `load()`.
+    func clearForVaultLock() {
+        requestToken &+= 1
+        isLoadingOlder = false
+        activeQuery = nil
+        isAnchoredWindow = false
+        hasMoreOlder = false
+        metas = []
+        segments = []
+        selectedIndex = -1
+        hoverTimeMs = nil
+        playbackTimeMs = nil
+        isLoading = false
+    }
+
     func refreshSegments() {
         // Build locally and publish once; appending to the @Published array would notify
         // observers for every segment.

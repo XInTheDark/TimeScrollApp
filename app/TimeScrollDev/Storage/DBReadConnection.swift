@@ -73,14 +73,12 @@ final class DBReadConnection {
                 throw NSError(domain: "TS.DB", code: 701, userInfo: [NSLocalizedDescriptionKey: "Read connection open failed"])
             }
             if let key {
-                // Must match the writer's SQLCipher settings (see DB.openWithSqlcipher).
-                let hex = key.map { String(format: "%02x", $0) }.joined()
-                _ = sqlite3_exec(candidate, "PRAGMA key = \"x'\(hex)'\";", nil, nil, nil)
-                _ = sqlite3_exec(candidate, "PRAGMA cipher_compatibility = 4;", nil, nil, nil)
-                _ = sqlite3_exec(candidate, "PRAGMA kdf_iter = 256000;", nil, nil, nil)
-                _ = sqlite3_exec(candidate, "PRAGMA cipher_page_size = 4096;", nil, nil, nil)
-                _ = sqlite3_exec(candidate, "PRAGMA cipher_hmac_algorithm = HMAC_SHA256;", nil, nil, nil)
-                _ = sqlite3_exec(candidate, "PRAGMA cipher_kdf_algorithm = PBKDF2_HMAC_SHA256;", nil, nil, nil)
+                do {
+                    try SQLCipherSettings.apply(key: key, to: candidate)
+                } catch {
+                    sqlite3_close(candidate)
+                    throw error
+                }
             }
             _ = sqlite3_exec(candidate, "PRAGMA query_only = 1;", nil, nil, nil)
             _ = sqlite3_exec(candidate, "PRAGMA temp_store = MEMORY;", nil, nil, nil)

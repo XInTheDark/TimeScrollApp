@@ -75,7 +75,8 @@ enum AudioStore {
         let urls = (try? FileManager.default.contentsOfDirectory(at: directory,
                                                                  includingPropertiesForKeys: nil,
                                                                  options: [.skipsHiddenFiles])) ?? []
-        for url in urls where url.lastPathComponent.hasPrefix(transcriptionTempPrefix) {
+        let prefixes = [transcriptionTempPrefix, AudioWaveformOverviewCache.legacyTempPrefix]
+        for url in urls where prefixes.contains(where: url.lastPathComponent.hasPrefix) {
             try? FileManager.default.removeItem(at: url)
         }
     }

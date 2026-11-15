@@ -20,11 +20,17 @@ enum VaultFileMigration {
       } catch {
         fputs("[VaultMigration] \(error.localizedDescription)\n", stderr)
       }
+      // Plaintext segment files older versions left behind are encrypted or removed too.
+      VaultSegmentRemnantSweep.run()
     }
   }
 
+  static func journalDirectory() -> URL {
+    StoragePaths.vaultDir().appendingPathComponent("FileMigrations", isDirectory: true)
+  }
+
   private static func run() throws {
-    let directory = StoragePaths.vaultDir().appendingPathComponent("FileMigrations", isDirectory: true)
+    let directory = journalDirectory()
     try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
     var pendingSources = Set<URL>()
     for journal in try FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil) where journal.pathExtension == "json" {

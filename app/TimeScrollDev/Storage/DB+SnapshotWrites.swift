@@ -116,41 +116,6 @@ extension DB {
         }
     }
 
-    /// Update all snapshot path/thumb_path values that live under `oldRoot` to point to `newRoot`.
-    /// This is used after transferring files to a different storage root so DB rows continue
-    /// to reference the actual on-disk locations.
-    func updateSnapshotPathsAfterRootMove(oldRoot: String, newRoot: String) {
-        _ = try? onQueueSync {
-            try openIfNeeded()
-            guard let db = db else { return }
-
-            // Normalize roots to exact prefixes so REPLACE works correctly
-            let oldPrefix = oldRoot.hasSuffix("/") ? oldRoot : (oldRoot + "/")
-            let newPrefix = newRoot.hasSuffix("/") ? newRoot : (newRoot + "/")
-
-            // Update path and thumb_path using a helper to avoid duplication
-            let changed1 = Self.replacePrefixInColumn(db: db, column: "path", oldPrefix: oldPrefix, newPrefix: newPrefix)
-            _ = Self.replacePrefixInColumn(db: db, column: "thumb_path", oldPrefix: oldPrefix, newPrefix: newPrefix)
-            fputs("[DB] updateSnapshotPathsAfterRootMove changed path/thumb entries: \(changed1)\n", stderr)
-        }
-    }
-
-    /// Helper: swap `oldPrefix` for `newPrefix` in a column wherever the value starts with it.
-    /// Compares the leading characters exactly: `LIKE` would treat `%`/`_` in folder names as
-    /// wildcards (and is case-insensitive), and `REPLACE` would also rewrite later occurrences.
-    /// Returns number of rows changed by the UPDATE.
-    private static func replacePrefixInColumn(db: OpaquePointer, column: String, oldPrefix: String, newPrefix: String) -> Int {
-        var stmt: OpaquePointer?
-        defer { sqlite3_finalize(stmt) }
-        let sql = "UPDATE ts_snapshot SET \(column) = ?2 || substr(\(column), length(?1) + 1) WHERE substr(\(column), 1, length(?1)) = ?1;"
-        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return 0 }
-        sqlite3_bind_text(stmt, 1, oldPrefix, -1, SQLITE_TRANSIENT)
-        sqlite3_bind_text(stmt, 2, newPrefix, -1, SQLITE_TRANSIENT)
-        _ = sqlite3_step(stmt)
-        sqlite3_reset(stmt)
-        return Int(sqlite3_changes(db))
-    }
-
     /// Scan all snapshots and rewrite any `path`/`thumb_path` entries that are not
     /// under the current `StoragePaths.snapshotsDir()` root to use the current root.
     /// Returns the number of rows updated (path + thumb updates counted separately).

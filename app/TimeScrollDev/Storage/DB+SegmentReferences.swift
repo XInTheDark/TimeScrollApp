@@ -33,4 +33,28 @@ extension DB {
             return stems
         }
     }
+
+    /// Every snapshot path ending in `.ext`. Throws when the database cannot be read.
+    func referencedSnapshotPaths(withExtension ext: String) throws -> Set<String> {
+        try onQueueSync {
+            try openIfNeeded()
+            guard let db = db else { throw NSError(domain: "TS.DB", code: 90, userInfo: [NSLocalizedDescriptionKey: "Database not open"]) }
+            var stmt: OpaquePointer?
+            defer { sqlite3_finalize(stmt) }
+            guard sqlite3_prepare_v2(db, "SELECT DISTINCT path FROM ts_snapshot WHERE path LIKE ?1;", -1, &stmt, nil) == SQLITE_OK else {
+                throw NSError(domain: "TS.DB", code: 91, userInfo: [NSLocalizedDescriptionKey: String(cString: sqlite3_errmsg(db))])
+            }
+            sqlite3_bind_text(stmt, 1, "%." + ext, -1, SQLITE_TRANSIENT)
+            var paths = Set<String>()
+            var rc = sqlite3_step(stmt)
+            while rc == SQLITE_ROW {
+                if let c = sqlite3_column_text(stmt, 0) { paths.insert(String(cString: c)) }
+                rc = sqlite3_step(stmt)
+            }
+            guard rc == SQLITE_DONE else {
+                throw NSError(domain: "TS.DB", code: 92, userInfo: [NSLocalizedDescriptionKey: String(cString: sqlite3_errmsg(db))])
+            }
+            return paths
+        }
+    }
 }

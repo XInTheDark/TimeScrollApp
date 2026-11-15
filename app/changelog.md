@@ -1,3 +1,19 @@
+# 2.4.1 - 2026-11-15
+
+## Fixes for Encrypted Vault
+
+- Fix: With the vault on, screen recordings are now encrypted before they are saved. Previously the current minute of video was briefly stored unencrypted on disk.
+- Fix: If turning encryption on fails (for example, when the disk is full), the vault now shows it clearly.
+- Fix: Turning encryption off
+- Fix: Turning encryption back on in a folder that already has a vault now asks for that vault's recovery passphrase, to preserve the earlier encrypted recordings.
+- Fix: Moving your data to a new storage folder
+- Fix: Recordings captured while the vault was locked are no longer lost when you turn encryption off.
+- Other correctness fixes.
+
+- Improvement: Reduce disk writes by ~half when recording in encrypted mode.
+
+---
+
 # 2.4.0 - 2026-11-14
 
 This update adds **Time Warp**: travel back in time! TimeScroll can now restore the open files, pages and apps at any point in your timeline. If you're coming back to your work from a week ago, you won't have to manually look for your files anymore.

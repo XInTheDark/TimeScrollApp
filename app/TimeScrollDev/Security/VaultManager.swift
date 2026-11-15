@@ -53,9 +53,20 @@ final class VaultManager: ObservableObject {
         queuedCount = d.integer(forKey: "vault.queuedCount")
     }
 
-    /// Creates (or re-seals) the vault key, encrypts the database and leaves the vault unlocked.
+    /// True when this storage folder holds a vault whose key is not in this Mac's keychain, so
+    /// turning encryption on needs that vault's recovery passphrase (or a new vault).
+    func enableNeedsExistingPassphrase() -> Bool {
+        VaultEnablePlan.needsExistingPassphrase(existing: VaultManifest.load(),
+                                                manifestFilePresent: VaultManifest.fileExists(),
+                                                stored: try? VaultKeychainStore.load())
+    }
+
+    /// Turns the vault on: chooses the key (reusing or recovering an existing vault's), encrypts
+    /// the database and verifies it, and only then marks the vault enabled and unlocked. On any
+    /// failure the vault stays off and the plaintext database stays in use.
+    /// `startNewVault` replaces an existing vault after the user confirmed it; its recovery file is archived.
     @discardableResult
-    func enableVault(recoveryPassphrase: String) async -> Bool {
+    func enableVault(recoveryPassphrase: String, startNewVault: Bool = false) async -> Bool {
         guard recoveryPassphrase.count >= Self.minimumPassphraseLength else {
             lastError = "The recovery passphrase must be at least \(Self.minimumPassphraseLength) characters."
             return false
@@ -64,36 +75,52 @@ final class VaultManager: ObservableObject {
         if resumeCapture { await AppState.shared.stopCaptureIfNeeded() }
         defer { if resumeCapture { Task { await AppState.shared.startCaptureIfNeeded() } } }
 
+        let secret: VaultSecret
         do {
-            // Re-enabling keeps an existing secret so media encrypted earlier stays readable.
             let existing = VaultManifest.load()
-            let secret: VaultSecret
-            if let existing, let stored = try VaultKeychainStore.load(), existing.matches(stored) {
-                secret = stored
-            } else {
-                secret = VaultSecret.generate()
-            }
-            let manifest = try await Task.detached(priority: .userInitiated) {
-                try VaultManifest.make(secret: secret, recoveryPassphrase: recoveryPassphrase)
+            let filePresent = VaultManifest.fileExists()
+            let stored = try VaultKeychainStore.load()
+            let (plan, manifest) = try await Task.detached(priority: .userInitiated) {
+                let plan = try VaultEnablePlan.resolve(existing: existing, manifestFilePresent: filePresent, stored: stored,
+                                                       passphrase: recoveryPassphrase, startNewVault: startNewVault)
+                return (plan, try VaultManifest.make(secret: plan.secret, recoveryPassphrase: recoveryPassphrase))
             }.value
+            if plan.replacesExistingVault { try VaultManifest.archiveExisting() }
             try manifest.save()
-            try VaultKeychainStore.save(secret)
-
-            await AppState.shared.pauseAudioForVaultLock()
-            persistVaultEnabled(true)
-            // Close the plaintext connection so the file can be migrated to SQLCipher.
-            DB.shared.close()
-            await finishUnlock(with: secret)
-            return true
+            try VaultKeychainStore.save(plan.secret)
+            secret = plan.secret
         } catch {
             fputs("[VaultManager] enable failed: \(error.localizedDescription)\n", stderr)
-            lastError = "The encrypted vault could not be enabled. \(error.localizedDescription)"
+            lastError = (error as? VaultEnablePlan.Failure)?.errorDescription
+                ?? "The encrypted vault could not be enabled. \(error.localizedDescription)"
             return false
         }
+
+        await AppState.shared.pauseAudioForVaultLock()
+        // Close the plaintext connection so the file can be migrated to SQLCipher, and keep
+        // other code from reopening it in plaintext until the vault state is committed.
+        DB.shared.plaintextOpenBlocked = true
+        DB.shared.close()
+        do {
+            try await openEncryptedDatabase(with: secret)
+        } catch {
+            fputs("[VaultManager] database encryption failed: \(error.localizedDescription)\n", stderr)
+            DB.shared.close()
+            DB.shared.plaintextOpenBlocked = false
+            _ = try? DB.shared.openIfNeeded()
+            await AppState.shared.resumeAudioAfterVaultUnlockIfNeeded()
+            lastError = "The database could not be encrypted, so encryption was not turned on. Your data is unchanged. \(error.localizedDescription)"
+            return false
+        }
+        persistVaultEnabled(true)
+        DB.shared.plaintextOpenBlocked = false
+        await completeUnlock(with: secret)
+        return true
     }
 
     /// Decrypts the database back to plaintext and turns the vault off. The key stays in the
-    /// keychain so re-enabling can still read media encrypted earlier.
+    /// keychain so re-enabling can still read media encrypted earlier. If decryption fails the
+    /// vault stays on and unlocked.
     func disableVault() async {
         guard isVaultEnabled else { return }
         if !isUnlocked { await unlock() }
@@ -103,12 +130,29 @@ final class VaultManager: ObservableObject {
         }
         let resumeCapture = AppState.shared.isCapturing
         if resumeCapture { await AppState.shared.stopCaptureIfNeeded() }
+        defer { if resumeCapture { Task { await AppState.shared.startCaptureIfNeeded() } } }
+        // The vault still reads as unlocked during the conversion; an ingest tick then would
+        // find the database closed and move valid queued captures to failed/.
+        IngestQueue.shared.stop()
         SQLCipherBridge.shared.close()
-        SQLCipherBridge.shared.migrateEncryptedToPlaintextIfNeeded(withKey: key)
+        do {
+            try await Task.detached(priority: .userInitiated) {
+                try SQLCipherBridge.shared.migrateEncryptedToPlaintextIfNeeded(withKey: key)
+            }.value
+        } catch {
+            fputs("[VaultManager] disable failed: \(error.localizedDescription)\n", stderr)
+            do {
+                try SQLCipherBridge.shared.openWithKey(key)
+                IngestQueue.shared.startIngestIfNeeded()
+            } catch {
+                fputs("[VaultManager] reopen after failed disable: \(error.localizedDescription)\n", stderr)
+            }
+            lastError = "Encryption could not be turned off, so the vault is still on. \(error.localizedDescription)"
+            return
+        }
         performLock()
         persistVaultEnabled(false)
         await AppState.shared.resumeAudioAfterVaultUnlockIfNeeded()
-        if resumeCapture { await AppState.shared.startCaptureIfNeeded() }
     }
 
     /// Unlocks with Touch ID / the login password and the key stored in the keychain.
@@ -126,7 +170,7 @@ final class VaultManager: ObservableObject {
                 needsRecoveryPassphrase = true
                 return
             }
-            await finishUnlock(with: secret)
+            try await finishUnlock(with: secret)
         } catch {
             fputs("[VaultManager] unlock failed: \(error.localizedDescription)\n", stderr)
             if !Self.isUserCancellation(error) {
@@ -143,8 +187,10 @@ final class VaultManager: ObservableObject {
             let secret = try await Task.detached(priority: .userInitiated) {
                 try manifest.openRecovery(passphrase: recoveryPassphrase)
             }.value
-            try VaultKeychainStore.save(secret)
-            await finishUnlock(with: secret)
+            try await finishUnlock(with: secret)
+            do { try VaultKeychainStore.save(secret) } catch {
+                lastError = "The vault is unlocked, but its key could not be saved to the keychain, so the next unlock will ask for the recovery passphrase again. \(error.localizedDescription)"
+            }
             return true
         } catch {
             lastError = error.localizedDescription
@@ -152,16 +198,32 @@ final class VaultManager: ObservableObject {
         }
     }
 
-    private func finishUnlock(with secret: VaultSecret) async {
+    /// Opens the encrypted database, then marks the vault unlocked. Throws, leaving the vault
+    /// locked, when the database cannot be opened with this key.
+    private func finishUnlock(with secret: VaultSecret) async throws {
+        try await openEncryptedDatabase(with: secret)
+        await completeUnlock(with: secret)
+    }
+
+    /// Encrypts a remaining plaintext database (no-op once encrypted) and opens it with the key.
+    private func openEncryptedDatabase(with secret: VaultSecret) async throws {
+        let key = secret.databaseKey
+        try await Task.detached(priority: .userInitiated) {
+            try SQLCipherBridge.shared.migratePlaintextIfNeeded(withKey: key)
+        }.value
+        try SQLCipherBridge.shared.openWithKey(key)
+    }
+
+    private func completeUnlock(with secret: VaultSecret) async {
         VaultKeys.shared.install(secret)
+        do { try VaultPublicKeyPin.save(secret.mediaPrivateKey.publicKey.rawRepresentation) } catch {
+            fputs("[VaultManager] could not pin public key: \(error.localizedDescription)\n", stderr)
+        }
         needsRecoveryPassphrase = false
         isUnlocked = true
         persistUnlocked(true)
-
-        let key = secret.databaseKey
-        // Migrate an existing plaintext DB (no-op if already encrypted).
-        SQLCipherBridge.shared.migratePlaintextIfNeeded(withKey: key)
-        SQLCipherBridge.shared.openWithKey(key)
+        // Finish a storage move whose path rewrite needed the vault key.
+        StorageRootRewrite.applyPending()
         VaultFileMigration.schedule()
 
         // Notify usage tracker so it can retroactively create a pending session

@@ -93,6 +93,7 @@ CPU, power, memory and disk I/O must never regress. This app is always on.
 ## Commits and PRs
 - One concern per PR. Explain what changed and why, and call out any changed default, removed interaction or performance impact.
 - State what you tested and how, and include screenshots for UI changes.
+- Never edit `app/changelog.md`. The maintainer writes it by hand when publishing a release. If asked for changelog text, give it in your reply.
 
 ## MCP (Model Context Protocol)
 - Helper binary: `/Applications/TimeScroll.app/Contents/Helpers/timescroll-mcp.app/Contents/MacOS/timescroll-mcp`; exposed as an MCP stdio server named `timescroll` (Settings ▸ MCP pane). CLI equivalent: `claude mcp add --transport stdio timescroll -- "/Applications/TimeScroll.app/Contents/Helpers/timescroll-mcp.app/Contents/MacOS/timescroll-mcp"`. Claude Desktop config: `~/Library/Application Support/Claude/claude_desktop_config.json`.

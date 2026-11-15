@@ -10,6 +10,9 @@ struct SecurityPane: View {
     @State private var pendingEnableVault: Bool = false
     @State private var showVaultDisableSheet: Bool = false
     @State private var pendingDisableVault: Bool = false
+    @State private var passphraseMode: VaultPassphraseSheet.Mode = .create
+    @State private var startNewVault: Bool = false
+    @State private var confirmNewVault: Bool = false
     var body: some View {
         Form {
             Section(header: Text("Encrypted Vault")) {
@@ -22,7 +25,7 @@ struct SecurityPane: View {
                             showVaultOnboarding = true
                             return
                         }
-                        showVaultPassphrase = true
+                        presentPassphraseSheet()
                         return
                     } else {
                         // Intercept turning off to confirm. Keep toggle ON until confirmed.
@@ -78,7 +81,7 @@ struct SecurityPane: View {
                     UserDefaults.standard.set(true, forKey: "vault.onboardingShown")
                 }
                 showVaultOnboarding = false
-                showVaultPassphrase = true
+                presentPassphraseSheet()
             })
         }
         .sheet(isPresented: $showVaultDisableSheet) {
@@ -94,16 +97,41 @@ struct SecurityPane: View {
             })
         }
         .sheet(isPresented: $showVaultPassphrase) {
-            VaultPassphraseSheet(onCancel: {
+            VaultPassphraseSheet(mode: passphraseMode, onCancel: {
                 settings.vaultEnabled = false
                 pendingEnableVault = false
+                startNewVault = false
                 showVaultPassphrase = false
             }, onConfirm: { passphrase in
                 showVaultPassphrase = false
                 pendingEnableVault = false
-                Task { @MainActor in await VaultManager.shared.enableVault(recoveryPassphrase: passphrase) }
+                let replace = startNewVault
+                startNewVault = false
+                Task { @MainActor in await VaultManager.shared.enableVault(recoveryPassphrase: passphrase, startNewVault: replace) }
+            }, onStartNewVault: {
+                showVaultPassphrase = false
+                confirmNewVault = true
             })
         }
+        .alert("Start a New Vault?", isPresented: $confirmNewVault) {
+            Button("Cancel", role: .cancel) {
+                settings.vaultEnabled = false
+                pendingEnableVault = false
+            }
+            Button("Start New Vault", role: .destructive) {
+                startNewVault = true
+                passphraseMode = .create
+                showVaultPassphrase = true
+            }
+        } message: {
+            Text("Snapshots encrypted by the existing vault can't be viewed with a new vault. A copy of the existing vault's recovery file is kept in the Vault folder.")
+        }
+    }
+
+    private func presentPassphraseSheet() {
+        startNewVault = false
+        passphraseMode = vault.enableNeedsExistingPassphrase() ? .existingVault : .create
+        showVaultPassphrase = true
     }
 
     private static let intFormatter: NumberFormatter = {
